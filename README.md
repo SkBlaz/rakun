@@ -85,3 +85,8 @@ The code for reproducing sota results on datasets (in ./datasets/) is given in
 ```
 examples/validation.py
 ```
+
+# Citation
+If you use this, please cite:
+(Accepted at SLSP2019)
+TBA
