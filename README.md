@@ -1,5 +1,9 @@
-### RaKUn algorithm
+# RaKUn algorithm
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
+Key ideas of RaKUn:
+1. Transform texts to graphs
+2. Prune graphs based on token similarity (meta vertex introduction)
+3. Rank nodes -> keywords
 
 ## The core functionality
 Packed as a Python library, it can be installed via:
