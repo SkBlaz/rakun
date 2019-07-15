@@ -68,3 +68,9 @@ plt.show()
 ```
 
 ![Keyword graph](example_images/keywords.png)
+
+### reproducing sota results
+The code for reproducing sota results on datasets (in ./datasets/) is given in
+```
+examples/validation.py
+```
