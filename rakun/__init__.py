@@ -256,7 +256,7 @@ def chunks(l, n):
     for i in range(0, len(l), n):
         yield l[i:i + n]
 
-if __name__ == '__main__':
+def validate_on_corpus(datafolder):
 
     ## 500N-KPCrowd Blaž
     import glob
@@ -275,15 +275,8 @@ if __name__ == '__main__':
     edit_distance_threshold = 2
     pair_diff_length = 3
     #####################
-    folds = 5
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--datafolder",default="datasets/wiki20")
-    parser.add_argument("--visualize",default="NO")
-    args = parser.parse_args()
-    # ed,hpyt,num_tokens,count_threshold
-    ## generate results        
-    directory = args.datafolder
+    folds = 5     
+    directory = datafolder
     opt_prec = 0
     optmimum_stup = []
     
@@ -316,7 +309,7 @@ if __name__ == '__main__':
         total_ks = 0
         for filename in test_corpora:
             start = time.time()
-            keywords = find_rakun_keywords(directory+'/docsutf8/'+filename,
+            keywords,_ = find_rakun_keywords(directory+'/docsutf8/'+filename,
                                            limit_num_keywords=num_keywords,
                                            lemmatizer = lemmatizer_grid,
                                            double_weight_threshold=count_threshold_grid,
@@ -349,4 +342,3 @@ if __name__ == '__main__':
         all_f_scores.append(F1)
         optimum_setup = [precision,recall,F1,directory,pair_diff_length,edit_distance_threshold,count_threshold_grid,num_tokens_grid]
         print("RESULT_LINE"+"\t"+"\t".join([str(x) for x in optimum_setup]))
-    print(np.mean(all_f_scores))

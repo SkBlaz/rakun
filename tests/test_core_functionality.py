@@ -42,3 +42,6 @@ def test_basic_visualization():
                                    visualize_network_keywords = True)
     
     
+def test_validation():
+
+    validate_on_corpus("datasets/wiki20") 
