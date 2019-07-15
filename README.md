@@ -8,6 +8,12 @@ Packed as a Python library, it can be installed via:
 pip3 install rakun
 ```
 
+or
+
+```
+python3 setup.py install
+```
+
 ## Requirements
 To install the required libraries, we suggest:
 ```
