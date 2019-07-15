@@ -1,0 +1,1130 @@
+--T
+Declustering and Load-Balancing Methods for Parallelizing Geographic Information Systems.
+--A
+AbstractDeclustering and load-balancing are important issues in designing a high-performance geographic information system (HPGIS), which is a central component of many interactive applications(such as real-time terrain visualization. The current literature provides efficient methods for declustering spatial point-data. However, there has been little work toward developing efficient declustering methods for collections of extended objects, like chains of line-segments and polygons. In this paper, we focus on the data-partitioning approach to parallelizing GIS operations. We provide a framework for declustering collections of extended spatial objects by identifying the following key issues: 1) the work-load metric, 2) the spatial-extent of the work-load, 3) the distribution of the work-load over the spatial-extent, and 4) the declustering method. We identify and experimentally evaluate alternatives for each of these issues. In addition, we also provide a framework for dynamically balancing the load between different processors. We experimentally evaluate the proposed declustering and load-balancing methods on a distributed memory MIMD machine (Cray T3D). Experimental results show that the spatial-extent and the work-load metric are important issues in developing a declustering method. Experiments also show that the replication of data is usually needed to facilitate dynamic load-balancing, since the cost of local processing is often less than the cost of data transfer for extended spatial objects. In addition, we also show that the effectiveness of dynamic load-balancing techniques can be improved by using declustering methods to determine the subsets of spatial objects to be transferred during runtime.
+--B
+Introduction
+A high performance geographic information system (HPGIS) is a central component of many interactive
+applications like real-time terrain visualization, situation assessment, and spatial decision making. The
+geographic information system (GIS) often contains large amounts of geometric and feature data (e.g.
+location, elevation, soil type, etc.) represented as large sets of points, chains of line-segments, and
+polygons. This data is often accessed via range queries and map-overlay queries. The existing sequential
+methods for supporting the GIS operations do not meet the real-time requirements imposed by many
+interactive applications. Hence, parallelization of GIS is essential in meeting the high performance
+requirements of several real-time applications.
+A GIS operation can be parallelized either by function-partitioning [2, 3, 5, 30] or by data-
+partitioning [4, 8, 13, 17, 19, 25, 32, 33]. Function-Partitioning uses specialized data structures (e.g.
+distributed data structures) and algorithms which may be different from their sequential counterparts.
+Data-Partitioning techniques divide the data among different processors and independently execute the
+sequential algorithm on each processor. Data-Partitioning in turn is achieved by declustering [11, 27]
+the spatial data. If the static declustering methods fail to equally distribute the load among different
+processors, the load-balance may be improved by redistributing parts of the data to idle processors using
+dynamic load-balancing (DLB) techniques. In this paper, we focus on parallelizing a range-query
+operation for GIS data using the data-partitioning approach.
+1.1 Application Domain: Real-Time Terrain Visualization
+A real-time terrain-visualization system is an environment that lets users navigate and interact with a
+three-dimensional computer generated geographic environment in real-time, like other virtual environments
+[16], visualization systems [28], and distributed interactive simulation systems [1]. This type of
+system has three major components: interaction, 3-D graphics, and GIS. Figure 1 shows the different
+components of a terrain visualization system for a typical flight simulator. The HPGIS component of the
+system contains a secondary storage unit for storing the entire geographic database and a main memory
+for storing the data related to the current location of the simulator. The graphics engine receives the
+spatial data from the HPGIS component and transforms these data into 3-D objects which are then sent
+to the display unit.
+As the user moves over the terrain, the part of the map that is visible to the user changes over time,
+and the graphics engine has to be fed with the visible subset of spatial objects for a given location and
+user's viewport. The graphics engine transforms the user's viewport into a range query and sends it to
+the HPGIS unit. For example, Figure 2 shows a polygonal map and a range query. Polygons in the map
+are shown with dotted lines. The range query is represented by the rectangle, and the result of the range
+query is shown in solid lines. The HPGIS unit retrieves the visible subset of spatial data from the main
+memory and computes their geometric intersection with the current viewport of the user and sends the
+results back to the graphics engine. The frequency of this operation depends on the speed at which the
+user is moving over the terrain. For example, in the terrain visualization of a flight simulator, a new range
+query may be generated twice a second, which leaves less than half a second for intersection computation.
+A typical map used in this application contains tens of thousands of polygons (i.e., millions of edges),
+and the range-query size can be 20-30% of the total map. This requires millions of intersection-point
+computations in less than half a second. In order to meet such response-time constraints, HPGIS often
+caches a subset of spatial data in main memory. The main-memory database may in turn query the
+secondary-storage database to get a subset of data to be cached. The frequency of this operation should
+be very small for the caching to be effective.
+Secondary
+Storage
+Main
+Memory
+Graphics
+Analysis
+Display 30/sec
+feed back
+view
+range-query
+2/sec, 8kmX8km
+Set of
+Polygons
+secondary storage
+range-
+query
+Set of
+Polygons
+Engine
+High Performance GIS
+Component
+Database
+Database
+
+Figure
+
+1: Components of the Terrain-Visualization System.
+
+Figure
+
+2: A sample polygonal map and a range-query.
+1.2 Problem Formulation
+The range-query problem for the GIS can be stated as follows: Given a rectangular query box B, and a
+set SP of extended spatial objects (e.g, polygons, chains of line segments), the result of a range query
+over SP is given by the set
+where\Omega gives the geometric intersection of two
+extended objects. we call this problem the GIS-range-query problem. The GIS-range-query problem has
+three main components: (i) Approximate filtering at the polygon level, (ii) Intersection computations,
+and (iii) Polygonization of the result. (See [29] for a detailed discussion of a sequential algorithm.) Note
+that this problem is different from the traditional range query, where the objects in the given range are
+retrieved from secondary memory (disk) to main memory without clipping the objects, but it is similar
+to the polygon-clipping problem [26] in computer graphics.
+The existing sequential solutions [6, 15, 31] for the range-query problem cannot always be directly
+used as a solution to the GIS-range-query problem, due to the high performance requirements of many
+applications. For example, the limit on response time (i.e. half a second, as shown in Figure 1) for
+solving the GIS-range-query problem allows the processing of maps with no more than 1500 polygons
+(or 100,000 edges) on many of the latest processors available today, like the IBM RS6000/590 and DEC-
+Alpha (150Hz) processors. However, the maps used in many HPGIS applications are at least an order
+of magnitude larger than these simple maps. Hence we need to consider parallel processing to deliver
+the required performance.
+In this paper, we focus on parallelizing the GIS-range-query problem over a set of processors to
+meet the high performance requirements imposed by a typical HPGIS application. The goal of the
+parallelization is to achieve the minimum possible response time for a set of range queries. we use data-
+partitioning with declustering and dynamic load-balancing for parallelizing a sequential algorithm to the
+GIS-range-query problem. Figure 3 describes the steps in this scheme. The bounding box is initially
+broadcast to all processors. Each processor then executes the sequential GIS-range-query algorithm on
+the local set of polygons. After processing the local data, a processor checks for any load imbalances
+and seeks more work from another processor which has not yet finished its work. DLB methods are used
+for transferring the work between processors during run-time.
+partition
+Apprx. Filtering
+Computation
+Apprx. Filtering
+Computation
+Polygonization
+Of the result
+Polygonization
+Of the result
+Intersection
+Computation
+Intersection
+Computation
+Y
+Get
+Next
+Bbox
+
+Figure
+
+3: Different modules of the parallel formulations.
+1.3 Related work and Our Contributions
+Declustering and load-balancing are important issues in parallelization of the typical HPGIS operations
+like range-query and map-overlay operations. Several researchers have used declustering and load-balancing
+towards parallelization of the traditional range-query problems. Kamel and Faloutsos [22]
+used local load-balancing-based data declustering to maximize the throughput of range queries over
+data-sets consisting of two-dimensional rectangles. Zhou et al. [33] describe mapping-function-based
+declustering methods for parallelizing the grid files in the context of traditional range queries. Brunetti
+et al. [8] used row-wise division of two-dimensional regular grids in parallel algorithms for characterizing
+terrain data. Armstrong et al. [4] used row-wise partitioning of 2-d grids for parallelizing an algorithm
+to determine the spatial association measures for point data.
+It has been shown that customized declustering techniques based on space-division mapping functions
+[9, 33], proximity-based local load-balance [17, 19, 22, 27], and similarity graph-partitioning [27]
+are needed to effectively partition spatial data. In the case of uniformly distributed point data, it has
+been shown that the static declustering is often adequate for achieving a good load-balance, by formal
+methods [33] as well as by experimental studies [4, 8, 33]. However, the effective declustering of sets of
+extended objects has not received adequate attention in the literature.
+In the case of extended spatial objects, static-declustering methods alone might not be enough to
+achieve good load-balance. In such a case, both static partitioning and DLB techniques can be used.
+Wang [32] used dynamic allocation of work at different levels (e.g, polygons, edges) for map-overlay
+computation. In addition, several dynamic load-balancing methods have been developed [12, 20, 23, 25]
+for load-balancing in different applications. Data-Partitioning for map-overlay [32], spatial-join, and
+access methods [18, 19] is not related to the work presented in this paper.
+Declustering and dynamic load-balancing for extended spatial-data have not received adequate attention
+in the literature. In this paper, we focus on static data-declustering and dynamic load-balancing
+methods for parallelizing the GIS-range-query problem over sets of extended objects like line-segments
+and polygons. we provide a framework for declustering collections of extended spatial objects by identifying
+the following issues: (i) the work-load metric, (ii) the spatial extent of an object's work-load, (iii)
+the distribution of the work-load over the spatial extent of the object, and (iv) the declustering method.
+In addition, we also provide a framework for dynamic load-balancing for GIS operations by identifying
+the issues of (i) work transfer methods, (ii) identifying the donor processor, and (iii) the granularity
+of work transfer. we identify and experimentally evaluate alternatives for each of these issues for the
+range query operation, using vector data for Killeen, Texas. The experiments are carried out on the
+Cray T3D which is a distributed memory MIMD machine consisting of DEC-Alpha (150Hz) processors
+interconnected by a 3-D torus network.
+we show that the traditional declustering methods [27] for multi-dimensional point data need significant
+extensions to be applicable for extended spatial data. we also show that neither declustering nor
+dynamic load-balancing alone are sufficient by themselves for achieving good speedups beyond 8 proces-
+sors. Static declustering of extended spatial data is hard, due to highly non-uniform data distribution as
+well as great variation in the size and extent of spatial data. Experiments show that the spatial-extent
+and the work-load metric are important measures in developing a declustering method. we show that
+data replication is often needed for dynamic load-balancing, as the cost of local processing is usually
+less than the cost of data transfer for extended objects. In addition, experimental results also show that
+the effectiveness of dynamic load-balancing techniques can be further improved by using declustering
+methods to determine the subsets of spatial objects to be transferred during run-time.
+1.4 Scope and Outline of the Paper
+
+Figure
+
+1 shows two types of queries: First, a query to retrieve data from secondary storage to main
+memory. Second, a query (8kmX8km) to retrieve data from main memory to the graphics engine. In
+this paper, we focus on the latter type of range-queries where the data is assumed to be in the main
+memory.
+Several techniques like preprocessing the spatial data can be used to reduce the sequential cost of the
+GIS-range-query problem. The cost of the range-query processing can also be reduced by noting that
+consecutive range-queries may spatially overlap with the previous range-queries. In this case, the new
+range query can be considered as an increment of the previous range query and hence, incremental range-
+query methods can be used to solve this problem. But this incremental range-query can be expressed as
+a combination of one or more smaller range-queries.
+The GIS-range-query problem can also be solved using pre-computation of the results. For this, a
+fine grid is laid on top of the data and the intersections of all the spatial objects and the grid cells are
+computed and stored in the main memory. Since every range-query will be some combination of the grid-
+cells, the intersection results for each of the grid-cells which make up the range-query can be retrieved
+and sent to the graphics engine. On the other hand, in the case of data-partitioning approaches, large
+objects may be decomposed into smaller objects to improve the load-balance among different processors,
+thus increasing the efficiency of the solution.
+But these two approaches result in increased total work for the graphics engine, as it has to process
+more objects in the same amount of time. The cost of rendering at the graphics engine also increases
+with the increased number of polygons. In addition, the decomposition of objects requires more memory
+to store the objects. On the other hand, if the smaller pieces are to be merged again into a single
+object after the range-query operation, the merging will result in increased total work for the HPGIS
+component, as merging of the smaller objects increases the total work.
+For example, Figure 4 shows different combinations for partitioning polygonal data into smaller sets.
+These combinations can be grouped into four types: Type I has no division of data. Type II divides
+the set of polygons into subsets of polygons. However, each polygon is treated as an atomic unit and
+sub-division at the polygon level is not allowed. In contrast, type III divides the areas of individual
+polygons/bounding-boxes among different processors. Type IV schemes divide both the areas and the
+edges of individual polygons and the bounding box. The potential advantage of type III and IV schemes
+over a type II scheme is the possibility of better load-balance and less processor idling, resulting in
+reduced parallel computation time [32]. However, note that types III and IV schemes result either in
+increased total work or in increased work for the polygonization of the result.
+Options
+for
+Dividing
+Bounding
+subsets subsets of
+Division
+into
+Divide
+divide
+into
+Edges
+I
+IV-d
+III-a
+III-d
+IV-e
+IV-c
+small boxes
+of polygons small polygons subsets
+of edges
+II IV-a
+III-c
+III-b IV-b
+IV-f
+Options for Dividing the Polygon Data
+
+Figure
+
+4: Alternatives for Polygon/Bounding-Box division among processors.
+Let Tcomm be the response-time overhead, due to additional communication cost, or the increased
+cost for the polygonization of the resulting polygons for type III and IV schemes. The gain in parallel-
+computation time due to improved load-balancing is bounded by the difference between the ideal value
+(T seq =P ) and the actual TP value achieved by a type II scheme. The net gain in response time by any
+type III or IV scheme over a type II scheme is bounded by [T P (scheme II) - Tseq
+This gain is
+positive only when polygon-size distributions are extremely skewed, leading to high load imbalances for
+type II schemes. Even though these techniques can potentially increase the load-balance and response
+time for the GIS-range-query, we do not consider these techniques in this paper. In the rest of this
+paper, we focus only on type II schemes.
+The rest of the paper is organized as follows. In Section 2, we discuss the issues in declustering
+extended spatial data. In Section 3, we present the experimental results for different issues in declustering
+spatial data. In Section 4, we discuss the dynamic load-balancing issues in GIS. In Section 5, we present
+the experimental results for DLB issues in GIS. Finally in Section 6, we present the conclusions and
+future work.
+Declustering Spatial Data
+The goal of a declustering method is to partition the data so that each partition imposes exactly the
+same load for any range query. Intuitively, the polygons close to each other should be scattered among
+different processors such that for each range query, every processor has an equal amount of work. For
+example, consider the raster representation of a set S of spatial vector objects in a 2-d plane. Suppose
+that each point of the raster representation is associated with the work-load of the vector objects that
+pass through that point. Now consider the distribution D of this work-load associated with each point.
+For example, the distribution might look like the surface shown in Figure 5. Now consider another
+distribution DP , which is the scaled down version of the distribution D, by a factor of P . Suppose that
+the set S is declustered into P subsets so that each subset is assigned to a different processor. Then
+if each of the P subsets has the work-load distribution DP , the work-load imposed for a query will be
+equal at all the processors. Hence, this data-partitioning achieves the goal of optimally declustering S
+into P subsets.
+Distribution D515
+0102050150250Distributions D_P
+
+Figure
+
+5: An example of work-load distributions for P=2
+Optimal declustering is not achievable in all cases due to the non-uniform distribution and variable
+sizes of polygons (or chains of line-segments). In addition, the load imposed by each polygon (or chain)
+for a query operation is a function of the size and location of the query. Since the location of the query
+is not known a priori, it is hard to develop a strategy that will be optimal for all queries. In general,
+there exists no algorithm which can achieve the ideal declustering for all 2-d range-queries for more
+than 5 processors [33]. Even in cases where it is possible to achieve the ideal declustering, it is hard to
+determine this partitioning, since the declustering problem is NP-Hard, as shown below.
+Definition 1. The optimization version of the GIS-Declustering problem: Given a set S of extended-
+objects, P processors, and a set of n range-queries, partition the set S among P
+processors such that the load at each processor is balanced for all Q Q. The load of an object x 2 S
+for a given range-query Q i is given by a function f i
+is the set of non-negative integers.
+Definition 2. The decision version of the GIS-Declustering problem: Given a set S of extended-
+objects, P processors, and a set of n queries, is there a partition of set S into P
+subsets , such that
+Theorem. The GIS-Declustering problem is NP-Hard.
+Proof. we reduce the PARTITION problem [14] to the GIS-Declustering problem. An instance of
+the PARTITION problem is defined as follows: Given a finite set A and a "size" s(a) for each
+a 2 A, is there a subset A 0 ' A such that:
+s(a) (2)
+This problem can be transformed in polynomial time to an instance of the decision version of the
+GIS-Declustering problem with
+Hence, we conclude that
+the GIS-Declustering problem is NP-Hard. 2
+Since the declustering problem is NP-Hard, heuristic methods are used in practice for declustering
+extended spatial data. In this section, we identify the issues for declustering sets of extended spatial
+objects and develop heuristic methods for declustering maps with extended objects.
+2.1 Issues in Declustering Spatial-Data
+There are three major issues in declustering sets of extended spatial objects: the work-load metric, the
+spatial-extent of work-load, and the load-density over the spatial-extent.
+Work-Load Metric
+The load imposed by a spatial object is a function of the shape and extent of the object. In the case
+of point data, this load may be uniform, i.e., the same for all spatial points. In the case of chains of
+line-segments, this load may be a function of the number of edges, and in the case of a polygon, the load
+may be a function of the number of edges and/or the area of the polygon. For example, as the number
+of edges increases, the work for each range query also increases, due to the increase in intersection point
+computations or the increase in size of the result. Similarly, an increase in the area of a polygon (with
+the number of edges being fixed) results in more range queries intersecting the polygon. So in the case
+of an extended spatial object A, either the area, the number of edges, or the actual intersection points
+with the query boundary can be used in estimating the work-load (denoted by load(A)) for A.
+we note that for extended spatial data, there is no accurate method of estimating the amount of
+work other than to actually solve the problem. The number of edges/points in a spatial object may not
+accurately reflect the amount of work required for that object for a particular range query, and we can
+only get a rough estimate of the work by the work-load metric.
+The Spatial Extent of the Work-Load
+The spatial extent of the work-load is defined as the region R(A) of space affected by an object A, i.e.
+if a query Q overlaps with R(A), then the work required to process Q is influenced by the object A.
+Usually, R(A) depends on the space occupied by object A. However, it is often expensive to use the exact
+geometry of each spatial object in estimating the extent of that object. Thus, approximate geometries
+are considered in estimating the spatial extent. Spatial-Extent R(A) is often approximated
+if A is approximated with a point
+if A is approximated with a box
+if A is approximated with n boxes
+For example, when bb(A) is the smallest rectangular box enclosing the object A and is represented by
+its two corners function may be defined as:
+
+Figure
+
+6 shows some example polygons with different approximations of the extent of the work-load.
+The figure also shows a sample range query in dotted lines. Polygon A is approximated with a point
+which is shown in the middle of the polygon. The main drawback of the point approximation is that
+even though the object is in the region of interest (e.g, Q 1 ), it might be still be considered to be outside
+if the point lies outside that region, as shown in the case of polygon A. Alternatively, the bounding box
+approximation can be used, as shown in Figure 6, for polygons A, B, C, and E. The drawback with this
+approximation is that even though the polygon is not in the region of interest, the bounding box might
+still be in the region of interest, as shown for polygon E. Alternatively, multiple bounding boxes may be
+used to represent a polygon, as shown for polygon D. But note that even though a greater number of
+bounding boxes gives a better representation of the spatial extent of the work, it is also more expensive
+to construct this kind of representation.
+A C
+query Q_1
+
+Figure
+
+Examples of approximations for the extent of the work-load.
+Load Density for Spatial Extent
+In the case of extended objects, the distribution (or density) of the work-load over their spatial extent
+affects the declustering decisions. If it is expensive to determine the actual work-load distribution, an
+approximate distribution or a uniform distribution may be used instead of the actual distribution. An
+approximate distribution of the work can be determined by considering multiple bounding boxes or by
+dividing the region into small cells and counting the work in each of the cells.
+For example, in the case of polygon B shown in Figure 6, the clipped load (denoted by
+clipped load(B; corresponding to query Q 1 (shown by the dotted line) can be estimated in different
+ways. If we assume that the work-load distribution of the polygon is uniform in the bounding box
+of polygon B, then we can compute the clipped load as:
+clipped load(B;
+area(bb(B))
+\Theta load(B) (4)
+Note that this work estimate may be inaccurate in a few cases. For example, an edge-based work-load
+metric coupled with an assumed uniform work-load distribution overestimates the work required for
+polygon C for range-query Q 1 , and an area-based work-load metric coupled with a uniform work-load
+distribution overestimates the work required for polygon E for range-query Q 1 .
+2.2 Declustering Methods
+Since the declustering problem is NP-Hard, heuristic methods are used for declustering spatial data.
+Here, we describe three heuristic methods based on the ideas of space-partitioning with mapping-
+local load-balance, and similarity-graph. In addition, we propose a new population-
+distribution-based declustering method for declustering spatial data. For simplicity, we describe these
+methods for polygon data, but they can be applied to other extended spatial objects as well.
+2.2.1 Space-Partitioning Mapping Functions
+Space-Partitioning mapping-function-based methods provides a mapping function from the domain of
+data items to the set of processor IDs. For example, a mapping function can be based on the Hilbert
+Space-filling curve [7, 21]. (See [10] for a survey of other mapping functions.) The Hilbert curve gives a
+total ordering of points in 2-dimensional space. Polygons can be declustered using the Hilbert method
+as follows.
+Let L s be the set of input objects, and let L p be the ordered list of polygons corresponding to the
+Hilbert order for the set and let n be the number of polygons in the list. The
+polygons in the list are then assigned to each processor in a cyclic manner. That is, the polygons in the
+list L p with indices are assigned to the ith processor.
+2.2.2 Local Load-Balance (LLB) Method
+Local load-balancing methods [22] consider a sample window of space (based on the frequent range-
+queries) and try to equally distribute the load in that window to all the processors. The local load-balance
+method with a parameter window W has the following steps: (i) From the set of polygons
+, assign the first P polygons to P processors, (ii) For the next polygon in the list, consider the load
+corresponding to window W at each processor and select the processor with the minimum load, and (iii)
+Assign the next polygon to that processor. Repeat the steps (ii) to (iii) until all the polygons have been
+assigned.
+At step (ii) of the above method, a processor with the minimum load is selected as follows. Let
+clipped load(p j ; W ) such that p j is at processor i. Then select processor k such
+that weight(W; i) for is minimum at
+2.2.3 Similarity-Graph Method
+The similarity-graph declustering method [27] has been shown to outperform other methods for declustering
+non-uniformly distributed data. This is a heuristic method based on the max-cut graph-partitioning
+of a weighted similarity-graph (WSG), where WSG models the data and some properties of the queries.
+As in the case of the LLB method, a rectangular window W can be used as a sample query for
+efficiency. The WSG is then constructed w.r.t. this window W by assigning clipped load(v; W ) as t(v)
+for each object v in the input. In our experimental study, we use the incremental max-cut partitioning [27]
+approach for declustering the spatial data. See Appendix A for details of the similarity-graph declustering
+method and how it can be applied to extended spatial-data.
+2.2.4 Population Distribution-Based (PDB) Method
+The goal of a population-distribution-based declustering method is to achieve identical load distribution
+on each partition of the data. we discuss an example of the population-distribution-based method for
+declustering polygonal data. The basic idea behind this method is to partition the data sets into groups
+of similar work-load distribution over the entire space, as shown in Figure 5. The work-load distributions
+in each group over the entire space are compared for allocating a new object to a group. The new object is
+allocated to a group such that the statistical difference between the different groups is minimal. However,
+tracking and comparing two distributions for statistical differences is expensive. An economical but less
+accurate method is to use an approximate distribution instead of the actual work-load distribution. we
+use a pair of discrete 1-d distributions to approximate the actual 2-d distribution.
+This method uses the actual intersection points of polygons with a grid consisting of vertical and
+horizontal scan-lines imposed on top of the polygonal data as shown in Figure 7. Assume that there are
+scan-lines parallel to the x-axis and m scan-lines parallel to the y-axis. Then let f(x i
+be the number of intersection points of the line all the polygons in the input. Similarly, let
+n, be the number of intersection points with the line
+Without loss of generality, let the polygons in the input be To distribute these polygons
+among the processors, allocate the first P polygons P processors such that polygon p i is assigned to
+the ith processor. For the next polygon pw , determine the distribution of intersection points for all the
+assigned polygons plus the current polygon and scale down the distribution by P . Let this distribution be
+the base-distribution. That is, base distributions f w are similar to f(x i ) and g(y i ),
+
+Figure
+
+7: Distribution-Based Method.
+but the base distributions contain the intersection points of polygons
+different assignments of polygon pw to P processors, and estimate the total population mismatch due
+to each assignment. The total population mismatch of an assignment is estimated as the sum of the
+squared differences of the distributions at each processor with the base-distribution. Then select the
+processor corresponding to the minimum population mismatch as the processor for assigning the current
+polygon. The minimization function for assigning polygon pw is given as:
+min
+where the current polygon pw is temporarily assigned to the lth processor in each iteration of the minimization
+function, and f i and g i are the distribution functions (corresponding to f and g, respectively)
+at the ith processor. Note that f i and g i contain the intersection points of only those polygons which
+are assigned to the ith processor.
+Complexity of the PDB Method for Allocating 1 Polygon
+The innermost sum of Equation 5 takes \Theta(n+m) time, and since this sum is computed for each processor,
+it takes \Theta(P (n for the double summation. Since there are P iterations of this double sum
+(i.e. P iterations of the minimization function), it takes a total of \Theta(P 2 (n +m)) time for a brute force
+implementation of this method. But note that between two iterations of the minimization function,
+only four terms of the innermost summation change at each processor. Hence we need not compute
+the entire sum for each iteration of the minimization function, as we can reuse the rest of the terms
+from the previous iteration. Hence, after the first iteration of the minimization function, each further
+iteration takes a constant amount of time. This reduces the overall complexity of the PDB method to
+3 Experimental Evaluation of Declustering Issues
+we compare the performance of different alternatives for each of the issues in declustering extended
+spatial objects for a range of map sizes and for different number of processors via experiments carried
+out on the Cray T3D parallel computer.
+we use spatial vector data for Killeen, Texas, for this experimental study. This data is divided into
+seven themes representing the attributes slope, vegetation, surface material, hydrology, etc. we used the
+"slope" attribute-data map with 729 polygons and 41162 edges as a base map in our experiments (this is
+denoted by 1X map). For studying the effect of increased map size, we derived new maps from this base
+map using the following method: Scaling down the base map along the x-axis by two and combining
+two such scaled-down maps by translating one of the scaled-down maps along the x-axis. This results in
+a map of 1458 polygons with 82324 edges (2X map). A similar technique is used by alternately scaling
+down along the y-axis and the x-axis to get maps of different sizes. we also use the chain data from
+Fort Sill which has 9667 creeks with 188,678 edges, as shown in Figure 8. Table 1 shows the details of
+the maps and the range queries.
+
+Figure
+
+8: Creek data map with a sample range query.
+
+Table
+
+1: Maps and range queries used in our experiments
+Map #Objects #edges range-query
+size number
+polygons 41162 25% 75
+polygons 82324 25% 75
+polygons 164648 25% 75
+8X 5832 polygons 329296 25% 75
+Creek 9667 chains 188,678 20% 75
+3.1 Experimental Methodology
+The issues in declustering are studied by comparing the performance of different methods for a set of
+range queries. For this, a sequence of 75 range queries is constructed such that the sequence of the
+center points of the range query represents a random walk on the data set. Post-processing is done on
+this sequence to ensure that all range queries are unique and that the range-query lies completely within
+the map. The size of each range query is approximately 25% of the total area of the map. In all our
+measurements, we obtain the run time of the program for each of the 75 queries and report the observed
+mean of these 75 values. Figure 9 shows our experimental methodology. The number of different options
+we tried for each parameter is shown in parentheses, and the number of possible combinations after each
+module is also shown in the figure.
+we restrict our experiments to due to the memory limitation. Individual
+nodes on Cray T3D have only 64 MBytes of main memory, limiting the size of the map (4X) for which
+sequential run-time can be measured directly. This map (4X) does not have adequate work for each
+processor beyond P?16 as is evident from the absolute run-times (- 0:05 sec) shown in Tables 2 and 5.
+generator
+work-load
+G
+I
+spatial-extent
+(b'box,point)
+Map Generator
+size of sample
+window (30%,100%)
+load-density
+(uniform, apprx)
+range
+queries
+#of range-queries
+desired
+size of
+range-query
+Decluster
+work-load
+(#edges,
+area)
+(1,2,4,
+size
+Map
+(1X,2X,
+4X,8X,
+Base
+declustering-method
+options
+measurements
+Analysis Data collection5 maps
+
+Figure
+
+9: Experimental Method for Evaluating Declustering Methods.
+In our experiments, we only measure and analyze the cost per range-query and exclude any preprocessing
+cost. This preprocessing cost includes the cost of loading the data into main memory and the
+cost of declustering the data among different processors. Note that this preprocessing cost is paid only
+once for each data set that corresponds to the current window of interest. As the query range moves out
+of the current window, new data is fetched from the disk discarding data for the old window. Since the
+next location of the window can often be predetermined, preprocessing the new data need not affect the
+performance of the rest of the system. Moreover, once a new data set is loaded into the main memory,
+it would be active for several minutes before the window has move out of the current range. Thus,
+this would leave several minutes for preprocessing the next data set. Hence, in this study, we are only
+interested in measuring the performance of our algorithm in terms of the variable cost per range query
+for the preprocessed data.
+3.2 Experimental Results
+we conduct experiments to study alternatives for each of the following issues: the work-load metric, the
+spatial extent of the work-load, and the load density over the spatial extent. In addition, we compare
+the different declustering methods: Local Load-Balance, Similarity-Graph, and PDB.
+In these experiments, the data is initially distributed among different processors. A processor acts as
+the leader processor and is responsible for broadcasting each range query to the rest of the processors.
+After receiving the range-query information, each processor works only on its local data until all the
+local data is exhausted. After the local data is processed, the processor waits for the next range query
+to be processed. The lead processor waits for all the processors to finish the work before broadcasting
+the next range query. Note that the only communication required for each bounding box is a broadcast
+of the parameters of the range query.
+3.2.1 Comparison of Alternatives for Work-Load Metrics
+we compare the area and the number of edges as alternatives for the work-load metric in the case of polygonal
+data. The spatial extent of the work-load is based on the bounding-box approximation, and the load
+density over the spatial extent is assumed to be uniform. Thus the clipped load(polygonP; windowW ) is
+estimated using Equation 4. we used the LLB method with a sample window of 30% as the declustering
+metric. The number of processors P varies from 2 to 16 and the 4X map is used as the data set.
+The results of this experiment are shown in Figure 10(a). The x-axis gives the number of processors,
+and the y-axis gives the average speedups for 75 range queries. The main trends observed from this
+graph are: (i) Number of edges as the work-load metric results in better speedups and hence appears
+to be a more accurate work-load metric for 4), the difference between the
+two work-load metrics is negligible.
+3.2.2 Comparison of Alternatives for the Spatial-Extent of the Work-Load
+we compare point and bounding-box approximators as alternatives for the spatial-extent of the work-load
+in the case of polygonal data. The work-load metric is fixed to be the number of edges, and the load
+density over spatial extent is assumed to be uniform. we used the LLB method with a sample window
+Number of Processors
+"llb_edge_box"
+"llb_area_box"2468
+Number of Processors
+"llb_edge_box"
+"llb_edge_point"
+(a) (b)
+
+Figure
+
+10: Speedups for LLB method for 4X map.
+of 30% as the declustering method. The number of processors P ranges from 2 to 16 and 4X map is
+used as the data set.
+The results of this experiment are shown in Figure 10(b). The x-axis gives the number of processors
+and the y-axis gives the average speedups for 75 range-queries. The main trends observed from this
+graph are: (i) The bounding-box approximator for the spatial extent results in better speedups, and
+hence appears to be a more accurate estimator for 4), the difference
+between the two estimators is negligible.
+3.2.3 Comparison of Different Declustering Methods
+we compare the performance of different declustering methods: Hilbert, LLB, similarity-graph, and
+PDB. In addition, we compare the effect of the size of the sample window on the performance of
+similarity-graph and LLB methods. For simplicity, the work-load metric is fixed to be the number of
+edges, and the spatial extent is assumed to be a point. The load-density over the spatial extent is
+assumed to be uniform in the case of LLB and similarity-graph methods.
+
+Figure
+
+11 gives the results showing the effect of sample window size for LLB and similarity-graph
+methods. The x-axis gives the number of processors and the y-axis gives the average speedups for 75
+range-queries. In Figure 11, "llb-30" ("sim-30") refers to the LLB (similarity-graph) method with a
+sample window which is 30% of the total area of the map. Similar notation is used for a 100% window
+for both methods. The main trends observed from these graphs are: (i) Increased window sizes gives
+increasing speedups. (ii) For the LLB method, the increase in speedup from a 30% window to a 100%
+window is negligible.
+
+Figures
+
+12 and 13 show a comparison of different declustering methods for polygon and chain data,
+respectively. In these figures, the x-axis gives the number of processors, and the y-axis gives the speedup
+number of proceccors
+"sim-100"
+"llb-100"
+"llb-30"
+"sim-30"24681012
+number of proceccors
+"sim-100"
+"lldb-100"
+"lldb-30"
+"sim-30"
+(a) (b)
+
+Figure
+
+11: Speedups for LLB and Similarity-Graph methods for different window sizes. Speedups for
+maps 2X and 4X are given in (a) and (b) respectively.
+value. The main trends observed from these graphs are: (i) Bigger maps lead to better speedups for
+most schemes, probably due to the improved load-balance. (ii) Similarity-Graph and PDB methods give
+the best speedups among the different methods. (iii) Speedups are better for the chain data than for
+the polygon data. This may be due to less variance in work-loads for line data, when compared to the
+polygon data. (iv) Mapping-Function-Based methods like Hilbert provide inferior speedups beyond 8
+processors. (v) Even the best declustering method does not provide good speedups for more than 8
+processors, for the maps used in our experiments.
+3.3 Comparison of Static Load-Balancing
+The effectiveness of declustering methods in achieving load-balance is shown in Table 2. The data shown
+in
+
+Table
+
+2 is represented as Mean \Sigma SD for the 75 range queries used in our experiment. The column
+Avg: Static gives the average static execution time over 16 processors and 75 range queries. The column
+Max: Static gives the maximum static execution time over 16 processors, averaged over 75 range queries.
+In this experiment, we observe that the static declustering alone does not achieve a good load-balance,
+and that the static methods need to be augmented with dynamic load-balancing.
+
+Table
+
+2: Performance Evaluation of SLB for
+Method Avg. Static Max. Static Speedup
+SIM 0:0454 \Sigma 0:003 0:0621 \Sigma 0:004 11.70
+PDB 0:0454 \Sigma 0:003 0:0626 \Sigma 0:004 11.60
+LLB 0:0454 \Sigma 0:003 0:0660 \Sigma 0:003 11.00
+speedup
+number of proceccors
+"hilbert"
+"sim-100"
+"llb-100"
+number of proceccors
+"hilbert"
+"sim-100"
+"llb-100"
+"PDB"
+(a) (b)
+
+Figure
+
+12: Speedups for different static-declustering methods. Speedups for maps 2X and 4X are given
+in (a) and (b) respectively.
+4 Dynamic Load-Balancing (DLB) Techniques
+If static declustering methods fail to equally distribute the load among different processors, the load-balance
+may be improved by transferring some spatial objects to idle processors using dynamic load-balancing
+techniques.
+4.1 DLB Issues in GIS
+A typical dynamic load-balancing technique addresses three issues: (i) what methods are good for
+transferring work (spatial objects) between two processors, (ii) how much more work should an idle
+processor fetch, and (iii) which processor should an idle processor ask for more work.
+4.1.1 Methods for Transferring the Work
+Extended spatial objects are large (e.g., 50 edges on average in maps of Killeen, Texas) in size and
+require special data structures for solving the range-query problem. Hence, sometimes it may be more
+expensive to send the complete object data and the corresponding data structures to another processor
+than to solve the problem locally. To compare the relative costs of local processing and data transfer,
+we develop cost models for these two operations.
+The cost of computing the intersection of range query Q with a polygon A depends on whether A
+intersects Q or not. For example, if A is completely inside Q, it can be detected in a constant amount
+of time. On the other hand, if A intersects Q, the cost of intersection computation and polygonization
+depends on the number of intersection points and the size of the result. Let p 0 be the probability that
+speedup
+number of proceccors
+"hilbert"
+"sim"
+"llb"
+"PDB"
+
+Figure
+
+13: Speedups for different static-declustering methods for line data.
+a polygon intersects at least one of the edges of the range query, and let x be the number of edges of A.
+Then the sequential cost T s (A) is given by:
+where ff 0 is the fraction of the edges of A that actually intersect Q, and t c is the cost of one step of com-
+putation. For simplicity, we assume that the cost of the intersection computation and the polygonization
+of the result is a linear function of (ff 0 p 0 x). Constant C 2 accounts for checking if the bounding-box of a
+polygon is completely inside or completely outside the query box Q. Since this test can be performed
+using 8 comparisons, C Typically, for the data used in our experiments.
+Similarly, transfer cost T t (A) can be modelled as a linear function of the number of edges x as:
+Here constant C 3 is included to account for the transfer, packing, and unpacking of the datastructures
+and the data associated with A, and typically C 3 ? 2. Assuming t cost T t is
+more than local processing cost T s when:
+For the GIS-range-query computation, the value of x is small (close to 1). This implies that even for
+small objects, the transfer cost T t is more than the local processing cost. we note that even when t s ? 0,
+this relation remains the same. This drawback may be overcome by selectively duplicating the data on
+different processors and exchanging only the object IDs. Since the object ID is only a word of data,
+this will result in minimum communication overhead for each data transfer. Note that this replication
+of data at different processors results in memory overhead.
+4.1.2 Partitioning Method and Granularity of Transfers
+Granularity of work division determines how much work is transferred between a donor processor and an
+idle processor. This granularity may depend on the size of the remaining work, the number of processors,
+the cost of the work transfer, and the accuracy in estimating the remaining work. Several strategies
+like self-scheduling [12], factoring scheduling [20], and chunk scheduling [23] exist for determining the
+amount of work to be transferred. Also, the simplest case of transferring one piece of work at a time is
+also considered in some cases.
+If communication cost is negligible or very small when compared to the average cost of solving the
+range-query problem for a set of objects, chunks of single objects may yield the best possible load-
+balance. On the other hand, chunks of more than one object are suitable if the communication cost is
+comparable to the average cost of solving the range-query problem for a set of objects (which is true for
+most of the distributed memory systems). In the case of chunks of more than one object, it is desirable
+to keep a comparable amount of work in each chunk, so that the load-imbalance can be kept low.
+we note that this problem of dividing work into chunks of equal work is similar to the static declustering
+problem. Even though the traditional DLB methods use simple methods like random partitioning,
+round robin, etc., we hypothesize that the load-balance of any DLB method can be improved by using
+a systematic declustering method for dividing the work into chunks. Since the declustering operation is
+very expensive, this chunking can be done statically. Also note that, for simplicity, we do not consider
+dynamically variable size chunks in this paper.
+4.1.3 Which Processor Should an Idle Processor ask for More Work?
+Methods to decide which processors an idle processor should ask for more work are discussed and analyzed
+in [24, 25]. These methods can be divided into two categories: (1) In a pool-based method (PBM), a
+fixed processor has all the available work, and an idle processor asks this fixed processor for more work.
+(2) In a peer-based method, all the work is initially distributed among different processors, and an idle
+processor selects a peer processor as the work donor using random polling, nearest neighbor, and global
+round robin (GRR) or asynchronous (local) round robin (ARR).
+Pool-Based Method
+The structure of the GIS-range-query problem imposes a limitation on the amount of work that can
+be kept in the shared pool. If all the work is initially at a single processor, the approximate filtering
+computation for each range query cannot be parallelized. As a result of this non-parallelizable work,
+the rest of the processors have to wait for a single processor to finish the filtering computation before
+fetching the objects for intersection computation.
+This processor idling can be avoided by initially partitioning the data into two parts: Static and
+Pool. Initially, the Static part of the data is declustered into P sets to ith
+processor for . The Pool part of the data is then assigned to a leader processor (processor 1).
+For each range query, each processor other than the leader processor starts working on the local data
+corresponding to the Static part. The leader processor first completes filtering the Pool, and then starts
+working on its local data which corresponds to the Static part. This situation is shown in Figure 14.
+Process S_2 DLB
+Process S_P DLB
+Process S_2
+Process S_P DLB
+ApprxFil(Pool) Process S_1 DLB ApprxFil(Pool) Process S_1 DLB
+Small Pool Large Pool
+(a) (b)
+
+Figure
+
+14: A Small pool may result in high a static load imbalance. A Large pool may result in processor
+idling.
+If any of the processors finish work on their local data before the filtering step for the Pool part is
+finished, that processor would have to wait for the lead processor to finish the filtering work with the
+Pool part of the data, as shown in Figure 14(b). This idling in turn results in increased run time, which
+decreases the performance of the algorithm. Hence, there should be enough work at each processor so
+that the filtering step for the Pool can be completed without leading to any processor idling. But on the
+other hand, the Static work at each processor should not be so much that the static load-imbalance is
+too high. A high static load-imbalance can also result in processor idling, as shown in Figure 14(a).
+Let W be the total work required to solve the range-query problem and let j be the fraction of the
+total time spent in approximate filtering (i.e., the stage of range-query computation). Also, let ' be the
+load imbalance due to the static declustering of the data. That is, if the total work W is declustered
+among P processors, the maximum time taken by a processor is W (1 and the minimum time
+taken is W Further, assume that t o =P is the overhead incurred due to the parallelization.
+Here t o is the increase in total run-time due to the communication overhead and processor idling.
+Suppose x fraction of the total work is taken as the Pool data. Then, the P ool should be large enough
+to overcome the static load imbalance incurred due to the Static part of the data (Figure 14(a):
+Also, the filtering cost jxW for the P ool should be less than the maximum time corresponding to the
+Static work (Figure 14(b)):
+Combining Equations 7 and 8 we get the lower and upper bounds for pool size as:
+
+Table
+
+3 gives sample upper and lower bounds for x, estimated using Equation 9. The parallel overhead
+t is assumed to be zero and j is assumed to be 0.05.
+
+Table
+
+3: Estimated lower and upper bounds for pool size with
+LowerBound
+UpperBound 0.80 0.78 0.66 0.63 0.48 0.46
+Peer-Based Methods
+In peer-based methods, data is divided among all processors with no common pool, and an idle processor
+asks another peer-processor for more work. In this paper, we evaluate the global round robin (GRR)
+and asynchronous round robin (ARR) methods for the GIS-range-query problem. See [24] for a complete
+discussion of these two algorithms.
+In GRR, a single processor acts as the scheduler and is responsible for sending the ID of the next
+available processor with work to a requesting idle processor. The idle processor then requests work
+from this processor which has more work. The main drawback of such a scheme is that the scheduler
+processor may become a bottleneck as the number of processors increases. In our experimental study,
+this bottleneck is not significant, as the number of processors is relatively small, i.e., less than 32.
+In ARR, every processor maintains a local target pointer. Whenever a processor runs out of work, it
+uses the target pointer as the label of a donor processor and sends it a work request. The target value is
+incremented modulo P each time a work request is sent. If the processors that receives the request has
+more work, it sends some work to the requesting processor. Otherwise, the requesting processor sends
+another request to the next processor given by the target pointer until more work is received from a
+donor processor.
+Note that of these two methods, the ARR method does not have the single processor bottleneck
+as in the case of GRR. But the ARR method needs extra work to check for termination detection,
+since there is no single source of information about the remaining work for each range query. Hence,
+the advantage of this method over GRR may be offset due to the termination-detection overhead. For
+the GIS-range-query problem, the performance of these two methods may be comparable, for up to 16
+processors.
+4.2 A Framework for Parallel Formulations
+In our approach, we use declustering at the static and dynamic load-balancing levels. we present a
+general framework for this method which can be used with any of the declustering and DLB methods
+discussed so far. This is a two-phase scheme, since we use an initial static declustering of the data and
+use additional load-balancing at run time. Pseudocode for this general method is given in Figure 15.
+In the following discussion, let P be the number of processors used in the system. Initially, all the
+data is declustered into two sets, S a and S b . The set S a is used as the static data: Once the objects
+from this set are allocated to a processor, that processor alone is responsible for processing these objects.
+That is, objects from this set are never transferred between processors during the DLB phase. Similarly,
+the set S b is used as the dynamic data: Objects from this set can be transferred between processors
+during the DLB phase. we call the set S b the shared pool of data, since the objects from this set can
+be shared between processors during the DLB phase.
+This initial declustering of the data into two sets is done depending on the desired size of the shared
+pool of polygons and on the number of processors. (In the following section, we experimentally show
+the variation in the size of S a across a different number of processors.) The data in S a is statically
+declustered into P sets S i
+a , and each processor P i is assigned the set S i
+a , for 1). The choice
+of the declustering method is determined by the number of processors, the type of data, and the data
+distribution.
+The data in S b is also statically declustered into x buckets and is replicated at all the processors.
+Again, note that any of the static-declustering methods discussed so far can be used for this static-
+declustering purpose. The value of x is dependent on the size of S b , the number of processors, and the
+communication cost. Hence, this parameter should be tuned depending on the data.
+When a bounding box for the next range query is received, a designated lead processor (for example
+processor broadcasts the bounding-box parameters to all the other processors in the group. After
+receiving the bounding-box parameters, each processor P i performs the approximate polygon-level filtering
+and retrieves the candidate polygons from its local data set S i
+a and places the result in set L i . In
+addition, each of the processors performs the approximate filtering for the data from set S b , and keeps
+the resulting object IDs in a dynamic set, such that the set of object IDs from each of the x buckets is
+in a separate bin. Each processor P i then independently works on data from the set L i until no more
+objects are left in this set.
+When a processor P i finishes work on the data from L i , it goes into the DLB mode. In this mode,
+only the data from the dynamic set are used for dynamic load-balancing. The work is transferred by
+transferring a bin of object IDs between processors. The algorithm terminates when the DLB method
+terminates.
+VAR local data: Array [pidSet] of objects map[i] to processor i using DECLUSTER();
+corresponding to data from S a  /
+VAR global data: Array [pidSet] of objects map[i] to processor i using DECLUSTER();
+corresponding to data from S b  /
+BEGIN
+one to all broadcast(0, pidSet, bbox);
+phase  /
+parallel for(pid in pidSet) do
+sequential algorithm(local data[pid]);
+goto the DLB phase  /
+parallel while (more work) do
+object next(object IDs from next unprocessed bucket id);
+sequential algorithm(object ids);
+END
+
+Figure
+
+15: Pseudo-code for Parallel Formulation.
+5 Experimental Evaluation of DLB methods
+we compare different DLB methods when applied to the range-query problem over a set of extended
+spatial objects. we use the framework given in Figure 15 for implementing the the parallel range-query
+algorithm. Our experiments are carried out on the Cray T3D parallel computer using the polygonal
+data described in Table 1.
+The alternatives for each of the DLB issues are evaluated by comparing their average performance
+over a set of 75 range queries. In these experiments, the similarity-graph method with a 100% window
+is used as the static declustering method, unless mentioned otherwise. For simplicity, number of edges is
+used as the work-load metric in the static declustering of data. Similarly, the spatial extent is assumed to
+be a point and the load-density is assumed to be uniform. Figure 16 shows our experimental methodology
+for evaluating the DLB issues. The number of different options we tried for each parameter is shown in
+parentheses, and the number of possible combinations after each module is also shown in the figure.
+The message start-up time t s for the Cray T3D is about 100 nano seconds, i.e., 0.1 micro seconds. To
+study the effect of parallel formulations on different communication networks, we simulate the different
+networks by increasing the value of t s (0.1, 10.1, and 100.1 - sec).
+5.1 Evaluation of Work-Transfer Strategies
+Work-Transfer strategies can be compared on the basis of following two parameters: (i) The average cost
+T t of transferring the complete object data, including the data structures, from one processor to another
+processor, and (ii) the average cost T s of solving the GIS-range-query (after polygon-level filtering) on
+a single processor. Here T t includes the cost of packing and unpacking any data structures related to
+the polygons after the filtering and the cost of sending the packed data from one processor to another
+processor.
+
+Table
+
+4 shows actual experimental values for T s and T t for 5 randomly chosen range queries
+Analysis Data collection
+Map Generator
+Map
+Base
+size
+4 maps
+range
+queries
+size of
+range-query
+measurements
+Decluster
+pool size
+(1,2,4,
+methods
+(GRR,ARR,PBM)
+options
+partitioning/declustering
+method
+Parallel
+HPGIS generator
+work-load
+#range-queries
+desired=75
+Figure
+
+Experimental Method for Evaluating DLB Methods for the parallel GIS-range-query.
+over the polygonal data from the 2X map. The table also shows the average values of
+range-queries over 2X map: As shown in Equation 7, note that T t is consistently more
+than T s in all these cases and that this gap will be more for other parallel computers such as CM-5,
+IBM SP-2, as t s is substantially higher for these machines. This result is consistent with the analysis
+shown in Equation 7. From this we conclude that it is not desirable to transfer the complete polygon
+data between processors at run time. Instead, only the polygon IDs should be transferred at run time.
+This is facilitated by selectively duplicating the polygon data at some processors. In the rest of the
+experiments, work transfers are always done by transferring the object IDs unless otherwise stated.
+
+Table
+
+4: Cost of Transfer vs the cost of Solving the Problem at a Single Processor (cost in seconds)
+Time (sec) Avg. over 75 queries
+5.2 Declustering for DLB Methods
+In this experiment, the effect of chunking based on systematic declustering is compared to that of random
+declustering for the DLB method. we used GRR as the DLB method and compared random, similarity-
+graph, and LLB methods of declustering. The dynamic data is declustered with polygons per chunk.
+
+Figure
+
+17 shows the experimental results for t seconds. The x-axis gives the number
+of processors and the y-axis gives the average speedup over 75 queries.
+From this data, it is clear that random declustering of data is not as effective as systematic declustering
+for achieving a good load-balance for the GIS-range-query problem. Moreover, the ordering of
+the methods remains the same as for the static case. This shows that systematic declustering of data
+improves the load-balance. Also, the load-balance can be improved by using more information during
+Number of Processors
+t_s=0 "Sim"
+"LLB"
+Number of Processors
+t_s=100 "Sim"
+"LLB"
+"Rand"
+(a) (b)
+
+Figure
+
+17: Speedups for different declustering methods for the GRR method (Map=4X).
+the declustering phase.
+5.3 Evaluation of the Granularity of Work-Allocation in DLB
+we compare the effect of different chunk sizes with the number of polygons in chunks ranging from 1 to
+30, using GRR as the DLB method and similarity-graph-100 as the declustering method. In addition,
+we compared the effect of increasing the value of t s with decreasing size of the chunk (i.e. increasing
+number of chunks). The experiment is conducted using 4X map for replicated data being
+40% of the total data.
+Chunks of single polygons usually result in the best possible load-balance, but this also results
+in maximum overhead due to the increased number of chunks. Figure 18 shows the graph for this
+experiment. When the t s value is low, chunks of single polygons result in the best possible speedups.
+As the value of t s is increased, the maximum speedup is achieved for some chunk size other than single
+polygon chunks. This is due to the increased communication overhead, as the increased number of
+chunks requires the exchange of more messages between processors. Note that t s - 100- seconds is a
+typical value seen in a MIMD message passing computer like the IBM SP-2.
+5.4 Effect of the Pool Size
+we evaluate the effect of the pool size, using the Pool-Based Method for varying number of processors
+and varying data files. The number of processors is varied from 4 to 16 and the data files are varied
+from 1X map to 4X map. The pool size is varied from 0 to 100% of the total data. Note that a 0%
+Polygons per Chunk
+"t_s=0.1"
+"t_s=10.1"
+"t_s=100.1"
+
+Figure
+
+18: Granularity of Work-Transfers
+pool refers to the static declustering with no DLB. Work transfers are done by transferring the polygon
+IDs, and we used one polygon per chunk.481216
+Speedups for Map_4X
+"P=4"
+"P=8"
+Speedups for P=16
+"Map=1X"
+"Map=2X"
+"Map=4X"
+(a) (b)
+
+Figure
+
+19: Speedups for different pool sizes for Pool-Based method.
+
+Figure
+
+19 shows the results of this experiment. The x-axis gives the size of the pool as a percentage
+of the total data, and the y-axis gives the average speedups over 75 range queries. As expected, the
+speedups increase as we increase the pool size, up to a point, and then they start decreasing. The
+initial increase in speedup may be due to the increased load-balance. The decrease in speedup after a
+achieving a maximum value is due to the non-parallelizable overhead of the approximate filtering, as
+shown in Equation 8. Note that this decrease is greater as P increases. This is due to the increase in
+non parallelizable overhead with increasing P . The maximum speedup occurs at different pool sizes for
+different number of processors and for different data sets. Also note that the maximum speedups occur
+in the ranges predicted in Table 3.
+5.5 Comparison of DLB methods
+we compare the performance of the three DLB methods (GRR, ARR, and PBM) for t
+100:1. The number of processors is varied from 4 to 16 and the 4X map is used as the input data.
+The number of polygons per chunk is 1 for t 100:1. Work is transferred by
+transferring the polygon IDs, and similarity-graph-100 is used for declustering the data.481216
+Number of Processors
+"PBM"
+"ARR"
+Number of Processors
+"PBM"
+"ARR"
+"GRR"
+
+Figure
+
+20: Speedups for different DLB methods.
+
+Figure
+
+20 shows the speedups for these three methods. The x-axis gives the number of processors,
+and the y-axis gives the average speedups over 75 range queries. For t both GRR and ARR have
+comparable performance, while PBM performs better than these two methods, as shown Figure 20(a).
+However, GRR has inferior speedups relative to other methods for t shown in Figure 20(b).
+This may be attributed to the centralized overhead of maintaining the list of possible donor processors
+in GRR.
+5.6 Effectivness of Dynamic Load-Balancing
+The effectiveness of DLB methods in achieving a good load-balance is shown in Table 5. The data
+is collected with and with a 40% pool for PBM and 40% replicated data for GRR and ARR.
+Similarity-Graph-100 is used as the declustering method with one polygon per chunk for the shared data.
+Work transfers are done by transferring the polygon IDs. The data shown in Table 5 is represented as
+Mean \Sigma SD for the 75 range queries used in our experiment. The column Avg: Static gives the static
+execution time averaged over 16 processors and 75 range queries. The column Max: Static gives the
+maximum static execution time over 16 processors, averaged over 75 range queries. Similarly, Avg: T otal
+time is the average total time over 16 processors for 75 queries, and T otal is the total parallel run time
+averaged over 75 range queries. In this experiment, we observe that the DLB methods have achieved a
+good load-balance (i.e., the percentage difference between the avg., and the total) even though there is
+a very high load-imbalance after the static part.
+
+Table
+
+5: Performance Evaluation of DLB for
+Method Avg. Static Max. Static Avg. Total Max. Total Speedup
+PBM 0:0307 \Sigma 0:004 0:0492 \Sigma 0:007 0:0484 \Sigma 0:006 0:0518 \Sigma 0:007 14:04 \Sigma 0:69
+GRR 0:0329 \Sigma 0:004 0:0518 \Sigma 0:008 0:0543 \Sigma 0:008 0:0557 \Sigma 0:008 13:07 \Sigma 0:64
+ARR 0:0241 \Sigma 0:003 0:0422 \Sigma 0:006 0:0508 \Sigma 0:006 0:0556 \Sigma 0:006 13:03 \Sigma 0:59
+6 Conclusions and Future Work
+Data-partitioning is an effective approach towards achieving high performance in GIS. we parallelize the
+GIS-range-query problem using data partitioning and dynamic load-balancing techniques. Partitioning
+extended spatial-data maps is difficult, due to the varying sizes and extents of the polygons and the
+difficulty of estimating the work load. Hence, special techniques are needed to parallelize the GIS-range-
+query problem.
+we identify the main issues in declustering collections of extended spatial objects like chains of line-segments
+and polygons. we experimentally evaluate several alternatives for each of these issues on a
+distributed memory MIMD machine for the range-query operation. Experimental results show that the
+number of edges is a better load estimator than the area of the object. The bounding box approximator
+for the spatial extent of an object gives more information than the point estimator. But going to a higher
+order estimator like multiple bounding boxes is not practical as these estimators are expensive to obtain
+and are expensive to use for declustering extended spatial data. The results also show that, among the
+static declustering methods, similarity-graph and distribution based methods outperform other static
+declustering methods.
+we also show that the performance of DLB methods can be further improved by using the declustering
+methods for determining the subsets of polygons to be transferred during run-time. In the proposed
+approach, we use the ideas of declustering in a hierarchical fashion, increasing the load balance over
+purely static methods, and decreasing the communication cost over purely dynamic methods.
+In our future work, we are planning to scale up our methods to larger numbers of processors, larger
+maps, and queries. we also plan to extend our work to map-overlay problems and other computationally
+intensive HP-GIS operations. Another major effort would focus on high performance techniques for
+secondary and tertiary-storage terrain mapping and the effect of I/O (e.g. swapping) and indexing
+methods. Finally, we would like to evaluate these techniques on the workstation clusters which are
+common in many GIS applications.
+
+Acknowledgments
+
+This work is sponsored by the Army High Performance Computing Research Center under the auspices
+of the Department of the Army, Army Research Laboratory cooperative agreement number DAAH04-
+95-2-0003/contract number DAAH04-95-C-0008, ARO contract number DA/DAAH04-95-1-0538, the
+content of which does not necessarily reflect the position or the policy of the government, and no official
+endorsement should be inferred. This work is also supported by the Federal Highway Authority and
+the Minnesota Department of Transportation. we would like to thank the AHPCRC, University of
+Minnesota, and the Pittsburgh Super Computing Center for providing us with access to the Cray T3D.
+we would also like to thank Minesh Amin and Christiane McCarthy for improving the readability and
+technical accuracy of this paper.
+
+
+
+--R
+
+Page. http://dis.
+Parallel Computational Geometry.
+Parallel Computational Geometry.
+Experiments in the Measurement of Spatial Association Using a Parallel Supercomputer.
+Efficient Plane Sweeping in Parallel.
+Algorithms for Reporting and Counting Geometric Intersections.
+
+Parallel Processing of Spatial Data for Terrain Characterization.
+Disk Allocation for Product Files on Multiple Disk Systems.
+Allocation Methods Using Error Correcting Codes.
+The Idea of Declustering and its Applications.
+Dynamic processor self-scheduling for general parallel nested loops
+Uniform Grids: A Technique for Intersection Detection on Serial and Parallel Machines.
+Computers and Intractability: A Guide to the Theory of NP-Completeness
+A Dynamic Index Structure for Spatial Searching.
+Visualizing Large Data Sets in the Earth Sciences.
+Data Parallel R-Tree Algorithms
+Data Parallel Spatial Join Algorithms.
+Performance of Data-Parallel Spatial Operations
+
+Linear Clustering of Objects with Multiple Attributes.
+Parallel R-Trees
+Allocating independent subtasks on parallel processors.
+Introduction to Parallel Computing: Design and Analysis of Algorithms.
+Scalable load balancing techniques for parallel computers.
+An Analysis and Algorithm for Polygon Clipping.
+A Similarity Graph-Based Approach to Declustering Problem and its Applications
+
+
+Range Search In Parallel Using Distributed Data Structures.
+A Generic Solution to Polygon Clipping.
+A Parallel Intersection Algorithm for Vector Polygon Overlay.
+Allocation Methods for Parallelizing Grid Files.
+--TR
+
+--CTR
+Shashi Shekhar , Sivakumar Ravada , Vipin Kumar , Douglas Chubb , Greg Turner, Parallelizing a GIS on a Shared Address Space Architecture, Computer, v.29 n.12, p.42-48, December 1996
+Mehmet Koyutrk , Cevdet Aykanat, Iterative-improvement-based declustering heuristics for multi-disk databases, Information Systems, v.30 n.1, p.47-70, March 2005
+Thu D. Nguyen , John Zahorjan, Scheduling policies to support distributed 3D multimedia applications, ACM SIGMETRICS Performance Evaluation Review, v.26 n.1, p.244-253, June 1998
+Jignesh M. Patel , David J. DeWitt, Clone join and shadow join: two parallel spatial join algorithms, Proceedings of the 8th ACM international symposium on Advances in geographic information systems, p.54-61, November 06-11, 2000, Washington, D.C., United States
+N. An , R. Lu , L. Qian , A. Sivasubramaniam , T. Keefe, Storing spatial data on a network of workstations, Cluster Computing, v.2 n.4, p.259-270, 1999
+Hakan Ferhatosmanoglu , Aravind Ramachandran , Divyakant Agrawal , Amr El Abbadi, Data space mapping for efficient I/O in large multi-dimensional databases, Information Systems, v.32 n.1, p.83-103, March, 2007
+Hakan Ferhatosmanoglu , Ali aman Tosun , Guadalupe Canahuate , Aravind Ramachandran, Efficient parallel processing of range queries through replicated declustering, Distributed and Parallel Databases, v.20 n.2, p.117-147, September 2006

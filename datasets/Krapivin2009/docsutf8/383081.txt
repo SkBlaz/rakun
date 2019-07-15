@@ -1,0 +1,1218 @@
+--T
+Extending equation-based congestion control to multicast applications.
+--A
+In this paper we introduce TFMCC, an equation-based multicast congestion control mechanism that extends the TCP-friendly TFRC protocol from the unicast to the multicast domain. The key challenges in the design of TFMCC lie in scalable round-trip time measurements, appropriate feedback suppression, and in ensuring that feedback delays in the control loop do not adversely affect fairness towards competing flows. A major contribution is the feedback mechanism, the key component of end-to-end multicast congestion control schemes. We improve upon the well-known approach of using exponentially weighted random timers by biasing feedback in favor of low-rate receivers while still preventing a response implosion. We evaluate the design using simulation, and demonstrate that TFMCC is both TCP-friendly and scales well to multicast groups with thousands of receivers. We also investigate TFMCC's weaknesses and scaling limits to provide guidance as to application domains for which it is well suited.
+--B
+Introduction
+It is widely accepted that one of several factors inhibiting the
+usage of IP multicast is the lack of good, deployable, well-tested
+multicast congestion control mechanisms. To quote
+[10]:
+The success of the Internet relies on the fact that best-effort
+traffic responds to congestion on a link by reducing
+the load presented to the network. Congestion
+collapse in today's Internet is prevented only by the
+congestion control mechanisms in TCP.
+We believe that for multicast to be successful, it is crucial
+that multicast congestion control mechanisms be deployed
+that can co-exist with TCP in the FIFO queues of the current
+Internet.
+University of Mannheim, Germany
+y AT&T Center for Internet Research at ICSI (ACIRI)
+The precise requirements for multicast congestion control are
+perhaps open to discussion given the efficiency savings of
+multicast, but we take the conservative position that a multi-cast
+flow is acceptable if it achieves no greater medium-term
+throughput to any receiver in the multicast group than would
+be achieved by a TCP flow between the multicast sender and
+that receiver.
+Such a requirement can be satisfied either by a single multicast
+group if the sender transmits at a rate dictated by the
+slowest receiver in the group, or by a layered multicast scheme
+that allows different receivers to receive different numbers of
+layers at different rates. Much work has been done on the latter
+class [12, 18, 4], but the jury is still out on whether any of
+these mechanisms can be made safe to deploy.
+This paper describes TCP-Friendly Multicast Congestion Control
+(TFMCC), which belongs to the class of single rate congestion
+control schemes. Such schemes inevitably do not
+scale as well as layered schemes. However, they are much
+simpler, match the requirements of some applications well,
+and we will demonstrate that they can scale to applications
+with many thousands of receivers. These schemes also suffer
+from degradation in the face of badly broken links to a few
+receivers - how to deal with such situations is a policy deci-
+sion, but we expect that most applications using a single-rate
+scheme will have application-specific thresholds below which
+a receiver is compelled to leave the multicast group.
+TFMCC is not the only single-rate multicast congestion control
+scheme available. In particular, Pragmatic General Multi-cast
+Congestion Control (PGMCC) [17] is also a viable solution
+with some nice properties and a certain elegant simplic-
+ity. However, TFMCC and PGMCC differ considerably in
+the smoothness and predictability of their transmission. We
+will argue that both are appropriate solutions, and that some
+applications are better suited to one than the other.
+1.1 TFMCC and TFRC
+The TCP-friendly Rate Control protocol (TFRC) [5] is a unicast
+congestion control mechanism intended for applications
+that require a smoother, more predictable transmission rate
+than TCP can achieve. TFMCC extends the basic mechanisms
+of TFRC into the multicast domain.
+TFRC is an equation-based congestion control scheme. It
+uses a control equation derived from a model of TCP's long-term
+throughput to directly control the sender's transmission
+rate. Basically TFRC functions as follows:
+1. The receiver measures the packet loss rate and feeds
+this information back to the sender.
+2. The sender uses the feedback messages to measure the
+round-trip time to the receiver.
+3. The sender uses the control equation to derive an acceptable
+transmission rate from the measured loss rate
+and round-trip time (RTT).
+4. The sender's transmission rate is then adjusted directly
+to match the calculated transmission rate.
+For full details of TFRC, we refer the reader to [5].
+TFMCC follows a very similar design for multicast congestion
+control. The primary differences are that it is the receivers
+that measure their RTT to the sender and perform the
+calculation of the acceptable rate. This rate is then fed back to
+the sender, the challenge being to do this in a manner which
+ensures that feedback from the receiver with the lowest calculated
+rate reaches the sender whilst avoiding feedback im-
+plosions. Moreover, we need to make sure than any additional
+delay imposed to avoid feedback implosion does not
+adversely affect the fairness towards competing protocols.
+2 The TFMCC Protocol
+Building an equation-based multicast congestion control mechanism
+requires that the following problems be solved:
+A control equation must be chosen that defines the target
+throughput in terms of measurable parameters, in
+this case loss event rate and RTT.
+Each receiver must measure the loss event rate. Thus a
+filter for the packet loss history needs to be chosen that
+is a good stable measure of the current network condi-
+tions, but is sufficiently responsive when those conditions
+change.
+Each receiver must measure or estimate the RTT to the
+sender. Devising a way to do this without causing excessive
+network traffic is a key challenge.
+Each receiver uses the control equation to calculate an
+acceptable sending rate from the sender to itself.
+A feedback scheme must be so devised that feedback
+from the receiver calculating the slowest transmission
+rate always reaches the sender, but feedback implosions
+do not occur when network conditions change.
+A filtering algorithm needs to be devised for the sender
+to determine which feedback it should take into account
+as it adjusts the transmission rate.
+Clearly, all these parts are closely coupled. For example,
+altering the feedback suppression mechanisms will impact
+how the sender deals with this feedback. Many of our design
+choices are heavily influenced by TFRC, as these mechanisms
+are fairly well understood and tested. In this paper
+we will expend most of our efforts focusing on those parts of
+TFMCC that differ from TFRC.
+2.1 Determining an Acceptable Sending Rate
+The control equation used by TFRC and TFMCC is derived
+from a model for long-term TCP throughput in bytes/sec [15]:
+s
+q
+(1)
+The expected throughput T TCP of a TCP flow is calculated
+as a function of the steady-state loss event rate p, the round-trip
+time t RTT , and the packet size s. Each TFMCC receiver
+measures its own loss event rate and estimates its RTT to the
+sender. It then uses Equation (1) to calculate T TCP , which
+is an estimate of the throughput a TCP flow would achieve
+on the network path to that receiver under the same network
+conditions. If the sender does not exceed this rate for any
+receiver then it should be TCP-friendly, in that it does not
+affect a TCP flow through the same bottlenecks more than
+another TCP flow would do.
+In the following section we will elaborate on how the necessary
+parameters for the model are computed and how to deal
+with potentially large receiver sets.
+2.2 Adjusting the Sending Rate
+The sender will continuously receive feedback from the re-
+ceivers. If a receiver sends feedback that indicates a rate that
+is lower than the sender's current rate, the sender will immediately
+reduce its rate to that in the feedback message.
+In order to eliminate a large number of unnecessary messages,
+receivers will not send feedback unless their calculated rate is
+less than the current sending rate. However, this leaves us
+with a problem - how do we increase the transmission rate?
+We cannot afford to increase the transmission rate in the absence
+of feedback, as the feedback path from the slowest receiver
+may be congested or lossy. As a solution we introduce
+the concept of the current limiting receiver (CLR). The CLR
+is the receiver that the sender believes currently has the lowest
+expected throughput of the group. 1 The CLR is permitted to
+1 In this respect, the CLR is comparable to the representative used in congestion
+control schemes such as PGMCC.
+send immediate feedback without any form of suppression, so
+the sender can use the CLR's feedback to increase the transmission
+rate.
+The CLR will change if another receiver sends feedback indicating
+that a lower transmission rate is required. It will also
+change if the CLR leaves the multicast group - this is normally
+signaled by the CLR, but an additional timeout mechanism
+serves as a backup in case the CLR crashes or becomes
+unreachable.
+Normally the way loss measurement is performed limits the
+possible rate increase to roughly 0.3 packets per RTT , as
+shown in [5]. However, if the CLR leaves the group, the new
+CLR may have a significantly higher calculated rate. We cannot
+afford to increase directly to this rate, as the loss rate currently
+measured may not be a predictor of the loss rate at the
+new transmission rate. Instead we then impose a rate increase
+limit of one packet per RTT , which is the same as TCP's additive
+increase constant, so that the rate gradually increases to
+the new CLR's rate.
+2.3 Measuring the Loss Event Rate
+The loss event rate can only be scalably measured at the re-
+ceivers. The measurement mechanism closely matches that
+used for TFRC. A receiver aggregates the packet losses into
+loss events, defined as one or more packets lost during a round-trip
+time. The number of packets between consecutive loss
+events is called a loss interval. The average loss interval size
+can be computed as the weighted average of the m most recent
+loss intervals l
+l avg
+The weights w i are chosen so that very recent loss intervals
+receive the same high weights, while the weights gradually
+decrease to 0 for older loss intervals. For example, with eight
+weights we might use f5, 5, 5, 5, 4, 3, 2, 1g. This allows
+for smooth changes in l avg as loss events age. While large
+values for m improve the smoothness of the estimate, a very
+long loss history also reduces the responsiveness and thus the
+fairness of the protocol. Values around 8 to 32 appear to be a
+good compromise.
+The loss event rate p used as an input for the TCP model is
+defined as the inverse of l avg . The interval since the most
+recent loss event does not end with a loss event and thus may
+not reflect the loss event rate. This interval is included in the
+calculation of the loss event rate if doing so reduces p:
+For a more thorough discussion of this loss measurement mechanism
+see [5].
+2.4 Round-trip Time Measurements
+A key challenge of TFMCC is for each receiver to be able to
+measure its RTT to the sender without causing excessive traffic
+at the sender. In practice the problem is primarily one of
+getting an initial RTT measurement as, with the use of time-stamps
+in the data packets, a receiver can see changes in the
+delay of the forward path simply from the packet's arrival
+time. We will discuss this further in Section 2.4.3.
+2.4.1 RTT Estimate Initialization
+Ideally we would like a receiver to be able to initialize its
+RTT measurement without having to exchange any feedback
+packets with the sender. This is possible if the sender and
+receiver have synchronized clocks, which might be achieved
+using GPS receivers. Less accurately, it can also be done
+using clocks synchronized with NTP [13].
+In either case, the data packets are timestamped by the sender,
+and the receiver can then compute the one-way delay. The
+RTT is estimated to be twice the one-way delay d S!R . In the
+case of NTP, the errors that accumulate between the stratum-
+1 server and the local host must be taken into account. An
+NTP server knows the RTT and dispersion to the stratum-1
+server to which it is synchronized. The sum of these gives the
+worst-case error  in synchronization. To be conservative:
+In practice NTP provides an average timer accuracy of 20-30
+ms [13], and in most cases this gives us an estimate of RTT
+that is accurate at least to the nearest 100 ms. Although not
+perfect, this is still useful as a first estimate.
+In many cases though, no reliable form of clock synchronization
+is available. Each receiver must then initialize its RTT
+estimate to a value that should be larger than the highest RTT
+of any of the receivers. We assume that for most networks a
+value of 500 ms is appropriate [1]. This initial value is used
+until a real measurement can be made. In Appendix A we reason
+why it is safe to also use this value to aggregate losses to
+loss events, where a low RTT value would be the conservative
+option.
+2.4.2 RTT Measurement
+A receiver gets to measure the instantaneous RTT t inst
+RTT by
+sending timestamped feedback to the sender, which then echoes
+the timestamp and receiver ID in the header of a data packet.
+If more feedback messages arrive than data packets are sent,
+we prioritize the sender's report echoes in the following order
+
+1. a receiver whose report causes it to be selected as the
+new CLR
+2. receivers that have not yet measured their RTT
+3. non-CLR receivers with previous RTT measurements
+4. the existing CLR.
+Ties are broken in favor of the receiver with the lowest reported
+rate. Normally the number of data packets is larger
+than the number of feedback packets, so the CLR's last report
+is echoed in any remaining data packets. 2
+To prevent a single spurious RTT value from having an excessive
+effect on the sending rate we smooth the values using
+an exponentially weighted moving average (EWMA)
+inst
+For the CLR we set 0:05. Given that other receivers
+will not get very frequent RTT measurements and thus old
+measurements are likely to be outdated, a higher value of
+non used for them.
+2.4.3 One-way Delay RTT Adjustments
+Due to the infrequent RTT measurements, it would also be
+possible for large increases in RTT to go unnoticed if the receiver
+is not the CLR. To avoid this we adjust the RTT estimate
+between actual measurements. Since data packets carry
+a send timestamp t data , a receiver that gets a RTT measurement
+at time t now can also compute the one-way delay from
+sender to receiver (including clock skew) as
+data
+and the one-way from receiver to sender as
+inst
+RTT dS!R
+Due to clock skew, these values are not directly meaningful,
+but dR!S can be used to modify the RTT estimate between
+real RTT measurements. When in a later data packet the one-way
+delay from sender to receiver is determined as d 0
+S!R , it
+is possible to compute an up-to-date RTT estimate
+inst
+RTT
+Clock skew between sender and receiver cancels out, provided
+that clock drift between real RTT measurements is neg-
+ligible. The modified RTT estimates are smoothed with an
+EWMA just like normal RTT measurements, albeit with a
+smaller decay factor for the EWMA since the one-way delay
+adjustments are possible with each new data packet. One-way
+delay adjustments are used as an indicator that the RTT may
+have changed significantly and thus a real RTT measurement
+is necessary. If the receiver is then selected as CLR, it measures
+its RTT with the next packet and all interim one-way
+delay adjustments are discarded. For this reason it proved to
+be unnecessary to filter out flawed one-way delay estimates.
+2 To be able to infer an accurate RTT from the timestamps it is necessary to
+also take into account the offset between receipt of a timestamp and echoing
+it back.
+2.4.4 Sender-side RTT Measurements
+While a preconfigured initial RTT value can be used at the
+receiver for loss aggregation and rate computation, it should
+not be used to set the sending rate. Using a high initial RTT
+would result in a very low sending rate, followed by a high
+sending rate when the CLR gets the first RTT measurement,
+then a CLR change to a receiver with no previous RTT mea-
+surement, and so on. Such rate oscillations should be avoided.
+On the other hand, if the sender only accepted a receiver with
+a valid RTT as CLR, receivers with a very high loss rate might
+never receive their feedback echo, and so never become CLR.
+For these reasons, TFMCC supports additional sender-based
+RTT measurements. A receiver report also echoes the time-stamp
+of the last data packet, and so the sender and receivers
+are both able to measure RTT. The sender only computes the
+RTT when it has to react to a receiver report without a valid
+RTT, and it uses this to adjust the calculated rate in the receiver
+report.
+2.5 Receiver Feedback
+As TFMCC is designed to be used with receiver sets of perhaps
+several thousand receivers, it is critical to ensure that
+the sender gets feedback from the receivers experiencing the
+worst network conditions without being overwhelmed by feed-back
+from all the other receivers. Congestion may occur at
+any point in the distribution tree, from the sender's access
+link through to a single receiver's tail circuit. Thus any mechanism
+must be able to cope when conditions change from a
+single receiver being lightly congested to all the receivers being
+equally heavily congested, and other similarly pathological
+cases. At the same time we would like the feedback delay
+to be relatively small in the steady state. The latter can be
+achieved through the concept of a CLR, which can send feed-back
+immediately.
+However, a CLR is of no help during a change in network
+conditions that affect receivers other than the CLR. Thus, we
+will ignore the influence of the CLR on the feedback process
+in this section, but we note that the CLR generates relatively
+little feedback traffic and both strictly improves the responsiveness
+to congestion and reduces the amount of feedback
+sent by other receivers.
+Various reliable multicast protocols incorporate feedback trees,
+where the receivers are organized into a tree hierarchy, and internal
+nodes in the tree aggregate feedback. Such trees largely
+solve the feedback implosion problem, but are difficult to
+build and maintain. If such a tree exists it should clearly be
+used, but in this paper we will assume that is not the case, and
+examine pure end-to-end suppression mechanisms.
+Several mechanisms using randomized timers for feedback
+suppression in multicast protocols have been proposed before
+[6, 7, 9, 14]. Time is divided into feedback rounds, which
+are either implicitly or explicitly indicated to the receivers.
+At the start of each feedback round, each receiver sets a randomized
+timer. If the receiver hears feedback from another
+receiver that makes it unnecessary for it to send its own feed-
+back, it cancels its timer. Otherwise when the timer expires,
+a feedback message is sent.
+For TFMCC, we use such a mechanism based on exponentially
+distributed random timers. When the feedback timer
+expires, the receiver unicasts its current calculated sending
+rate to the sender. If this rate is lower than previous feedback
+received, the sender echoes the feedback to all receivers. With
+respect to the intended application of finding the correct CLR,
+we improve upon the original concept by biasing feedback in
+favor of low-rate receivers. The dynamics of such a mechanism
+depend both on the way that the timers are initialized,
+and on how one receiver's feedback suppresses another's.
+2.5.1 Randomized Timer Values
+The basic exponentially distributed random timer mechanism
+initializes a feedback timer to expire after t seconds, with
+where
+x is a uniformly distributed random variable in (0; 1],
+T is an upper limit on the delay before sending feedback,
+N is an estimated upper bound on the number of receivers.
+T is set to a multiple of the maximum RTT of the receivers;
+RTT . The choice of b determines the number of feed-back
+packets per round that will be sent in worst-case conditions
+and the feedback delay under normal conditions. In
+Section 2.5.4 we show that for our purpose useful values for
+b lie between 3 and 6. We use a default value of 4.
+The mechanism is relatively insensitive to overestimation of
+the receiver set size N , but underestimation may result in a
+feedback implosion. Thus, a sufficiently large value for N
+should be chosen. In our simulations we use
+which seems reasonable given our scaling goals.
+Whilst this basic algorithm is sufficient to prevent a feedback
+implosion, it does not ensure that receivers with low expected
+rates will be more likely to respond than receivers with high
+rates. Even if a receiver can only respond when its rate is
+less than the current sending rate, this does not ensure that
+the lowest-rate receiver will respond quickly when congestion
+worsens rapidly. 3 Thus the sender would be insufficiently
+responsive to increased congestion.
+To avoid this problem, we bias the feedback timers in favor
+of receivers with lower rates, while still allowing sufficient
+3 In fact, receivers with lower RTTs are incorrectly favored since they
+receive the feedback request earlier.
+randomization to avoid implosion when all the receivers calculate
+the same low rate. Since a receiver knows the sending
+rate but not the calculated rate of other receivers, a good measure
+of the importance of its feedback is the ratio r of the
+calculated rate to the current sending rate. 4 There are several
+ways to use r to bias the timers:
+Modify N: reduce the upper bound on the receiver set.
+Offset: subtract an offset value from the feedback time.
+Modify x: reduce the random value x.
+All three alternatives cause low-rate receivers to report earlier
+but they differ with respect to the degree of biasing they
+cause and the circumstances under which a feedback implosion
+might be possible.
+When modifying N , its value should never be reduced to less
+than the actual number of receivers n, since receivers send
+an immediate response with a probability of 1=N . In case
+n < N , the number of feedback responses increases linearly
+in relation to n. If N is known to be too large and it is thus
+possible to safely reduce N , it makes sense to always use the
+reduced N for the feedback suppression instead of using it
+for the biasing.
+Using an offset decreases the time for all congested receivers
+to respond, but the probability of a very short timer value is
+not greatly increased and so suppression still works.
+determines the fraction of T that should be used to spread
+out the feedback responses with respect to the reported rate.
+Care has to be taken to ensure that (1
+)T is sufficiently
+large to prevent a feedback implosion.
+log N x) +T log N r, the third
+case is similar to the second case with a different offset value.
+Also here it is important to bound the impact of r on the feed-back
+time.
+
+Figure
+
+shows how the cumulative distribution function (CDF)
+of the feedback time changes from the original CDF when biasing
+the feedback. A decrease in N corresponds to shifting
+the CDF up, thus increasing the probability of early responses
+that cannot be suppressed. In contrast, using a fraction of T
+as an offset reduces the time over which the responses are
+spread out, assuming the worst case of all receivers reporting
+an optimal value.
+Thus, in TFMCC the feedback timers are biased in favor of
+low-rate receivers with an offset as in Equation 3. To clarify
+how this method affects the feedback time, the time-value
+distribution of the receiver set without biasing and with timers
+biased with an offset is depicted in Figure 2. Suppressed
+Feedback is marked with a dot, feedback received at the sender
+4 Note that 0 < r < 1 since only receivers with lower rates than the
+current rate send reports.
+Cumulative
+Probability
+Feedback Time (RTTs)
+exponential
+offset
+modified N
+
+Figure
+
+1: Different feedback biasing methods
+is marked with a cross and the best value of the feedback received
+is marked with a square. Note that a uniform distribution
+of the feedback value r as was used for the graph is
+unlikely to occur in reality and is used here only for the purpose
+of demonstrating the properties of feedback biasing.
+With the offset method, the time interval available for suppression
+is smaller than with unbiased feedback if the original
+worst case delay is to be maintained. As a consequence,
+the number of feedback messages is higher when biasing the
+feedback timers. However, through the biasing, early feed-back
+messages and thus also the best feedback value received
+are closer to optimal.11
+Feedback
+Value
+Feedback Time
+Offset
+Normal
+
+Figure
+
+2: Time-value distribution
+We can further optimize the offset method by truncating the
+range of r to likely values, and normalizing the resulting interval
+to [0,1]. In the implementation, instead of r, we use
+The effect of this is to start biasing feedback only when a re-
+ceiver's rate is less than 90% of the sender's rate (this doesn't
+significantly affect fairness), and to saturate the bias if the re-
+ceiver's rate is 50% of the sender's rate (since receivers with
+even lower rates will take several rounds for their loss measures
+to change anyway).
+2.5.2 Canceling Feedback
+When a receiver sees echoed feedback from another receiver,
+it must decide whether or not to cancel its feedback timer.
+One possibility is to rely completely on the feedback timer
+bias, and cancel the timer on receipt of the first feedback for
+this round. Another possibility is to cancel the timer only if
+the echoed feedback indicates a rate lower than the rate the receiver
+wanted to report. The latter guarantees that the receiver
+with the lowest rate will always get to send its feedback, but
+the former results in significantly less feedback traffic in the
+worst case.
+A spectrum lies between these two extremes: if the receiver's
+calculated rate is R calc and the rate from the echoed feedback
+is R fb , then the timer is canceled if R fb R calc <  R fb .
+The former method discussed above corresponds to
+and the latter to As we change  from zero to one, we
+reduce the chance of hearing from the absolute lowest-rate re-
+ceiver, but also reduce the increase in the number of feedback
+messages. As shown in [19], the expected number of feed-back
+messages increases logarithmically with n for
+For values of  < 1, this number becomes approximately
+constant in the limit for large
+Number
+of
+Responses
+Number of Receivers (n)
+all suppressed
+10% lower suppressed
+higher suppressed
+
+Figure
+
+3: Different feedback cancellation methods
+These results are corroborated by the simulations depicted in
+
+Figure
+
+3. The graph shows the number of feedback messages
+in the first round of the worst-case scenario, where n
+receivers (except the CLR) suddenly experience congestion.
+The effects of  being 0.0, 0.1, and 1.0 are shown. Values
+of  around 0.1 result in the desired behavior of only a
+marginally higher number of feedback messages, while the
+resulting transient transmission rate is no worse than 10%
+higher than it should be.
+The improvement in sent feedback values caused by the biasing
+in combination with the above feedback cancellation
+method results in a significant improvement of the characteristics
+of the feedback process over normal exponential feed-back
+timers.
+2.5.3 Feedback at Low Sending Rates
+At very low sending rates and high loss rates (which usually
+go together), it is still possible to get a feedback implo-
+sion. The feedback echo from the sender that suppresses other
+feedback is sent with the next data packet. Thus, when the delay
+before the next data packet is sent is close to the feedback
+delay, it will arrive too late for suppression to work.
+This problem can be prevented by increasing the feedback delay
+T in proportion to the time interval between data packets
+when the sending rate R send is low:
+s
+R send
+c being the number of consecutive data packets that can be
+lost without running the risk of implosion, and s the packet
+size. We recommend using values of c between 2 and 4.
+2.5.4 Expected Number of Feedback Messages, Feedback
+Delay, and Feedback Quality
+The expected number of duplicate feedback messages E[f
+for exponential feedback suppression is given in [7] as
+where
+n is the actual number of receivers,
+is the network delay (for unicast feedback channels
+T 0 is the maximum feedback delay used for suppression.
+Assuming the worst case of
+)T .
+Whilst our primary concern is to avoid implosion, a very low
+number of responses (say 1 or 2) is also undesirable. Some
+additional responses greatly increase the probability of not
+having a low-rate but the lowest-rate receiver respond and
+also provide RTT measurements to a larger number of receivers
+
+Figure
+
+4 shows a plot of E[f ] for different values of T 0 and
+n, in the range of roughly 3
+to 4 RTTs result in the desired number of feedback messages,
+particularly in the common range for n of one to two orders of
+magnitude below N . For this reason, the values chosen for
+and T in the TFMCC implementation are 1=4 and 4 t max
+RTT re-
+spectively. Given those choices for
+and T , we now examine
+how well the feedback biasing methods achieve the additional
+goal of low response time and how close the reported rate is
+to that of the true lowest-rate receiver.
+
+Figure
+
+5 compares the feedback delay for unbiased exponential
+timers with the basic offset bias and the modified offset
+PSfrag
+replacements35
+6 1100100002060100Number of Receivers
+T' (RTTs)
+Number of Responses
+
+Figure
+
+4: Expected number of feedback messages
+that uses r 0 instead of r. All three show the logarithmic decrease
+in response time with the number of receivers typical
+for feedback suppression based on exponential timers. The
+difference between the methods is not great, with the modified
+offset algorithm having a slight edge over the regular
+offset.
+When examining the rates that are reported in the feedback
+messages, the advantage of the offset methods becomes ap-
+parent. Figure 6 compares the lowest reported rate of the
+feedback messages of a single feedback round to the actual
+lowest rate of the receiver set. For example, a value of 0.1 indicates
+that the lowest reported rate is on average 10% higher
+after one feedback round than it should be in the ideal case.
+Rates reported with the offset methods are considerably closer
+to the real minimum than those reported with unmodified exponential
+timers. Particularly when r is adjusted appropriately
+by the modified offset method, feedback will normally
+be within a few percent of the minimum rate. Plain exponential
+feedback shows average deviations of nearly 20% above
+the minimum rate.135
+Response
+Time
+(in
+Number of Receivers (n)
+unbiased exponential
+basic offset
+modified offset
+
+Figure
+
+5: Comparison of methods to bias feedback
+2.6 Slowstart
+TFMCC uses a slowstart mechanism to more quickly approach
+its fair bandwidth share at the start of a session. During
+Quality
+of
+Reported
+Rate
+Number of Receivers (n)
+unbiased exponential
+basic offset
+modified offset
+
+Figure
+
+Comparison of methods to bias feedback
+slowstart, the sending rate increases exponentially, whereas
+normal congestion control allows only a linear increase. An
+exponential increase can easily lead to heavy congestion, so
+great care has to be taken to design a safe increase mecha-
+nism. A simple measure to this end is to limit the increase to
+a multiple d of the minimum rate R min
+recv received by any of the
+receivers. Since a receiver can never receive at a rate higher
+than its link bandwidth, this effectively limits the overshoot to
+d times that bandwidth. The target sending rate is calculated
+as
+R target
+recv
+and the current sending rate is gradually adjusted to the target
+rate over the course of a RTT. In our implementation we use
+a value of 2. Slowstart is terminated as soon as any one
+of the receivers experiences its first packet loss.
+It is necessary to use a different feedback bias for slowstart
+since receivers cannot calculate a TCP-friendly rate. For this
+reason we use:
+A report from the receiver that experiences the first loss event
+can only be suppressed by other reports also indicating packet
+loss, but not by reports from receivers that did not yet experience
+loss. Thus, slowstart will be terminated no later than
+one feedback delay after the loss was detected.
+In practice, TFMCC will seldomly reach the theoretical maximum
+of a doubling of the sending rate per RTT for two reasons
+
+The target sending rate is increased only when feed-back
+from a new feedback round is received. Thus,
+doubling is not possible every RTT, but every feedback
+delay, which is usually much larger than a RTT.
+Measuring the receive rate over several RTTs and gradually
+increasing R send to R target
+send gives a minimum receive
+rate at the end of a feedback interval that is lower
+than the sending rate during that interval. Thus, setting
+R target
+send to twice the minimum receive rate does
+not double the current sending rate.
+As is desirable for a multicast protocol, TFMCC slowstart behaves
+more conservatively than comparable unicast slowstart
+mechanisms.
+3 Protocol Behavior with Very
+Large Receiver Sets
+The loss path multiplicity problem is a well-known characteristic
+of multicast congestion control mechanisms that react
+to single loss indications from receivers on different network
+paths. It prevents the scaling of those mechanisms to large
+receiver sets. In [3], the authors propose as a possible solution
+tracking the most congested path and taking only loss
+indications from that path into account. Since the reports of a
+TFMCC receiver contain the expected rate based on the loss
+event rate and RTT on the single path from sender to that re-
+ceiver, the protocol implicitly avoids the loss path multiplicity
+problem. Yet TFMCC (and all other single-rate congestion
+control schemes) may be confined to a rate below the fair
+rate if, rather than there being a single most congested path,
+there is a path that changes over time. The faster a multicast
+congestion control protocol responds to transient congestion,
+the more pronounced is the effect of tracking the minimum
+of stochastic variations in the calculated rate at the different
+receivers. For example, if loss to several receivers independently
+varies fairly quickly between 0% and 10% with the
+average being 5%, a congestion control protocol may always
+track the worst receiver, giving a loss estimate that is twice
+what it should be.
+A worst-case scenario in this respect is a high number of
+receivers with independent loss and a calculated rate in the
+range of the lowest-rate receiver. If n receivers experience
+independent packet loss with the same loss probability, the
+loss intervals will have an exponential distribution. The expected
+value of the minimum of n exponentially distributed
+random variables is proportional to 1=n. Thus, if TFMCC
+based its rate calculations on a single loss interval, the average
+sending rate would scale proportionally to 1=
+n (in the
+case of moderate loss rates, otherwise even worse). The rate
+calculation in TFMCC is based on a weighted average of m
+loss intervals. Since the average of exponentially distributed
+random variables is gamma distributed, the expected loss rate
+in TFMCC is inversely proportional to the expected value for
+the minimum of n gamma distributed random variables. 5
+This effect is shown in Figure 7 for different numbers of receivers
+n with a constant loss probability. For uncorrelated
+loss at a rate of 10% and a RTT of 50 ms, the fair rate for
+the TFMCC transmission is around 300 KBit/s. This sending
+rate is reached when the receiver set consists of only a single
+5 For first order statistics of the gamma distribution, no simple closed form
+expressions exists. Details about the distribution of the minimum of gamma
+distributed random variables can be found in [8].
+Throughput
+(KBit/s)
+Number of Receivers
+constant
+distrib.
+
+Figure
+
+7: Scaling
+receiver but it quickly drops to a value of only a fraction of
+the fair rate for larger n. For example, for 10,000 receivers,
+only 1/6 of the fair rate is achieved.
+Fortunately, such a loss distribution is extremely unlikely in
+real networks. Multicast data is transmitted along the paths of
+the distribution tree of the underlying multicast routing pro-
+tocol. A lossy link high up in the tree may affect a large
+number of receivers but the losses are correlated and so the
+above effect does not occur. When some of those receivers
+have additional lossy links, the loss rates are no longer cor-
+related, rather the values are spread out over a larger inter-
+val, thus decreasing the number of receivers with similar loss
+rates. To demonstrate this effect, we choose a distribution of
+loss rates that is closer to actual loss distributions in multi-cast
+trees in that there are only a limited number of high loss
+receivers while the majority of receivers will have moderate
+loss rates. 6 Here, a small number of receivers (proportional
+to a log(n), where a is a constant) is in the high loss range of
+5-10%, some more are in the range of 2%-5%, and the vast
+majority have loss rates between 0.5% and 2%. Under such
+network conditions the throughput degradation with 10,000
+receivers is merely 30%. Thus, the throughput degradation
+plays a significant role only when the vast majority of packet
+loss occurs on the last hop to the receivers and those losses
+amount to the same loss rates.
+It is impossible to distinguish between a "stochastic" decrease
+in the sending rate and a "real" decrease caused by an increased
+congestion level (otherwise it would be possible to
+estimate the effect and adjust the sending rate accordingly).
+The degradation effect can be alleviated by increasing the
+number of loss intervals used for the loss history, albeit at
+the expense of less responsiveness.
+6 By no means do we claim that the chosen distribution exactly reflects
+network conditions in multicast distribution trees.
+Simulations
+We implemented TFMCC in the ns2 network simulator [2]
+to investigate its behavior under controlled conditions. In
+this paper, we can only report a small fraction of the simulations
+that were carried out. In all simulations below, drop-tail
+queues were used at the routers to ensure acceptable behavior
+in the current Internet. Generally, both fairness towards TCP
+and intra-protocol fairness improve when active queuing (e.g.
+RED) is used instead.
+4.1 Fairness
+Fairness towards competing TCP flows was analyzed using
+the well-known single-bottleneck topology (Figure
+a number of sending nodes are connected to as many receiving
+nodes through a common bottleneck. Figure 9 shows the
+Receivers
+Senders
+Bottleneck Link
+
+Figure
+
+8: Topology
+throughput of a TFMCC flow and two sample TCP flows (out
+of 15) from a typical example of such simulations. The average
+throughput of TFMCC closely matches the average TCP
+throughput but TFMCC achieves a smoother rate. Similar results
+can be obtained for many other combinations of flows.
+In general, the higher the level of statistical multiplexing, the
+better the fairness among competing flows. Only in scenarios
+where the number of TFMCC flows greatly exceeds the
+number of TCP flows is TFMCC more aggressive than TCP.
+The reason for this lies in the spacing of the data packets and
+buffer requirements: TFMCC spaces out data packets, while
+sends them back-to-back if it can send multiple packets,
+making TCP more sensitive to nearly-full queues typical of
+drop-tail queue management.
+If instead of one bottleneck the topology has separate bottlenecks
+on the last hops to the receivers, then we observe
+the throughput degradation predicted in Section 3. When the
+scenario above is modified such that TFMCC competes with
+single TCP flows on sixteen identical 1 MBit/s tail circuits,
+then TFMCC achieves only 70% of TCP's throughput (see
+
+Figure
+
+10).
+Throughput
+(KBit/s)
+Time
+
+Figure
+
+9: One TFMCC flow and 15 TCP flows over a single
+Throughput
+(KBit/s)
+Time
+
+Figure
+
+flow and 16 TCP flows (individual bottlenecks
+
+4.2 Responsiveness to Changes in the Loss Rate
+An important concern in the design of congestion control protocols
+is their responsiveness to changes in network condi-
+tions. Furthermore, when receivers join and leave the session
+it is important that TFMCC react sufficiently fast should a
+change of CLR be required. This behavior is investigated using
+a star topology with four links having a RTT of 60 ms and
+loss rates of 0.1%, 0.5%, 2.5%, and 12.5% respectively. At
+the beginning of the simulation the receiver set consists only
+of the receiver with the lowest loss rate. Other receivers join
+the session after 100 seconds at 50 second intervals in the
+order of their loss rates (lower-loss-rate receivers join first).
+After 250 seconds, receivers leave the transmission in reverse
+order, again with 50 second intervals in between. To verify
+that TFMCC throughput is similar to TCP throughput, an
+additional TCP connection to each receiver is set up for the
+duration of the whole experiment.
+As show in Figure 11, TFMCC matches closely the TCP
+throughput at all four loss levels. Adaption of the sending
+rate when a new higher-loss receiver joins is fast. The receiver
+needs 500-1000 ms after the join to get enough packets
+to compute a meaningful loss rate. The major part of the
+delay is caused by the exponential timer for the feedback sup-
+pression, which increases the overall delay before a new CLR
+is chosen to roughly one to three seconds. 7 The experiment
+7 Note that this high delay is caused by the use of the initial RTT in the
+feedback suppression mechanism. Once all receivers have a valid RTT esti-
+mate, the delay caused by feedback suppression is much shorter.2610
+Throughput
+(MBit/s)
+Time
+
+Figure
+
+11: Responsiveness to changes in the loss rate
+demonstrates TFMCC's very good reactivity to changes in
+congestion level.
+The delay before TFMCC assumes that a rate-limiting receiver
+left the group and the sending rate can be increased
+is configurable. Currently, an absence of feedback from the
+the feedback delay is used as an indication that
+this receiver left the group. In case explicit leave messages
+are used with the TFMCC protocol the delay can be reduced
+to one RTT.
+The same simulation setting can be used to investigate responsiveness
+to changes in the RTT. The results (not shown
+here) are similar to those above, since all four receivers have
+measured their RTT by the time the RTT changes, and the
+one-way RTT adjustments immediately indicate this change.
+With larger receiver sets, the amount of time that expires until
+a high RTT receiver is found may be greater. This effect is
+investigated in the next section.
+4.3 Initial RTT Measurements and Responsiveness
+to Changes in the RTT
+The number of receivers that measure their RTT each feed-back
+round depends on the number of feedback messages and
+thus on the parameters used for feedback suppression. Figure
+12 shows how the number of receivers with a valid RTT
+estimate evolves over time for a large receiver set and a high
+initial RTT value. The link RTTs for the 1000 receivers vary
+between ms and 140 ms and the initial RTT value is set to
+500 ms. A single bottleneck is used to produce highly correlated
+loss for all receivers. This is the worst case, since if
+loss estimates at the receivers vary, it is often unnecessary to
+measure the RTT to the low-loss receivers. Since the calculated
+rate of the receivers still using the initial RTT is below
+the current sending rate, at least one receiver will get its first
+RTT measurement per feedback round until all receivers have
+measured their RTT.
+At the beginning of the simulation, the number of receivers
+obtaining initial RTT measurements is close to the expected
+Number
+of
+Receivers
+with
+valid
+RTT
+Time
+
+Figure
+
+12: Rate of initial RTT measurements
+number of feedback messages per feedback round. Over time,
+as more and more receivers have a valid RTT, the number
+of receivers that want to give feedback decreases, and the
+rate of initial RTT measurements gradually drops to one new
+measurement per feedback round. While a delay of 200 seconds
+until 700 of the 1000 receivers have measured their RTT
+seems rather large, one should keep in mind that this results
+from having the same congestion level for all receivers. If
+some receivers experience higher loss rates, those receivers
+will measure their RTT first and TFMCC can adapt to their
+calculated rate. Under most real network conditions it will
+not be necessary to measure the RTT to all receivers.
+In scenarios with 40, 200 and 1000 receivers respectively,
+we investigate how long it takes until a high RTT receiver
+is found among receivers with a low RTT when all receiver
+experience independent loss with the same loss probability.
+The x-axis of the graph in Figure 13 denotes the point of time
+when the RTT is increased during the experiment and the y-axis
+shows the amount of time after which this change in RTT
+is reacted upon by choosing the correct CLR. The later the
+increase in RTT, the greater the number of receivers already
+having valid RTT estimates, and the expected time until the
+high-RTT receiver is selected as CLR decreases.2060100140
+Delay
+until
+Reaction
+Time of Change
+receivers
+200 receivers
+1000 receivers
+
+Figure
+
+13: Responsiveness to changes in the RTT
+4.4 Slowstart
+The highest sending rate achieved during slowstart is largely
+determined by the level of statistical multiplexing. On an
+otherwise empty link, TFMCC will reach roughly twice the
+bottleneck bandwidth before leaving slowstart, as depicted in
+
+Figure
+
+14. When TFMCC competes with a single TCP flow,
+slowstart is terminated at a rate below the fair rate 8 of the
+TFMCC flow and this rate is relatively independent of the
+number of TFMCC receivers. Already in the case of two
+competing TCP flows, and even more so when the level of
+statistical multiplexing is higher, the slowstart rate decreases
+considerably when the number of receivers increases. Most
+of the increase to the fair rate takes place after slowstart in
+normal congestion control mode.50015002500
+Max.
+Slowstart
+Rate
+(KBit/s)
+Number of Receivers
+Fair Rate
+only TFMCC
+one competing TCP
+high stat. mux.
+
+Figure
+
+14: Maximum slowstart rate
+We do not include an extra graph of the exact increase behavior
+of TFMCC compared to TCP, since it can be seen for
+example in Figures 15 and 16. TFMCC and TCP are started
+at the same time. TCP's increase to the fair rate is very rapid,
+while it takes TFMCC roughly 20 seconds to reach that level
+of bandwidth.
+4.5 Late-join of Low-rate Receiver
+In the previous experiments we investigated congestion control
+with moderate loss rates, expected to be prevalent in the
+applications domains for which TFMCC is well suited. Under
+some circumstances, the loss rate at a receiver can initially
+be much higher. Consider an example where TFMCC
+operates at a fair rate of several MBit/s and a receiver with a
+low-bandwidth connection joins. Immediately after joining,
+this receiver may experience loss rates close to 100%. While
+such conditions are difficult to avoid, TFMCC should ensure
+that they exist only for a limited amount of time and quickly
+choose the new receiver as CLR.
+The initial setup for this simulation is a eight-member TFMCC
+session competing with seven TCP connections on a 8 MBit/s
+link, giving a fair rate of 1 MBit/s. During the simulation, a
+8 The fair rate for TFMCC in all three simulations is 1 MBit/s.
+new receiver joins the session behind a separate 200 KBit/s
+bottleneck from the sender from time 50 to 100 seconds.
+TFMCC does not have any problems coping with this sce-
+nario, choosing the joining receiver as CLR within a very few
+seconds. Although the loss rate for the joining receiver is initially
+very high, the TFMCC rate does not drop to zero. As
+soon as the buffer of the 200 KBit/s connection is full, the
+receiver experiences the first loss event and the loss history
+is initialized. Details about the loss history initialization process
+can be found in Appendix B. When the first loss occurs,
+the receiver gets data at a rate of exactly the bottleneck band-
+width. Thus, the loss rate will be initialized to a value below
+the 80% value and from there adapt to the appropriate loss
+event rate such that the available bandwidth of 200 KBit/s is
+used.
+When an additional TCP flow is set up using the 200 KBit/s
+link for the duration of the experiment, this flow inevitably
+experiences a timeout when the new receiver joins the multicast
+group and the link is flooded with packets. However,
+shortly afterwards, TFMCC adapts to the available capacity
+and TCP recovers with bandwidth shared fairly between
+TFMCC and TCP.
+We conclude that TFMCC shows good performance and fair-
+ness, even under unfavorable network
+Throughput
+(KBit/s)
+Time
+aggregated TCP flows
+TFMCC flow
+
+Figure
+
+15: Late-join of low-rate receiver200600100014000 20 40
+Throughput
+(KBit/s)
+Time
+aggregated TCP flows
+TCP on 200KBit/s link
+TFMCC flow
+
+Figure
+
+Additional TCP flow on the slow link
+5 Related Work
+To date, a number of single-rate multicast congestion control
+schemes have been proposed. A prominent recent example is
+PGMCC [17]. It selects the receiver with the worst network
+conditions as a group representative, called the acker. The
+selection process for the acker mainly determines the fairness
+of the protocol, and is based on a simplified version of the
+TCP throughput model in Equation (4). Similar to TFMCC,
+each receiver tracks the RTT and the smoothed loss rate, and
+feeds these values into the model. The results are communicated
+to the sender using normal randomized feedback timers
+to avoid an implosion. If available, PGMCC also makes use
+of network elements to aggregate feedback.
+Once an acker is selected, a TCP-style window-based congestion
+control algorithm is run between the sender and the
+acker. Minor modifications compared to TCP concern the
+separation of congestion control and reliability to be able to
+use PGMCC for reliable as well as unreliable data transport
+and the handling of out of order packets and RTT changes
+when a different receiver is selected as the acker.
+As evidenced by the simulations in [17], PGMCC competes
+fairly with TCP for many different network conditions. The
+basic congestion control mechanism is simple and its dynamics
+are well understood from the analysis of TCP congestion
+control. This close mimicking of TCP's window behavior
+produces rate variations that resemble TCP's sawtooth-
+like rate. This makes PGMCC suited for applications that
+can cope with larger variations in the sending rate. In con-
+trast, the rate produced by TFMCC is generally smoother
+and more predictable, making TFMCC well suited to applications
+with more constraints on acceptable rate changes. Since
+the acker selection process is critical for PGMCC's perfor-
+mance, PGMCC might benefit from using a feedback mechanism
+similar to that of TFMCC, based on biased exponentially
+weighted timers. To summarize, we believe that both
+PGMCC and TFMCC present viable solutions for single-rate
+multicast congestion control, targeted at somewhat different
+application domains.
+While PGMCC relies on a congestion window, TCP-Emulation
+at Receivers (TEAR) [16] is a combination of window- and
+rate-based congestion control. It features a TCP-like window
+emulation algorithm at the receivers, but the window is not
+used to directly control transmission. Instead, the average
+window size is calculated and transformed into a smoothed
+sending rate, which is used by the sender to space out data
+packets. So far, only a unicast version of TEAR exists, but
+the mechanism can be made multicast-capable by implementing
+a TFMCC-like scalable feedback suppression scheme to
+communicate the calculated rate to the sender as well as scalable
+RTT measurements. The advantage of TEAR lies in
+the fact that it does not require a model of TCP with all the
+necessary assumptions to compute a rate. However, for low
+levels of statistical multiplexing, TEAR's emulation assumptions
+about the independence of loss timing from transmit rate
+and of timeout emulation mean that it shares many of the limitations
+of the TCP models we use. Thus we do not expect a
+multicast variant of TEAR to behave significantly better or
+worse than TFMCC.
+6 Conclusions
+We have described TFMCC, a single-rate multicast congestion
+control mechanism intended to scale to groups of several
+thousand receivers. Performing multicast congestion control
+whilst remaining TCP-friendly is difficult, in particular because
+TCP's transmission rate depends on the RTT, and measuring
+RTT in a scalable manner is a hard problem. Given the
+limitations of end-to-end protocols, we believe that TFMCC
+represents a significant improvement over previous work in
+this area.
+We have extensively evaluated TFMCC through analysis and
+simulation, and believe we have a good understanding of its
+behavior in a wide range of network conditions. To summa-
+rize, we believe that under the sort of conditions TFMCC
+will experience in the real-world it will behave rather well.
+However we have also examined certain pathological cases;
+in these cases the failure mode is for TFMCC to achieve a
+slower than desired transmission rate. Given that all protocols
+have bounds to their good behavior, this is the failure
+mode we would desire, as it ensures the safety of the Internet.
+An important part of any research is to identify the limitations
+of a new design. TFMCC's main weakness is in the
+startup phase - it can take a long time for sufficiently many
+receivers to measure their RTT (assuming we cannot use NTP
+to provide approximate default values). In addition, with
+large receiver sets, TCP-style slowstart is not really an appropriate
+mechanism, and a linear increase can take some time to
+reach the correct operating point. However these weaknesses
+are not specific to TFMCC - any safe single-rate multicast
+congestion control mechanism will have these same limitations
+if it is TCP-compatible. The implication is therefore
+that single-rate multicast congestion control mechanisms like
+TFMCC are only really well-suited to relatively long-lived
+data streams. Fortunately it also appears that most current
+multicast applications such as stock-price tickers or video
+streaming involve just such long-lived data-streams.
+6.1 Future Work
+We plan to pursue this work further on several fronts. While
+large-scale multicast experiments are hard to perform in the
+real world, we plan to deploy TFMCC in a multicast filesystem
+synchronization application (e.g. rdist) to gain small-scale
+experience with a real application.
+Some reliable multicast protocols build an application-level
+tree for acknowledgment aggregation. We have devised a
+hybrid rate/window-based variant of TFMCC that uses implicit
+RTT measurement combined with suppression within
+the aggregation nodes. This variant does not need to perform
+explicit RTT measurements or end-to-end feedback suppres-
+sion. Whilst at first glance this would seem to be a big improvement
+over the variant in this paper, in truth it moves
+the complex initialization problem from RTT measurement
+to scalable ack-tree construction, which shares many of the
+problems posed by RTT measurement. Still, this seems to be
+a promising additional line of research.
+Finally, the basic equation-based rate controller in TFMCC
+would also appear to be suitable for use in receiver-driven
+layered multicast, especially if combined with dynamic layering
+[4] to eliminate problems with unpredictable multicast
+leave latency.
+
+Acknowledgements
+
+We would like to thank Sally Floyd and Luigi Rizzo for their
+invaluable comments. We would also like to acknowledge
+feedback and suggestions received from RMRG members on
+earlier versions of TFMCC.
+
+
+
+--R
+
+A web server's view of the transport layer.
+
+The loss path multiplicity problem in multicast congestion con- trol
+
+
+A reliable multicast framework for light-weight sessions and application level framing
+On the scaling of feedback algorithms for very large multicast groups.
+Order statistics from the gamma distribu- tion
+Session directories and scalable Internet multicast address allocation.
+RFC 2357: IETF criteria for evaluating reliable multi-cast transport and application protocols
+The macroscopic behavior of the congestion avoidance al- gorithm
+
+Internet timekeeping around the globe.
+Scalable feed-back for large groups
+Modeling TCP Reno performance: a simple model and its empirical validation.
+TEAR: TCP emulation at receivers - flow control for multimedia stream- ing
+
+
+Extremum feedback for very large multicast groups.
+Extending equation-based congestion control to multicast applications
+--TR
+Receiver-driven layered multicast
+A reliable multicast framework for light-weight sessions and application level framing
+Session directories and scalable Internet multicast address allocation
+Scalable feedback for large groups
+Modeling TCP Reno performance
+pgmcc
+Equation-based congestion control for unicast applications
+FLID-DL
+A web server''s view of the transport layer
+
+--CTR
+Jiang Li , Murat Yuksel , Shivkumar Kalyanaraman, Explicit rate multicast congestion control, Computer Networks: The International Journal of Computer and Telecommunications Networking, v.50 n.15, p.2614-2640, October 2006
+Hualiang Chen , Zhongxin Liu , Zengqiang Chen , Zhuzhi Yuan, Extending TCP congestion control to multicast, Computer Networks: The International Journal of Computer and Telecommunications Networking, v.51 n.11, p.3090-3109, August, 2007
+Jiang Li , Murat Yuksel , Xingzhe Fan , Shivkumar Kalyanaraman, Generalized multicast congestion control, Computer Networks: The International Journal of Computer and Telecommunications Networking, v.51 n.6, p.1421-1443, April, 2007
+Alexandre Brandwajn, A model of periodic acknowledgement, Performance Evaluation, v.52 n.4, p.221-235, May
+Jrg Widmer , Catherine Boutremans , Jean-Yves Le Boudec, End-to-end congestion control for TCP-friendly flows with variable packet size, ACM SIGCOMM Computer Communication Review, v.34 n.2, April 2004
+I. El Khayat , P. Geurts , G. Leduc, Machine-learnt versus analytical models of TCP throughput, Computer Networks: The International Journal of Computer and Telecommunications Networking, v.51 n.10, p.2631-2644, July, 2007
+Injong Rhee , Lisong Xu, Limitations of equation-based congestion control, ACM SIGCOMM Computer Communication Review, v.35 n.4, October 2005
+Jrme Viron , Thierry Turletti , Kav Salamatian , Christine Guillemot, Source and channel adaptive rate control for multicast layered video transmission based on a clustering algorithm, EURASIP Journal on Applied Signal Processing, v.2004 n.1, p.158-175, 1 January 2004
+X. Brian Zhang , Simon S. Lam , Dong-Young Lee, Group rekeying with limited unicast recovery, Computer Networks: The International Journal of Computer and Telecommunications Networking, v.44 n.6, p.855-870, 22 April 2004
+John W. Byers , Gu-In Kwon , Michael Luby , Michael Mitzenmacher, Fine-grained layered multicast with STAIR, IEEE/ACM Transactions on Networking (TON), v.14 n.1, p.81-93, February 2006
+Ch. Bouras , A. Gkamas, SRAMT: a hybrid sender and receiver-based adaptation scheme for TCP friendly multicast transmission, Computer Networks and ISDN Systems, v.47 n.4, p.551-575, 15 March 2005
+Injong Rhee , Lisong Xu, Limitations of equation-based congestion control, IEEE/ACM Transactions on Networking (TON), v.15 n.4, p.852-865, August 2007
+Puneet Thapliyal , Sidhartha , Jiang Li , Shivkumar Kalyanaraman, LE-SBCC: Loss-Event Oriented Source-Based Multicast Congestion Control, Multimedia Tools and Applications, v.17 n.2-3, p.257-294, July-August 2002
+Yuan Gao , Jennifer C. Hou , Sanjoy Paul, RACCOOM: A Rate-Based Congestion Control Approach for Multicast, IEEE Transactions on Computers, v.52 n.12, p.1521-1534, December
+Christoph Neumann , Vincent Roca , Rod Walsh, Large scale content distribution protocols, ACM SIGCOMM Computer Communication Review, v.35 n.5, October 2005
+C. Bouras , A. Gkamas , A. Karaliotas , K. Stamos, Architecture and Performance Evaluation for Redundant Multicast Transmission Supporting Adaptive QoS, Multimedia Tools and Applications, v.25 n.1, p.85-110, January 2005

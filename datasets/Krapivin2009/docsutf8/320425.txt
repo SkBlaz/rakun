@@ -1,0 +1,1139 @@
+--T
+Age-based garbage collection.
+--A
+Modern generational garbage collectors look for garbage among the young objects, because they have high mortality; however, these objects include the very youngest objects, which clearly are still live. We introduce new garbage collection algorithms, called age-based, some of which postpone consideration of the youngest objects. Collecting less than the whole heap requires write barrier mechanisms to track pointers into the collected region. We describe here a new, efficient write barrier implementation that works for age-based and traditional generational collectors. To compare several collectors, their configurations, and program behavior, we use an accurate simulator that models all heap objects and the pointers among them, but does not model cache or other memory effects. For object-oriented languages, our results demonstrate that an older-first collector, which collects older objects before the youngest ones, copies on average much less data than generational collectors. Our results also show that an older-first collector does track more pointers, but the combined cost of copying and pointer tracking still favors an older-first over a generational collector in many cases. More importantly, we reopen for consideration the question where in the heap and with which policies copying collectors will achieve their best performance.
+--B
+INTRODUCTION
+Dynamic memory management (management of heap-allocated ob-
+jects) using garbage collection has become part of mainstream computing
+with the advent of Java, a language that uses and requires
+This work is supported in part by NSF grant IRI-9632284, and by
+gifts from Compaq Corp., Sun Microsystems, and Hewlett-Packard.
+Kathryn S. M c Kinley is supported by an NSF CAREER Award CCR-
+9624209. Any opinions, findings, and conclusions or recommendations
+expressed in this material are those of the author(s) and do not
+necessarily reflect the views of the National Science Foundation or
+other sponsors.
+To appear in OOPSLA'99, Denver, November 1999.
+garbage collection. This wider use of garbage collection makes it
+more important to ensure that it is fast. Garbage collection has been
+investigated for decades in varying contexts of functional and object-oriented
+language implementation (e.g., Lisp, ML, Smalltalk). The
+consensus, for uniprocessor systems operating within main memory,
+is that a class of algorithms known as generational copying collection
+performs quite well in most situations. While the breadth of variation
+within the class is considerable, the algorithms have this in common:
+objects are grouped according to their age (time elapsed since object
+allocation), and the younger groups or generations are examined more
+often than older ones. In particular, the most recently allocated objects
+are collected first. In this paper, we present a new copying collection
+algorithm, called Older-First, that maintains the grouping by age, but
+chooses to collect older objects (following a particular policy which
+we describe in Section 2). Our algorithm achieves lower total cost,
+sometimes dramatically, than traditional copying generational collection
+for a number of Java and Smalltalk programs. Why does it improve
+performance?
+Let us consider the costs that copying garbage collection imposes
+on the run-time system. First, there is the cost of copying objects
+when they survive a collection. Second, to allow the collector to examine
+only a portion of the heap at a time, bookkeeping actions must
+log changes to pointers (references) that go from one portion to an-
+we call this pointer-tracking. Some of the pointer-tracking is
+interleaved with program execution whenever the program writes a
+pointer (i.e., the write barrier), while some is done at garbage collection
+time. Third, the program itself and the garbage collection algo-
+rithm(s) have different cache and memory behaviors, which interact
+in complex ways. These effects are beyond the scope of this paper
+and are left for future work. In this paper, the total cost of collection
+refers to combined cost of the pointer tracking and copying collection.
+Generational copying collection performs better than non-
+generational, i.e., full heap, copying collection because it achieves
+markedly lower copying costs. On the other hand, it must incur the
+cost of pointer tracking, whereas non-generational collection has no
+need to track pointers because it always examines the entire heap.
+Thus, generational collection incurs a pointer-tracking cost that is off-set
+by a much reduced copying cost. We have discovered that there is
+a trade-off between copying and pointer-tracking costs that can be exploited
+beyond generational copying collection. Our Older-First (OF)
+algorithm usually incurs much higher pointer-tracking costs than generational
+algorithms, but also enjoys much lower copying costs. We
+find that most pointer stores and the objects they point to are among
+the youngest objects, and by moving the collected region outside these
+youngest objects, OF must track more pointers. However, OF lowers
+copying costs because it gives objects more time to die, and does not
+collect the very youngest objects which clearly have not had time to
+die. In the balance, its total cost is usually lower than the total cost
+of generational copying collection, in some cases by a factor of 4. In
+itself, OF is very promising, but, more importantly, its success reveals
+the potential for other flexible collection policies to exploit this trade-off
+and further improve garbage collection performance.
+In Section 2 we describe our new collection algorithm within a
+broader classification of age-based algorithms. We present our benchmark
+suite in Section 3, and assess the copying performance of the
+family of age-based collectors in Section 4. We then consider implementation
+issues, including a new fast write barrier in Section 5. Section
+6 evaluates the combined costs of copying and pointer-tracking.
+The results call for a reevaluation of the premises and explanations of
+observed performance of copying collectors, which is the subject of
+Section 7.
+Upon a garbage collection, each scheme we consider partitions the
+heap into two regions: the collected region C, in which the collector
+examines the objects for liveness, and if live, they survive the collec-
+tion; and the uncollected remainder region U , in which the collector
+assumes the objects to be live and does not examine them. The non-
+generational collector is a degenerate case in which the uncollected
+region is empty. The collector further partitions the set C into the set
+of survivor objects S and the set of garbage objects G, by computing
+root pointers into C and the closure of the points-to relation within C.
+To make the freed space conveniently available for future allocation,
+the collector manipulates the survivors S by copying (or compacting)
+them.
+The amount of work involved is, to a first approximation, proportional
+to the amount of survivor data, and so that should be minimized.
+Ideally we choose C so that S is empty; in the absence of some ora-
+cle, we must look for schemes that organize heap objects so that the
+partition into C and U is trivial, and then find heuristics that make S
+small.
+We restrict attention to a class of schemes that keep objects in a
+linear order according to their age. Imagine objects in the heap as if
+arranged from left to right, with the oldest on the left, and the youngest
+on the right, as in Figure 1. The region collected, C, is restricted to be
+a contiguous subsequence of this sequence of heap objects, thus the
+cost of the initial partition is practically nil. We call these schemes
+age-based collection.
+Traditional generational collection schemes are, in the main, age-
+based: the region collected is some subsequence of youngest (most
+recently allocated) objects. Copying collectors may reorder objects
+somewhat during copying since they typically follow pointers
+breadth-first instead of in age order. In compacting collectors, re-ordering
+does not occur.
+In this paper, we introduce and categorize alternative collection
+schemes according to their choice of objects for collection. In all
+these collectors, we fix the size of the collected region rather than
+allowing it to vary during program execution, to simplify our analysis.
+Previous research shows that dynamically sizing the collected region
+can improve performance [29, 36, 34, 1, 5], but this investigation is
+beyond the scope of our paper.
+A youngest-only (YO) collector always chooses some youngest
+(rightmost) subsequence of the sequence of heap objects (Figure 2).
+In our implementation, the YO collector fills the entire heap and then
+repeatedly collects the youngest portion of the heap including objects
+surviving the last collection. The time in allocation between collections
+is the amount the YO collector frees. This collector might have
+good performance if object death is only, or mainly, among the new
+objects.
+Generational collector schemes are variants of youngest-only col-
+lection, differing however in how they trigger collections [5]. In the
+basic design [17, p.147], new allocation is into one fixed-size part of
+the heap (the nursery), and the remainder is reserved for older objects
+oldest youngest
+allocation
+direction
+
+Figure
+
+1: Viewing the heap as an age-ordered list.
+jCj: collected region U : region(s) not collected)
+region of survivors : area freed for new allocation
+Legend for Figures 2-5.
+youngest
+Collection 1
+U
+U Collection 2
+oldest
+
+Figure
+
+2: Youngest-only (YO) collection.
+from
+reserve
+from
+reserve
+youngest
+Collection 1
+U Collection 2
+reserve
+nursery
+older generation
+oldest
+reserve
+reserve
+put on
+freed
+U
+freed
+freed
+oldest
+oldest
+(full heap)
+
+Figure
+
+3: Generational youngest-only collection.
+(the older generation). Whenever the nursery fills up, it is collected,
+and the survivors are promoted to the older generation (Figure 3).
+When the older generation fills up, then the following collection collects
+it together with the nursery. In a two-generation collector, that
+collection considers the entire heap.
+Note that the generational collector deliberately does not allocate
+directly into the space reserved for the older generations, so that,
+unlike YO, the region chosen for collection contains exactly the objects
+allocated since the last collection (except for full heap collec-
+tions). We study two and three generation schemes: 2G (2 Genera-
+tions; youngest-only) and 3G. We assume the size of each generation
+is strictly greater than 0, and therefore 3G never degenerates into 2G. 1
+An oldest-only (OO) collector always chooses an oldest (leftmost)
+subsequence of the sequence of heap objects (Figure 4). In our imple-
+mentation, the OO collector initially waits for the entire heap to fill
+and then repeatedly examines the oldest objects including those surviving
+the previous collection. As in the YO collector, only the resulting
+free amount is available for allocation. An object is more likely
+to be dead the longer we wait, hence the OO collector might have
+good performance. Of course, it will suffer if there are any objects
+that survive the entire length of the program because it will copy them
+repeatedly.
+An older-first (OF) collector chooses a middle subsequence of
+heap objects, which is immediately to the right of the survivors of the
+previous collection (Figure 5). Thus the region of collection sweeps
+the heap rightwards, as a window of collection. The resulting free
+blocks of memory move to the nursery. Initially, objects fill the entire
+heap and the window is positioned at the oldest end of the heap. After
+collecting the youngest or right end of the heap, the window is reset
+to the left or old end.
+The intuition for the potentially good performance of this collector
+can be gleaned from the diagram in Figure 6, which shows a series of
+eight collections, and indicates how the window of collection moves
+across the heap when the collector is performing well. If the window
+is in a position that results in small survivor sets (Collections 4-8),
+then the window moves by only that small amount from one collection
+to the next. The remaining window size is freed and becomes available
+for allocation. As the window continues to move slowly, it remains
+for a long time in the same region, corresponding to the same age of
+objects. A great deal of allocation takes place without many objects'
+being copied; almost a window size between successive collections.
+How long the window remains in a good position, and how long it
+takes to find this "sweet spot" again once it leaves, will determine the
+performance of the collector for a particular workload, heap size, and
+window size.
+We refer to the OF, OO, and YO collectively as FC collectors
+Collection window). The base point of our comparisons is
+the non-generational collector (NG), which considers the entire heap
+in each collection. Note that it is possible for an FC collector to find
+no garbage in the collected region. If that happens, we let the collector
+fail for the purposes of this study. (An implementation could increase
+the heap size temporarily, or retry collection on another region, perhaps
+the whole heap, or increase the window size adaptively.) Because
+generational schemes by design occasionally consider the whole heap,
+they enjoy an advantage over the new schemes as simulated here.
+
+Table
+
+lists our benchmarks, which include Smalltalk and Java programs
+and their basic properties relevant to garbage collection perfor-
+mance: amount of data allocated in words (each word being 4 bytes),
+number of objects allocated, maximum live amount (which is also
+We also examined a scheme in which the older generation is allowed
+to grow into the nursery, and vice versa [1], but it performed
+similarly to 2G and 3G.
+oldest youngest
+U
+Collection 1
+Collection 2
+
+Figure
+
+4: Oldest-only collection.
+youngest
+U
+U
+Collection 2
+oldest
+U
+Collection 3
+U C
+
+Figure
+
+5: Older-first collection.
+Collection 1
+Collection 2
+Collection 4
+Collection 5
+Collection 6
+Collection 7
+Collection 8
+Collection 3
+oldest youngest
+
+Figure
+
+Older-first window motion example.
+Pointer stores
+Benchmark Words alloc. Objects alloc. Max. live total alloc./st. non-null %
+Java
+Bloat-Bloat 37 364 458 3 429 007 202 435 4 927 497 7.58 4 376 798 88.8
+Toba 38 897 724 4 168 057 290 276 3 027 982 12.85 2 944 672 97.2
+StandardNonInteractive 204 954
+Tree-Replace-Binary 209 600
+Tree-Replace-Random 925 236 189 549 13 114 168 513 5.49 140 029 83.1
+Richards 4 400 543 652 954 1 498 763 626 5.76 611 767 80.1
+
+Table
+
+1: Benchmark Properties
+the minimum required heap size to execute the program), total number
+of pointer stores, words of allocation per pointer store, number of
+non-null pointer stores, and the percentage of pointer stores that are
+non-null.
+We now describe individual benchmarks, providing where possible
+details of their structure. Our set of Java programs is as follows:
+ffl JavaBYTEmark. A port of the BYTEmark benchmarks to Java,
+from the BYTE Magazine Web-site.
+ffl Bloat-Bloat. The program Bloat, version 0.6, [21] analyzing
+and optimizing the class files from its own distribution.
+ffl Toba. The Java-bytecode-to-C translator Toba working on
+Pizza [22] class files [23].
+Our set of Smalltalk programs is as follows:
+ffl StandardNonInteractive. A subset of the standard sequence of
+tests as specified in the Smalltalk-80 image [12], comprising
+the tests of basic functionality.
+ffl HeapSim. Program to simulate the behavior of a garbage-collected
+heap, not unlike the simplest of the tools used in this
+study. It is however instructed to simulate a heap in which object
+lifetimes follow a synthetic (exponential) distribution, and
+consequently the objects of the simulator itself exhibit highly
+synthetic behavior.
+ffl Lambda-Fact5 and Lambda-Fact6. An untyped lambda-calculus
+interpreter, evaluating the expressions 5! and 6! in the
+standard Church numerals encoding [4, p.140]. Previously used
+in Ref. [15]. We used both input sizes to explore the effects of
+scale.
+ffl Swim. The SPEC95 benchmark, translated into Smalltalk by
+the authors: shallow water model with a square grid.
+ffl Tomcatv. The SPEC95 benchmark, translated into Smalltalk by
+the authors: a mesh-generation program.
+Tree-Replace-Binary. A synthetic program that builds a large
+binary tree, then repeatedly replaces randomly chosen subtrees
+at fixed height with newly built subtrees. (This benchmark was
+named Destroy in Ref. [15, 14].) Tree-Replace-Random is a
+variant which replaces subtrees at randomly chosen heights.
+ffl Richards. The well-known operating-system event-driven simulation
+benchmark. Previously used in Ref. [15].
+The idea of Older-First collection sufficiently diverges from established
+practice that it is instructive first to determine whether it is
+feasible in principle, before going into the details of an implemen-
+tation. With the understanding that pointer-tracking costs are likely
+to be higher in older-first collection than in generational collection,
+we sought a quick estimate of copying cost to discover if the promise
+of
+
+Figure
+
+6 is delivered on actual programs. We built an object-level
+simulator that executes the actions of each of the collectors exactly as
+depicted in Figures 2-5. The simulator is much simpler than the actual
+implementation: objects and collection windows of arbitrary sizes are
+allowed, the age order is perfectly preserved on collection, and pointers
+are not tracked. This simulator can produce the statistics of the
+amount of data copied over the run of a program, which, divided by
+the amount allocated, gives the "mark/cons" ratio, traditionally used
+as a first-order measure of garbage collector performance.
+We now discuss the copying cost estimate results for two Java
+benchmarks, JavaBYTEmark and Bloat-Bloat, then summarize and
+make some general observations. Figures 7 and 8 each present two
+graphs: Graph (a) compares the best performance of each collection
+scheme (OO, YO, OF, 2G, 3G), plotting the mark/cons ratio (the copying
+cost that we would like to minimize), relative to NG, against heap
+size. Performance depends on the heap size available to the collector,
+which is laid along the horizontal axis. For each heap size, we simulated
+many configurations of each collection scheme. This graph only
+includes the best configuration of each collector. Graph (b) provides
+details of different configurations of each collector for one representative
+heap size, plotting the relative mark/cons ratio against the size
+of the collected region or nursery as fraction of the heap size.
+JavaBYTEmark. For this program, the OF scheme copies significantly
+less data than all other schemes under all configurations. In
+fact, it copies over a factor of 10 fewer objects than the 3G collector.
+As we see in Figure 7(b), it attains this performance even while keeping
+the window of collection small: 20% of total heap size. In smaller
+heaps not shown here, the best window size for OF grows up to 40%
+of the heap. The generational collectors in Figure 7(b) only approach
+their best configurations when the nursery constitutes over 50% of the
+heap. Thus, the OF scheme copies much less using a smaller window
+size. Small window sizes are desirable because they contribute
+to keeping pause times for collection short, which is especially important
+in interactive programs.
+The reason for this dramatic reduction in copying cost is exactly
+the scenario described in Figure 6. Many objects wait until middle
+age to die, and the OF collector is able to find them just as they die,
+100000150000 200000250000300000 350000400000
+Mark/cons
+ratio
+of
+best
+configuration
+(relative
+to
+Heap size (words)
+JavaBYTEmark
+OO
+YO
+OF
+Mark/cons
+ratio
+(relative
+to
+Fraction collected (of total heap size 238885)
+JavaBYTEmark
+OO
+YO
+OF
+(b) Representative heap size.
+
+Figure
+
+7: Copying cost estimates, JavaBYTEmark.0.20.61
+400000 600000 800000 1e+06
+Mark/cons
+ratio
+of
+best
+configuration
+(relative
+to
+Heap size (words)
+Bloat-Bloat
+OO
+YO
+OF
+Mark/cons
+ratio
+(relative
+to
+Fraction collected g (of total heap size 446984)
+Bloat-Bloat
+OO
+YO
+OF
+(b) Representative heap size.
+
+Figure
+
+8: Copying cost estimates, Bloat-Bloat.
+and to stay in a sweet spot for a long time. The OF collector does
+occasionally sweep through the heap and as a result revisits the oldest
+objects repeatedly. When we examine the lifetimes of the objects in
+this program [25] we find there are a number of long lived objects.
+Thus, the OF collector is repeatedly copying these objects (whereas
+generational collectors by design rarely copy these objects); nevertheless
+it copies a factor of 10 less data.
+As it is the trend in most of the benchmarks, OF collection out-performs
+OO and YO. OF collection achieves similarly low copying
+costs that are also integer factors better than the generational collectors
+using a small window size on StandardNonInteractive, HeapSim,
+Richards, Lambda-Fact6, and Lambda-Fact5.
+Bloat-Bloat. Figure 8(a) illustrates that the best configurations of
+OF, 2G, and 3G, all exhibit comparable and low copying cost. Fur-
+thermore, Figure 8(b) shows that these 3 collectors achieve close to or
+their minimums with a window size around 40% of the entire heap.
+The OF collector (as simulated for this study) fails with a window
+size below 20%, because long-lived data spans more than the collection
+window [25]. These results are representative of the remaining 8
+programs. Comparing 2G with 3G collection in Figure 8(a) and (b)
+reveals no significant differences in the best configurations, but many
+configurations of the 3G collector perform worse, sometimes much
+worse, than the 2G collector.
+4.1 Comparing 2 and 3 Generations
+Several of the programs follow the trend we see in Figure 7(a) for
+JavaBYTEmark, in which 3G copies fewer objects than 2G. Jav-
+aBYTEmark is the program in our suite in which the 3G collector
+enjoys the largest advantage over the 2G collector. The more detailed
+presentation in Figure 7(b) reveals however that there are many configurations
+of the 3G collector that the 2G collector outperforms. This
+trend is true for the other programs as well, and demonstrates the difficulty
+of configuring generations well. For the remaining 9 programs,
+Toba, Bloat-Bloat, Lambda-Fact5, Lambda-Fact6, HeapSim, Swim,
+Tomcatv, Tree-Replace-Binary, and Tree-Replace-Random, the 2G
+collector copies the same amount or less than a 3G collector.
+4.2 Comparing FC Collectors.
+As it is demonstrated by JavaBYTEmark and Bloat-Bloat, the OF collector
+usually copies significantly less data than the OO and YO collec-
+tors. There are however a few programs for which the OO collector
+performs the best: Tree-Replace-Random and Tree-Replace-Binary.
+In these programs, there is very little long-lived data [25]. Random
+replacement of random subtrees or the interior node connected to the
+leaves of the binary tree does indeed imply that the longer the collector
+waits the more likely an object will be garbage. However, such synthetic
+programs are probably not representative of behaviors in users'
+programs, and most programs do have some very long-lived data [10].
+4.3 Conclusion.
+The copying cost estimates show great promise for the Older-First
+algorithm on a set of benchmarks. We therefore consider the issues
+involved in an actual implementation, and then proceed to the evaluation
+of a prototype. To simplify the investigation and the presenta-
+tion, we will focus on the two-generation collector 2G (since we have
+found that it is usually comparable to the three-generation one) and
+the Older-First algorithm OF.
+While OF collection reduces copying costs, it may increase write barrier
+costs. This potential increase prompted us to consider carefully
+which pointer stores need to be remembered in our prototype imple-
+mentation. Generational collectors remember pointers from older to
+younger generations, but not within generations. Thus, stores into the
+youngest generation, including objects just allocated (in the nursery),
+never need to be remembered. The corresponding rule for OF collection
+is based on the following observation: when a store creates
+a reference p ! q, then we need to remember it only if q might be
+collected before p. Figure 9 shows diagrammatically which pointers
+an OF collector must remember, according to their direction between
+different regions of the heap. For example, the pointer store that creates
+the pointer
+\Theta
+\Theta
+q need not be remembered, because object
+
+\Theta
+will necessarily fall into the collected region earlier than
+\Theta
+q will.
+oldest
+region of next collection
+youngest
+allocation
+direction
+
+Figure
+
+9: Directional filtering of pointer stores: crossed-out pointers
+need not be remembered.
+allocation copying
+youngest oldest
+region of
+next collection
+high addresses low addresses
+
+Figure
+
+10: Directional filtering with an address-ordered heap.
+At first glance, it would appear complex and expensive to do the
+filtering suggested by Figure 9, although not more than in flexible
+generational collectors [15]. However, if we reorder the regions of the
+heap physically as shown in Figure 10, then the test can be simpler
+still: we need only test if the store creates a pointer in a particular direction
+and possibly crossing a region boundary. A large zone of the
+virtual address space is set aside for allocation from higher addresses
+to lower. The collection region also moves from higher addresses to
+lower, but lags behind the allocation; the survivors are evacuated into
+the next similarly sized zone at lower addresses. If the collection region
+catches up with allocation (equivalent to reaching the right end
+in the logical layout of Figure 9), the former allocation zone is re-
+leased, the former copying zone becomes the allocation zone, and a
+new copying zone is acquired. The organization of Figure 10 is especially
+attractive with a very large address space and with some co-operation
+from the operating system, to acquire and release address
+space as the heap progresses from higher to lower addresses.
+Our implementation is based on allocating fixed-size blocks to the
+various heap regions, with the collector constrained to collect an integral
+number of blocks. This structure, with a block table, simply and
+quickly maps from addresses to remembered sets.
+Since the block size is a power of two, blocks are aligned by block
+size, and the collection window moves from higher to lower addresses,
+we essentially test if p < q:
+if (p < (q & -mask))
+remember p in q's remset;
+Adjusting one of the pointers using the mask eliminates stores
+within the same block. This test is important, since the vast majority
+of stores are to nearby objects, and thus tend not to cross block boundaries
+[25]. The directional test (<) also reduces the number of pointers
+remembered.
+This write barrier, then, filters stores inline so that out-of-line code
+to remember a pointer is only executed for those cross-block pointers
+where the source block of the pointer may be collected after its target
+block. The test above also filters out stores of null pointers. In
+essence, it is treating the null pointer value of 0 as referring to an object
+that will never be collected, without the need for an additional
+explicit test.
+Assuming that p and q are in registers and that the mask fits in the
+immediate field of an instruction, the above sequence requires only
+three instructions: mask, compare, and conditional branch. On the
+Alpha processor we indeed obtain such a sequence. The SPARC requires
+an additional instruction to construct the mask, since the immediate
+fields are too small for reasonable block sizes. One can dedicate
+a register to hold the mask, and thereby reduce the sequence to three
+instructions.
+The slow path to remember a pointer at the write barrier consists
+of the following: determine the target object's block (shift the address
+right), index a block table (the base of which is in a register), load a
+pointer into the block's remembered set, decrement the remembered
+set pointer and check for underflow (explained in a moment), save the
+pointer to be remembered, and store the decremented remembered set
+pointer back into the block table. We organize each block's (genera-
+tion's, in a generational collector) remembered set as a linked list of
+chunks, where each chunk holds 15 remembered pointers in sequential
+memory addresses. We allocate these chunks on aligned memory
+boundaries, so the underflow test consists of checking if some low bits
+of the remembered set pointer are all 0.
+Garbage collection requires a space overhead for its auxiliary data
+structures for pointer remembering; since our evaluation of the time
+overhead is with respect to a given heap size, a fair comparison of
+different collectors requires the space allowed each collector for ordinary
+data to be diminished by the amount needed for auxiliary data
+(which it is difficult to do a priori). In our study, OF collectors have
+a greater space overhead than 2G because their pointer filtering is less
+efficient. However, we measured the space overhead of OF on our
+suite of benchmarks to be only 1% of heap size-therefore the consequent
+time overheads are negligible.
+6 EVALUATING TOTAL COLLECTION
+COSTS
+We evaluate our proposed collection algorithm and write barrier on
+our benchmark suite using a combination of simulation and prototyp-
+ing. We obtained heap traces (described in detail below) from program
+runs in a Smalltalk and a Java virtual machine. These traces are independent
+of the storage management scheme of the system from which
+they were collected. For each collection algorithm we study, we process
+the traces using a driver routine, which performs relevant actions
+(such as object allocation and mutation) on objects in a heap. An
+actual implementation of the particular collection algorithm manages
+the heap. From this implementation, we obtain exact counts of various
+relevant quantities, such as the number of objects copied, number
+of bytes copied, and write barrier actions, which we use to estimate
+execution times.
+6.1 Obtaining Counts and Volumes
+We now describe in more detail how we obtained the counts and volumes
+we report in our results.
+Traces. Our traces indicate each object allocation (with the size
+of the object), each update of a pointer field of a heap object, and
+each object "death" (an object dies when it ceases to be reachable).
+Object death is precise-in the tracing system we perform a complete
+garbage collection immediately before each object allocation,
+and note in the trace the objects that have died since the previous allo-
+cation. While this tracing technique is time-consuming, it does mean
+that when we present the traces to any actual collection algorithm, we
+will observe exactly the collection behavior we would have obtained
+from the corresponding program (but without running the program).
+Driver. The driver routine is straightforward in concept: it simply
+reads and obeys each trace record, by taking appropriate action on the
+prototype heap implementation. A key difference between the driver
+and a live program is that, since our traces do not include manipulations
+of local and global variables, the driver keeps a table (on the
+side) of all live objects. When the driver processes an object death
+record, it deletes the corresponding object from the table of live ob-
+jects. From the point of view of the collector, the driver thus differs
+from a live program only in that more objects are referred to directly
+rather than reached only via other objects.
+Prototype heap implementations and write barriers. All the
+heap implementations share some common infrastructure. Each heap
+consists of a collection of blocks, which are aligned, 2 k -byte portions
+of memory. We varied the block size in some experiments. Each heap
+also has remembered set data structures and write barriers appropriate
+to that heap. For example, the generational heap uses a generational
+comparison, whereas the OF heap uses the same-block and directional
+filtering. We note that these implementations are highly instrumented,
+so that we can tell how many pointer stores go down each filtering
+path of each write barrier. Likewise, the collector cores are highly
+instrumented to obtain accurate counts of copying actions. We do not
+obtain wall-clock timings from these prototype heap implementations.
+6.2 Estimating Execution Times
+Pending a complete implementation, we carefully implemented the
+write barriers and other actions and timed them. All code fragments
+have the same advantages, i.e., they execute in tight loops with important
+quantities in registers, so we argue that the ratio of their timings
+gives a reasonable order-of-magnitude estimate of the ratio we would
+expect in an actual implementation, even though the absolute values
+of the timings are optimistic.
+We used a 292 MHz Alpha 21164. We took a cycle count measurement
+by running a piece of code, with and without the fragment
+we wished to measure, for many iterations of a loop, then taking the
+difference in times and dividing by the clock period.
+Write barrier. Depending on the details of the loop in which we
+embedded the barrier, the fast path took 1, 2, or 3 cycles, which we
+expected since the original sequence is 3 instructions and the Alpha
+has an issue width of 4 (i.e., the alignment matters). We use 2 cycles
+in our estimates. Remembering a pointer on the slow path of the write
+barrier takes an average of 11 cycles (including the original test, and
+the time needed for chunk management on overflow). Finally, to fetch
+a remembered set entry, examine the target object, and possibly start
+to copy the object takes 13 cycles on average. Thus the total cost to
+create and process a remembered set entry, exclusive of copying its
+target object, is 24 cycles.
+Copying timing. Object copying involves more than simply
+copying some bytes from one place to another. One must also: decode
+the object header, determine which fields of the object contain
+pointers, and handle each one of those pointers, thus accomplishing
+the transitive closure of the points-to relation in a breadth-first manner
+[9]. Since our prototype heaps were slightly simplified from actual
+language implementations (i.e., we did not deal with all special cases
+that arise in Java, such as finalization and locks), any comparisons
+are likely to underestimate copying cost, and thus underestimate the
+benefits of OF.
+We modelled the total copying and collection processing costs using
+this equation:
+Here the a are the costs per occurrence of each case and the n
+are the number of times that case occurs. The subscript obj concerns
+the number of objects processed, w the number of words copied, skp
+the number of pointer fields skipped because they are null or do not
+point into the collected region, and dup the number of pointers into
+the collected region but to objects already copied. Note that when we
+encounter a pointer to an object in the collected region but not yet
+copied, we charge our cost of discovery to the copying of that object.
+We measured the following values (for operation with all data
+structures in primary cache): a
+a cycles, and a cycles. As an aside, we note that
+these costs indicate that copying the words is not a large component
+of the cost of processing pointer-rich objects.
+Given our instrumentation to gather counts (the n as well as the
+number of times the different write barrier actions occur) and our careful
+estimates of the times for the various collector and write barrier
+operations, we can project cycle costs for each collection algorithm.
+As previously mentioned, we would not claim that the difference in
+predicted cycle counts would exactly match that in practice, but that
+ratios of predicted cycle costs would be reliable to an order of magni-
+tude. Put another way, if we predict a ratio of collection costs of 2:1
+or more, then it would be surprising if an implementation showed an
+inversion of costs of the schemes.
+6.3 Results
+We applied the block-based evaluator to our benchmark suite. We now
+examine the resulting evaluation of the older-first and generational
+collectors with the detailed cost model just described which takes into
+account both copying and pointer-tracking costs.
+Similar to the mark/cons ratio plots we examined in Section 4, the
+plots of total cost in Figures 11-22 show the lowest total cost that each
+collector can achieve, among all examined configurations for a given
+heap size. The minimum heap size equals the maximum amount of
+live data, and evaluated heap sizes range from 2 to 6 times that min-
+imum. While pointer costs work in favor of the 2G and against the
+OF collector, and diminish the advantages that OF enjoyed in the estimate
+of copying costs in Section 4, nevertheless they do not succeed in
+changing the qualitative relationship that we observed previously. On
+one subset of benchmarks (JavaBYTEmark, StandardNonInteractive,
+HeapSim, Lambda-Fact5, Lambda-Fact6,Richards) the OF collector
+has a clear advantage, except with very small heap sizes. On the remaining
+benchmarks, the performance of the two collectors is similar.
+2e+06
+200000 250000 300000 350000 400000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+JavaBYTEmark
+OF
+
+Figure
+
+11: Total collection cost, JavaBYTEmark.5e+071.5e+082.5e+08
+200000 400000 600000 800000 1e+06 1.2e+06
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Bloat-Bloat
+OF
+
+Figure
+
+12: Total collection cost, Bloat-Bloat.5e+071.5e+08500000 1e+06 1.5e+06
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Toba
+OF
+
+Figure
+
+13: Total collection cost, Toba.2000006000001e+062000 3000 4000 5000 6000 7000 8000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+StandardNonInteractive
+OF
+
+Figure
+
+14: Total collection cost, StandardNonInteractive.2e+076e+071e+08100000 200000 300000 400000 500000 600000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+OF
+
+Figure
+
+15: Total collection cost, HeapSim.1e+063e+065e+067e+069e+06
+5000 10000 15000 20000 25000 30000 35000 40000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+OF
+
+Figure
+
+Total collection cost, Lambda-Fact5.
+1.5e+072.5e+0710000 20000 30000 40000 50000 60000 70000 80000 90000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+OF
+
+Figure
+
+17: Total collection cost, Lambda-Fact6.5e+061.5e+072.5e+073.5e+074.5e+07
+20000 40000 60000 80000 100000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+OF
+
+Figure
+
+Total collection cost, Swim.5e+061.5e+072.5e+07
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Tomcatv
+OF
+
+Figure
+
+19: Total collection cost, Tomcatv.1e+063e+065e+067e+069e+06
+10000 20000 30000 40000 50000 60000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Tree-Replace-Binary
+OF
+
+Figure
+
+20: Total collection cost, Tree-Replace-Binary.5e+061.5e+072.5e+0720000 30000 40000 50000 60000 70000 80000 90000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Tree-Replace-Random
+OF
+
+Figure
+
+21: Total collection cost, Tree-Replace-Random.1e+073e+075e+072000 3000 4000 5000 6000 7000 8000 9000 10000
+Total
+cost
+(cycles),
+estimated
+Heap size (words)
+Richards
+OF
+
+Figure
+
+22: Total collection cost, Richards.
+7 DISCUSSION
+Comparing collectors. A straightforward comparison between OF
+and 2G collectors shows that OF achieves lower total costs in many
+cases. The main contributing factor is the reduction of copying cost;
+the supporting factor is the containment of the increase of pointer-
+tracking cost.
+That copying costs can be markedly lower than with generational
+collection, in a collector that scavenges areas other than the youngest,
+is perplexing in the light of widely recognized good performance of
+generational collectors. Nevertheless, it is entirely in accord with the
+intuition that the very youngest objects are live, and to collect them
+is wasteful. In generational collection there is a tension between the
+need to increase the size of the nursery so as to reduce such wasteful
+copying of young objects, and the need to increase the size of older
+generations so that they are not collected frequently-a tension that
+cannot be resolved in a heap of finite size. In contrast, Older-First
+collection is able to focus on an age range where wasteful copying
+is minimized, which results in good performance on those programs
+where such a range prominently exists. Whereas our diagram in Figure
+6 shows how this desirable behavior may arise, it is tempting to
+consider how a designer could encourage it. For example, further improvements
+may be achieved by dynamically (adaptively) choosing
+the size of the collection window, and, more ambitiously, looking at
+window motion policies more sophisticated than the one we have described
+
+Pointer tracking. While an ever-increasing latitude in collection
+policy may further reduce copying costs below those of generational
+collection and the simple Older-First scheme, it will also be necessary
+to keep the pointer-tracking costs within reason. The pointer-tracking
+costs in OF, albeit high with respect to generational collection, are not
+excessive, because its window motion policy allows efficient pointer
+filtering. Any block-based collector can apply a filter to ignore pointer
+stores that do not cross block boundaries; we found that filter to eliminate
+about 60% of stores for reasonable configurations (note that
+blocks cannot be arbitrarily large lest the collector degenerate into a
+non-generational one). Directional filtering (Figure 9), ignores about
+95% of stores: not as many as generational filtering, which ignores
+about 99%, but enough that the cost for the remaining, remembered,
+stores does not substantially offset the copying cost reduction.
+As we developed our directional filtering scheme, we collected
+statistics of pointer stores, according to the position, in an age-ordered
+heap, of the pointer source and target (i.e., the object containing the
+reference, and the referent object), which shed new light on some
+long-held beliefs about the pointer structure of heaps. It has been
+widely assumed that pointers tend to point from younger objects to
+older ones. While this belief is surely justified for functional pro-
+grams, it is not generally true of the object-oriented programs we ex-
+amined. Both younger-to-older and older-to-younger directions are
+well represented, neither dominant, in most of our benchmarks. The
+supposed predominance of younger-to-older pointers is often cited as
+cause and justification of the efficacy of generational pointer filter-
+ing. A more faithful explanation arises from our observations: most
+pointer stores are to objects that are very young, and they install
+pointers to target objects that are also very young (whether relatively
+younger or older than the source), and a generational filter ignores
+these stores because they are between objects of the same generation.
+
+Figure
+
+provides an example: (a) in Bloat-Bloat, older-to-younger
+pointers (negative age distances) account for 40% of the stores; how-
+ever, the histogram of source positions (b) as well as that of target
+positions (c) show that most stores establish pointers between very
+young objects.
+Caching and memory effects. Since copying collectors only
+touch the live data, and leave untouched newly dead objects, collectors
+that copy less should also have good locality. However, OF visits
+the entire heap more regularly as compared to generational collectors,0.20.61
+Cumulative
+probability
+log2(abs(distance)) * sgn(distance)
+Bloat-Bloat
+(a) Distribution of pointer age distances5000001.5e+062.5e+063.5e+060 20000 40000 60000 80000 100000 120000 140000
+Histogram
+Source position
+Bloat-Bloat
+(b) Distribution of pointer source ages5000001.5e+062.5e+063.5e+06
+Histogram
+Target position
+Bloat-Bloat
+(c) Distribution of pointer target ages
+
+Figure
+
+23: Pointer store heap position: Bloat-Bloat.
+which may decrease its locality in the cache and increase its paging
+activity. Clearly, we can only study these effects in the context of a
+complete implementation, and we will do so in future work.
+The overwhelming consensus in the studies on generational garbage
+collection has been that a younger-first discipline should be used; i.e.,
+that when the collector decides to examine one generation, it must at
+the same time examine all younger generations. The scheme that we
+introduce may be understood (if we ignore policy details), as similar
+to requiring an older generation to be collected apart from younger
+ones. This possibility is indeed mentioned, but dismissed both in Wil-
+son's survey of garbage collection [32, p. 36] and in Jones and Lins'
+monograph [17, p.151], the two most accessible sources on the state
+of the art in uniprocessor garbage collection.
+Generational garbage collection employs fixed boundaries between
+generations, in order to minimize the pointer-tracking effort
+needed for each such boundary. Barrett and Zorn explored the possibility
+of using flexible generation boundaries (remaining however
+within the youngest-first discipline), and found that the increase in
+pointer-tracking effort need not be excessive [5]. Our OF scheme uses
+flexible collection region boundaries, but we combine it with efficient
+mechanisms to keep pointer-tracking costs in check, even without the
+youngest-first discipline.
+Clinger and Hansen proposed a collector for Scheme that does
+not base collection decisions on object age, but rather on the time
+elapsed since last collection [11], and focuses on objects for which
+that time is longest. (There have been historical precursors to this
+idea [2, 18, 6].) Although this algorithm is not age-based, it prompted
+us to investigate similarly flexible age-based ones; in the context of
+object-oriented languages that we examined, we found the latter to be
+superior.
+More generally, schemes have been suggested that divide the heap
+into regions, not necessarily age-based, that can be collected independently
+and/or incrementally. Bishop proposed such segregation
+in accordance with the usage of objects [8], while Hudson and Moss's
+mature object space algorithm (for managing very-long-lived data) introduced
+policies that approximate the age-order criterion [16].
+In garbage collection, there is an inherent trade-off between space
+and time overheads, and there is a trade-off between reducing the total
+time overhead and reducing the time of a single collection (for
+incremental operation). Different authors have applied different measures
+in their system evaluation. Our focus is on time overhead of
+collection within given space constraints. Therefore, without making
+specific comparisons, which are difficult when evaluation metrics
+as well as underlying languages are widely different, we recognize
+that our study draws on previous experience with generational
+garbage collection implementations [19, 27, 20, 24, 28, 35], their policies
+[29, 30, 31, 34, 1, 13], their write barrier mechanisms [33, 15, 14],
+and their evaluation with respect to object allocation and lifetime behavior
+[3, 26, 11].
+Achieving performance improvements with generational collection
+critically depends on setting or adapting the configuration parameters
+right-incorrectly chosen generation sizes can cause performance
+to degrade severely. We have confirmed these matters
+in our observations of multi-generational collectors on our benchmark
+traces. Choosing a good regime of generations is not an easy
+task, and it is not yet fully understood despite numerous studies
+[29, 36, 34, 1, 5]. However, we can also say that it is a matter of
+tuning the performance within the class of youngest-only collection
+schemes. Our goal in this study has not been to examine how to tune
+a particular scheme, but instead to compare the schemes. Whether
+optimal configurations can be chosen a priori, or how a system might
+adaptively arrive at them are questions for separate investigation.
+9
+
+
+Generational collection achieves good performance by considering
+only a portion of the heap at each collection. It achieves this good
+performance even while imposing additional costs on the mutator,
+namely a write barrier to track pointers from older to younger gen-
+erations. We found that we can reduce copying costs further, in many
+cases dramatically, by not including the youngest objects in each col-
+lection, and we call this more general scheme age-based collection
+since it still determines which objects to collect based on age. We considered
+in detail a particular age-based algorithm that we term older-
+first (OF) and found that it never needed to copy substantially more
+data than generational collection, and copied up to ten times less for
+some programs. OF does require more write barrier work than generational
+collection, perhaps ten times more, but the savings in copying
+can outweigh the extra pointer tracking costs.
+We obtained these results with exact heap contents simulation,
+prototype collector implementation, and careful timing of crucial code
+fragments. Given the factor by which OF outperforms generational
+collection-often a factor of 2 or more-it should also perform well
+in actual implementation. Integration with a Java virtual machine is
+in progress.
+While improved performance is one measure of the significance
+of this work, we also feel that it contributes substantially to our understanding
+of memory usage and garbage collector behavior. Put
+another way, garbage collection has a long tradition of study, yet we
+have shown that the widely accepted state of the art, generational col-
+lection, leaves considerable room for improvement.
+We also question some of the widely held beliefs about generational
+collection, offering new intuition. While we clearly agree with
+the tenet that one should wait for objects to die before collecting them,
+as it has been recognized in the considerable body of work concerning
+the avoidance of early "tenuring" of objects, we show that it is practical
+to avoid copying the very youngest objects and that doing so saves
+much work, even though it imposes a heavier burden on the running
+program. In the past the write barrier cost was thought too high to permit
+exploring algorithms like OF. Now we have results encouraging
+consideration of a wide range of new techniques.
+Future work should include considering other window motion al-
+gorithms, dynamically changing the window size, using multiple windows
+(e.g., one for younger objects and one for mature objects as in
+mature object space collection), and more experimentation and mea-
+surement, for more programs, platforms, and languages.
+
+Acknowledgements
+
+. We acknowledge with gratitude the assistance
+of David Detlefs and the Java Topics group with Sun Microsystems
+Laboratories, Chelmsford, Massachusetts, in collecting and providing
+traces for this work. We thank Margaret Martonosi and the anonymous
+referees for valuable comments on drafts of this paper.
+
+
+
+--R
+
+Simple generational garbage collection and fast allocation.
+List processing in real-time on a serial computer
+'Infant Mortality' and generational garbage collec- tion
+The Lambda Calculus: Its Syntax and Se- mantics
+Garbage collection using a dynamic threatening boundary.
+MALI: A memory with a real-time garbage collector for implementing logic programming languages
+International Workshop on Memory Management (St.
+Computer Systems with a Very Large Address Space and Garbage Collection.
+A nonrecursive list compacting algorithm.
+Generational stack collection and profile-driven pretenuring
+Generational garbage collection and the radioactive decay model.
+
+Key Objects in Garbage Collection.
+Remembered sets can also play cards.
+A comparative performance evaluation of write barrier implementa- tions
+Incremental collection of mature objects.
+Garbage Collection: Algorithms for Automatic Dynamic Memory Management.
+Incremental incrementally compacting garbage collection.
+
+Garbage collection in a large Lisp system.
+
+Pizza into Java: translating theory into practice.
+Java for applications
+A lifetime-based garbage collector for LISP systems on general-purpose computers
+Properties of Age-Based Automatic Memory Reclamation Algorithms
+Characterisation of object behaviour in Standard ML of New Jersey.
+Generation scavenging: A non-disruptive high performance storage reclamation algorithm
+The Design and Evaluation of a High Performance Smalltalk System.
+Tenuring policies for generation-based storage reclamation
+An adaptive tenuring policy for generation scavengers.
+A simple bucket-brigade advancement mechanism for generation-based garbage collection
+Uniprocessor garbage collection techniques.
+"card-marking"
+Design of the opportunistic garbage collector.
+Barrier methods for garbage collection.
+Comparative Performance Evaluation of Garbage Collection Algorithms.
+--TR
+Smalltalk-80: the language and its implementation
+Incremental incrementally compacting garbage collection
+The design and evaluation of a high performance Smalltalk system
+Tenuring policies for generation-based storage reclamation
+A simple bucket-brigade advancement mechanism for generation-bases garbage collection
+A MYAMPERSANDldquo;card-markingMYAMPERSANDrdquo; scheme for controlling intergenerational references in generation-based garbage collection on stock hardware
+Simple generational garbage collection and fast allocation
+Design of the opportunistic garbage collector
+An adaptive tenuring policy for generation scavengers
+A comparative performance evaluation of write barrier implementation
+Infant mortality and generational garbage collection
+Key objects in garbage collection
+Characterization of object behaviour in Standard ML of New Jersey
+Garbage collection using a dynamic threatening boundary
+Garbage collection
+Generational garbage collection and the radioactive decay model
+Pizza into Java
+Generational stack collection and profile-driven pretenuring
+A real-time garbage collector based on the lifetimes of objects
+List processing in real time on a serial computer
+A nonrecursive list compacting algorithm
+Memory Management
+Incremental Collection of Mature Objects
+Uniprocessor Garbage Collection Techniques
+Garbage collection in a large LISP system
+Generation Scavenging
+Comparative Performance Evaluation of
+Properties of age-based automatic memory reclamation algorithms
+
+--CTR
+Feng Xian , Witawas Srisa-an , Hong Jiang, Service oriented garbage collection: improving performance and robustness of application servers, Companion to the 21st ACM SIGPLAN conference on Object-oriented programming systems, languages, and applications, October 22-26, 2006, Portland, Oregon, USA
+Stephen M. Blackburn , John Cavazos , Sharad Singhai , Asjad Khan , Kathryn S. McKinley , J. Eliot B. Moss , Sara Smolensky, Profile-driven pretenuring for Java (poster session), Addendum to the 2000 proceedings of the conference on Object-oriented programming, systems, languages, and applications (Addendum), p.129-130, January 2000, Minneapolis, Minnesota, United States
+Richard Jones, Five perspectives on modern memory management: systems, hardware and theory, Science of Computer Programming, v.62 n.2, p.95-97, 1 October 2006
+Matthew Hertz , Stephen M Blackburn , J Eliot B Moss , Kathryn S. McKinley , Darko Stefanovi, Error-free garbage collection traces: how to cheat and not get caught, ACM SIGMETRICS Performance Evaluation Review, v.30 n.1, June 2002
+Darko Stefanovi , Matthew Hertz , Stephen M. Blackburn , Kathryn S. McKinley , J. Eliot B. Moss, Older-first garbage collection in practice: evaluation in a Java Virtual Machine, ACM SIGPLAN Notices, v.38 n.2 supplement, p.25-36, February
+Stephen M. Blackburn , Sharad Singhai , Matthew Hertz , Kathryn S. McKinely , J. Eliot B. Moss, Pretenuring for Java, ACM SIGPLAN Notices, v.36 n.11, p.342-352, 11/01/2001
+Narendran Sachindran , J. Eliot , B. Moss, Mark-copy: fast copying GC with less space overhead, ACM SIGPLAN Notices, v.38 n.11, November
+D. Clinger , Fabio V. Rojas, Linear combinations of radioactive decay models for generational garbage collection, Science of Computer Programming, v.62 n.2, p.184-203, 1 October 2006
+Stephen M Blackburn , Kathryn S. McKinley, In or out?: putting write barriers in their place, ACM SIGPLAN Notices, v.38 n.2 supplement, February
+Stephen M. Blackburn , Antony L. Hosking, Barriers: friend or foe?, Proceedings of the 4th international symposium on Memory management, October 24-25, 2004, Vancouver, BC, Canada
+Stephen M. Blackburn , Matthew Hertz , Kathryn S. Mckinley , J. Eliot B. Moss , Ting Yang, Profile-based pretenuring, ACM Transactions on Programming Languages and Systems (TOPLAS), v.29 n.1, p.2-es, January 2007
+Lars T. Hansen , William D. Clinger, An experimental study of renewal-older-first garbage collection, ACM SIGPLAN Notices, v.37 n.9, p.247-258, September 2002
+Stephen M Blackburn , Richard Jones , Kathryn S. McKinley , J Eliot B Moss, Beltway: getting around garbage collection gridlock, ACM SIGPLAN Notices, v.37 n.5, May 2002
+Stephen M. Blackburn , Perry Cheng , Kathryn S. McKinley, Oil and Water? High Performance Garbage Collection in Java with MMTk, Proceedings of the 26th International Conference on Software Engineering, p.137-146, May 23-28, 2004
+David Detlefs , Christine Flood , Steve Heller , Tony Printezis, Garbage-first garbage collection, Proceedings of the 4th international symposium on Memory management, October 24-25, 2004, Vancouver, BC, Canada
+Samuel Z. Guyer , Kathryn S. McKinley, Finding your cronies: static analysis for dynamic object colocation, ACM SIGPLAN Notices, v.39 n.10, October 2004
+Martin Hirzel , Johannes Henkel , Amer Diwan , Michael Hind, Understanding the connectivity of heap objects, ACM SIGPLAN Notices, v.38 n.2 supplement, February
+Matthew Hertz , Stephen M. Blackburn , J. Eliot B. Moss , Kathryn S. McKinley , Darko Stefanovi, Generating object lifetime traces with Merlin, ACM Transactions on Programming Languages and Systems (TOPLAS), v.28 n.3, p.476-516, May 2006
+Martin Hirzel , Amer Diwan , Matthew Hertz, Connectivity-based garbage collection, ACM SIGPLAN Notices, v.38 n.11, November
+Exploiting prolific types for memory management and optimizations, ACM SIGPLAN Notices, v.37 n.1, p.295-306, Jan. 2002
+David F. Bacon , Perry Cheng , V. T. Rajan, A unified theory of garbage collection, ACM SIGPLAN Notices, v.39 n.10, October 2004
+Matthew Hertz , Yi Feng , Emery D. Berger, Garbage collection without paging, ACM SIGPLAN Notices, v.40 n.6, June 2005
+Godmar Back , Wilson C. Hsieh, The KaffeOS Java runtime system, ACM Transactions on Programming Languages and Systems (TOPLAS), v.27 n.4, p.583-630, July 2005

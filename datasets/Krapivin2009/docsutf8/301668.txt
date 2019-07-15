@@ -1,0 +1,1348 @@
+--T
+New tiling techniques to improve cache temporal locality.
+--A
+Tiling is a well-known loop transformation to improve temporal locality of nested loops. Current compiler algorithms for tiling are limited to loops which are perfectly nested or can be transformed, in trivial ways, into a perfect nest. This paper presents a number of program transformations to enable tiling for a class of nontrivial imperfectly-nested loops such that cache locality is improved. We define a program model for such loops and develop compiler algorithms for their tiling. We propose to adopt odd-even variable duplication to break anti- and output dependences without unduly increasing the working-set size, and to adopt speculative execution to enable tiling of loops which may terminate prematurely due to, e.g. convergence tests in iterative algorithms. We have implemented these techniques in a research compiler, Panorama. Initial experiments with several benchmark programs are performed on SGI workstations based on MIPS R5K and R10K processors. Overall, the transformed programs run faster by 9% to 164%.
+--B
+Introduction
+Due to the widening gap between processor and memory
+speed, the importance of efficient use of caches
+is widely recognized. Loop tiling, which combines
+strip-mining and loop interchange, is a well-known
+loop transformation which can be used to increase the
+This work is sponsored in part by National Science
+Foundation through grants CCR-950254, MIP-9610379 and by
+Purdue Research Foundation.
+To appear in ACM SIGPLAN PLDI99. Copyright c
+fl1999 by the Association for
+Computing Machinery, Inc. Permission to make digital or hard copies of part
+of this work for personal or classroom use is granted without fee provided that
+copies are not made or distributed for profit or commercial advantage and that
+copies bear this notice and the full citation on the first page or intial screen
+of the document. Copyrights for components of this work owned by others than
+ACM must be honored. Abstracting with credit is permitted. To copy otherwise,
+to republish, to post on servers, or to redistribute to lists, requires prior specific
+permission and/or a fee. Request permissions from Publications Dept., ACM
+Inc., fax +1 (212) 869-0481, or permissions@acm.org.
+reuse of cached data [25]. A variety of other loop
+transformations such as reversal and skewing have
+also been proposed to enable loop tiling [23].
+Current tiling techniques are generally limited to
+perfectly-nested loops. Each loop, except the inner-most
+one, in such a perfect nest contains exactly one
+inner loop at the next level. A loop nest which contains
+simple statements between two loop headers, as
+shown in Figure 1, can be transformed into a perfect
+nest simply by moving those statements, guarded by
+appropriately inserted IF conditions, inside the inner
+loop [23], assuming the inner loop iterates at least
+once.
+Unfortunately, many imperfectly-nested loops in
+numerical programs are not as trivial as the one in
+
+Figure
+
+1. A loop may contain several inner loops
+which are at the same level. For example, the Jacobi
+program kernel shown in Figure 2(a) has two separate
+loop nests within the outmost loop. In certain cases,
+techniques such as peel-and-fusion [13] can transform
+nontrivial imperfectly-nested loops into perfectly-
+nested ones, which then may become amenable to
+tiling. Unfortunately, such techniques only exploit
+temporal locality within the same iteration of the outer
+loop, e.g., the T loop in the Jacobi code. (In this
+paper, the T-loop is called the time-step loop.) Relatively
+little temporal reuse is exploited because cached
+data are not reused across different time steps. Current
+tiling techniques also have difficulties with premature
+loop exits, such as those caused by convergence
+tests in iterative numerical algorithms.
+This paper presents a number of program transformations
+to overcome the aforementioned difficulties
+with tiling. We make two main contributions:
+ffl We define a class of nontrivial imperfectly-nested
+loops for which we present algorithms to legally
+and profitably tile the separate loops which are
+not perfectly-nested in the time-step loop, as
+in the case of Jacobi. Temporal reuse is thus
+exploited across different time steps.
+ffl We present a scheme to permit tiling of loops
+with premature exits by speculatively executing
+iterations of the time-step loop before the
+exit condition can be tested for those iterations.
+Roll-back statements are inserted to insure correct
+program results in case the exit condition
+turns out to be true.
+The techniques introduced in this paper are particularly
+suitable for iterative stencil computations in
+which each matrix element is updated based on the
+values of the neighboring elements. Such computations
+are often performed for solving partial differential
+equations, geometric modeling and image process-
+ing. Data dependence information required to automate
+the proposed techniques can be gathered by existing
+compiler analyses. We have implemented all the
+proposed techniques within the Panorama compiler.
+In order to evaluate their effectiveness, we applied the
+techniques to one well-known numerical computation
+kernel, Jacobi, and two application programs, tomcatv
+and swim, from the industrial SPEC95 benchmarks
+[20]. Overall our program transformation improves
+the execution speed by 9% to 164% on SGI sequential
+workstations.
+Statement
+Statement
+END DO
+Statement S 3
+END DO
+Statement
+END DO
+END DO
+(a) Before transformation. (b) After transformation.
+
+Figure
+
+1: A Trivial Imperfect Loop Nest Transformed
+into a Perfect Loop Nest.
+In this paper, we consider a uniprocessor computer
+with a memory hierarchy which includes cache
+memories at one or more levels. We assume that
+one of the caches is large enough to store a small
+number of columns of the considered arrays but not
+the whole arrays. The secondary caches in typical
+modern workstations satisfy this assumption and the
+techniques introduced in this paper aim to improve
+data reuse on such caches.
+The rest of the paper is organized as follows. In
+Section 2, we define a class of imperfectly-nested loops
+and present our tiling scheme to legally tile such loops.
+We also present our criteria to determine whether our
+tiling scheme is profitable. We further discuss techniques
+to improve profitability of our tiling scheme
+by loop preprocessing. In Section 3, we present our
+scheme of speculative execution to allow tiling when
+the time-step loop contains premature exits. In Section
+4, we present experimental results. We discuss
+related work in Section 5 and conclude in Section 6.
+Tiling Imperfectly-Nested Loops
+In this section, we first use Jacobi as an example to
+give a basic idea of our tiling scheme for imperfectly-
+nested loops. We then define the class of loops to
+be handled by the scheme. After that, we present
+the scheme which legally tiles the imperfectly-nested
+loops and the criteria to determine whether such tiling
+END DO
+END DO
+END DO
+END DO
+END DO
+(a) Jocobi kernel code
+(b) Stencil illustration
+of Jacobi code
+J2
+J2
+J2
+J2
+J2
+J2
+flow dependence in backward direction along J1 & J2
+flow dependence in straight or forward direction along J1 & J2
+anti-dependence in backward direction along J1 & J2
+anti-dependence in straight or forward direction along J1 & J2
+output dependence in backward direction along J1 & J2
+output dependence in straight or forward direction along J1 & J2
+(c) Iteration Subspace and Dependences
+
+Figure
+
+2: Code, Computation Stencil, Dependences
+and Iteration Subspace of Jacobi Kernel.
+is profitable. We then discuss techniques to improve
+the profitability of our tiling scheme by additional
+loop transformations. After analyzing the complexity
+of the compiler algorithms, we briefly discuss their
+extensions.
+2.1 The Basic Idea
+In iterative numerical algorithms, the same array elements
+are usually accessed repeatedly in different
+time steps. If the number of array elements is large,
+then the cache will overflow, which requires the array
+elements to be fetched repeatedly to the cache in every
+time step. Using loop tiling, before the work in a time
+step finishes, the execution moves to the next time
+step to operate on the array elements recently refer-
+enced, which avoids cache overflow. The unfinished
+time step will continue at a later moment. Consider
+the Jacobi kernel shown in Figure 2(a), which has the
+convergence test removed to simplify the illustration.
+We can plot the iteration subspace for the T , J1 ,
+and J2 loops as shown in Figure 2(c). Within each
+T iteration, complete execution of J1 and J2 loops
+requires accesses to nearly 2 \Theta (N \Gamma 1) 2 distinct array
+elements. With sufficiently large N , the cache will
+overflow, resulting cache misses in the next T itera-
+tion. To avoid overflow, we can partition the iteration
+subspace into tiles, as marked by the stair-case lines
+in
+
+Figure
+
+2(c), which are executed in the order from
+top-left to bottom-right. A properly chosen tile size
+will make the number of memory locations accessed
+in each tile fit the cache.
+A reordered execution sequence is legal only if it
+satisfies the original data dependences. Figure 2(b)
+shows Jacobi's computation stencil. Figure 2(c) shows
+a subset of data dependences. The edges between
+the iteration points indicate flow, anti- and output
+dependences. We adopt a value-based definition of
+flow dependences [25] such that a flow dependence
+exists from statement S1 to statement S2 if the latter
+may use the value written by the former. We adopt
+the traditional definitions of anti- and output dependences
+[11]. An anti-dependence exists from S1 to S2 if
+the former should read from a memory location before
+it is overwritten by the latter. An output dependence
+exists from S1 to S2 if S2 may overwrite the memory
+written by S1 . One can similarly define dependences
+between two variable references, two loop iterations,
+two program segments and so on [25].
+The key to our scheme for tiling imperfectly-nested
+loops is to find a uniform tile slope such that all flow
+dependences carried by T are satisfied and to find
+an offset for each tiled inner loop such that all flow
+dependences within the same T are also satisfied. The
+tile shape, as the result, guarantees that no flow dependences
+will exist from a later-executed tile to an
+earlier-executed tile. Anti- and output dependences
+which exist from later-executed tiles to earlier-executed
+ones can be eliminated by a technique called odd-even
+duplication of arrays. Unlike full array expan-
+sion, odd-even duplication will not unduly increase
+the working-set size which defeats locality. In Figure
+2(c), the edge from node n1 to n2 is drawn solid
+if the J loop index value for n1 is greater than that of
+, and it is drawn dotted otherwise, where J stands
+for either J1 or J2 . Only the solid edges will affect
+the legal tile shape. One can see that a solid flow-
+dependence edge is within the same tile and that a
+solid anti-dependence edge may cross two neighboring
+tiles. However, as shown in Section 2.3, the latter can
+be removed by odd-even duplication. There exist no
+solid output dependence edges for Jacobi.
+2.2 A Class of Imperfectly-Nested Loops
+Our general program model is presented in Figure 3(a).
+The T -loop body contains m J-loops, m - 1. Each J
+loop may contain arbitrary program constructs. Without
+loss of generality, all loops are assumed to have
+step 1. We require each loop J i to take the form of
+as the lower and upper
+bounds respectively, where L i and U i are T -invariants
+and b i is a nonnegative known constant. To make the
+presentation clean, ITMAX is assumed here to be an
+even number. We require that any read reference gets
+its value either always from the same T -iteration or
+END DO
+END DO
+END DO
+IF (MOD(T; 2):EQ:1) THEN
+END DO
+END DO
+END DO
+END DO
+END IF
+END DO
+(a) Program Model (b) After Odd-Even Array Duplication
+IF MOD(T; 2):EQ:1) THEN
+END DO
+END DO
+END DO
+END DO
+END IF
+END DO
+END DO
+(c) After Tiling
+
+Figure
+
+3: Steps of Tiling an Imperfect Loop Nest
+always from the previous T -iteration. Hence, any flow
+dependence should have the distance of either 0 or 1
+at loop level T . This is commonly true for the applications
+of our focus, which use iterative algorithms.
+Existing compiler techniques for array privatization
+can determine whether such a condition with flow
+dependences is satisfied (see [5] for a list of references).
+In the Jacobi code (Figure 2), read references to A
+always get the values from the previous T iteration
+except when which gives the distance 1. Read
+references to L always get their values from the same
+iteration, making the distance 0. In Figure 3(a), we
+assume that B always gets its value from the previous
+iteration.
+For simplicity of exposition, in this paper we consider
+tiling for J i loops only, 1 - i - m, even though
+they may contain inner loops. The techniques proposed
+here, however, can be extended to include loops
+within the J i loops, which will be briefly discussed in
+Section 2.6.
+Tth iteration
+Potential Reuse SLOPE
+(T+1)th iteration
+Loop Ji
+Loop Ji
+
+Figure
+
+4: A Portion of A Tile to Illustrate Reuse
+2.3 Algorithm for Tiling An Imperfect Loop Nest
+Given the loop nest in our program model, our goal
+is to transform it into the form shown in Figure 3(c),
+where, by the terms in [23], JJ is called the tile-
+controlling loop, and J i the tiled loops. For conve-
+nience, we call loop T the time-step loop. The J i
+loops are tiled with the size NSTEP, and in terms of
+
+Figure
+
+2(c), NSTEP is the number of grid points for
+a tile in J1&J2 direction. SLOPE is the number of
+grid points by which the tile shifts to the left when
+the T-index increases by 1. Figure 4 illustrates two
+instances of loop J i , which shows the shape for a
+portion of a tile. The potential temporal reuse across
+T iterations is proportional to the value of NSTEP \Gamma
+SLOPE.
+
+Figure
+
+5 shows the main steps in our tiling tech-
+nique. In the rest of this subsection, we present the
+compiler algorithms to implement these steps.
+2.3.1 Constructing Subgraph
+The minimum legal SLOPE is constrained by data
+dependence distances. There exist extensive studies
+of the problem of computing the data dependence
+distance between a pair of array references with respect
+to their common enclosing loops [25]. Where
+such distance is not a constant, symbolic analysis can
+be performed to derive bounds on the distance values
+[3, 16, 7]. In current literatures, dependence distances
+are usually defined with respect to loops which contain
+both of the dependent references. For our program
+model, this would apply to loop T only. We slightly
+extend the definition to also include the J i loops.
+In our program model, suppose there
+exists a dependence from iteration (T 1 ,J 1
+i ) to iteration
+k ), we say the dependence has a distance vector
+of
+specifically, we say the
+distance with respect to the ! J loops is J 2
+i is negative, we say there exists a
+backward dependence w.r.t. the ! J
+Existing works on distance-computing cited above
+can readily be used to compute a lower bound and an
+upper bound for the distances defined above between
+references in the same or different J loops. We construct
+a dependence subgraph [11] for the loop nest
+in which each node represents a statement within one
+of the J i loops. Each edge represents a flow, an anti-
+or an output dependence. Multiple edges may exist
+from one node to another. Each edge is marked by
+ffl Construct the dependence subgraph.
+ffl Calculate the minimum slope.
+ffl Select the maximum legal tile size and test
+the profitability.
+ffl Perform array duplication.
+ffl Generate the tiled code.
+
+Figure
+
+5: Main Steps to Tile a Loop Nest
+the distance vector (dT ,dJ ), where dT is the distance
+w.r.t. T and dJ is the lower bound estimated for the
+possible negative distances w.r.t. J i loops. All the
+dT values are grouped into three classes: 0, 1 and any
+value greater than 1. We will not differentiate different
+dT values which are greater than 1, but denote them
+as G1 equally. Recall that, in our program model, the
+flow dependence distance with respect to the T loop
+can only be 0 or 1. Hence, possible for anti-
+and output dependences only. If the distance w.r.t.
+J cannot be negative, then we let dJ be 0. For the
+Jacobi example (Figure 2), the dependence subgraph
+is shown in Figure 6(a), where S1 is the statement
+that computes L and S2 the one that computes A.
+For easy illustration, in Figure 6(a), we draw one edge
+to represent the same type of data dependences (flow,
+anti- or output) from one vertex to another, marking
+all possible dependence distance vectors.
+Since loop iterations must be executed in the lexicographical
+order, any flow dependence edge in the
+dependence subgraph whose vertices are in the same
+must have a distance vector (0; 0) or (1; dJ ),
+and any anti- or output dependence edge must have a
+distance vector (0; 0), (1; dJ ) or (G1 ; dJ ). If we have
+a group of anti- or output dependence edges with the
+same source, same target and same dJ value, then
+we delete all but one edge that has the minimum dT
+value. The tile shape determined by the remaining
+dependence edges will also satisfy the deleted ones.
+Furthermore, we can condense all the nodes (in the
+dependence subgraph) which belong to the same J i
+loop to a single node, resulting in a new graph defined
+below. This simplified graph filters out dependence information
+which is unimportant to our tiling scheme,
+thus improving the efficiency of graph traversal in our
+technique.
+Definition 2 The J-loop distance subgraph G l is a
+graph derived from the dependence subgraph Gd of
+the given loop nest which conforms to the program
+model such that
+1. Each node J i in G l represents a J i loop in the
+given loop nest.
+2. For each flow dependence edge
+in Gd with the distance vector (dT ; dJ ), with
+n1 in loop J i1 and n2 in loop J i2 , if J i1 and
+J i2 are different nodes in G l , add an edge in G l
+from J i1 to J i2 with the distance vector (dT ; dJ ).
+Otherwise, if J i1 and J i2 are the same and dT is
+J2
+(b)
+(a)
+anti-dependence
+flow dependence
+dependence
+
+Figure
+
+The Dependence and J-loop Distance
+Subgraphs of Jacobi
+equal to 1, add an edge from J i1 to J i2 with the
+distance vector (dT ; dJ ).
+3. For every two nodes n1 and in Gd such that
+there exist anti- dependence(s) from n1 to
+with n1 in loop J i1 and n2 in loop J i2 , consider
+all the anti-dependence edges from n1 to
+(a) Group the anti-dependence edges such that
+the edges belonging to the same group have
+the same dJ value.
+(b) For each group, take the minimum dT value,
+denoted as mindT . Add an edge from J i1 to
+J i2 with the distance vector (mindT
+4. Process output dependences in Gd in the same
+way as in STEP 3.Note that in STEP 3(b), if
+to G l instead of (mindT ; dJ ). Although such an treatment
+can potentially produce an over-conservative tile
+shape, we do not expect cases.
+For Jacobi's dependence distance subgraph (Figure 6(a)),
+the J-loop distance subgraph is derived as shown in
+
+Figure
+
+6(b).
+2.3.2 Calculating Minimum Slope
+The following algorithms perform loop tiling based
+on the J-loop distance subgraph. The first algorithm
+computes the minimum legal tiling slope, SLOPE, and
+the offsets of J i loop bounds within the same tile.
+Algorithm 1 Compute the Minimum Legal Tiling
+Slope and the Offsets.
+Input: A loop nest, which conforms to our program
+model, and its J-loop distance subgraph G l .
+Output: SLOPE, the minimum legal slope for tiling,
+and the offset for each node in G l .
+Procedure:
+ffl STEP A: Compute the offset for every node in
+G l .
+- 1. Temporarily remove all anti- and output
+dependence edges and any edge with
+1.
+- 2. For all nodes in G l without successors,
+- 3. If all the nodes in G l have been assigned
+offset values, go to 6. Otherwise, continue
+to 4.
+4. Find any node u in G l whose successors
+assigned
+offset values. Each edge is annotated by
+5. Go back to 3
+- 6. Put all edges removed in Step A.1 back
+to G l .
+offset[u]ju; v are nodes in G l flow
+dependence edge with 1. gFor the Jacobi code (Figure 2(a)), after STEP A.1,
+there exists only one edge from J1 to J2 , with the
+distance vector (0; 0). After initializing offset[J2 ] to 0,
+we have offset[J1 which means that there is no
+need to adjust loop bounds for either J1 or J2 within
+the same T iteration. In STEP B, since there exist
+only two flow dependence edges (from J2 to J1) with
+2.3.3 Selecting Tile Size
+Definition 3 We define WSet(x) as the maximum
+working set size of any single T iteration in the transformed
+code (Figure 3(c)), with
+In any single T iteration of the transformed code,
+the loop bounds of J i depend on the combination of JJ
+and T . WSet(x) takes the maximum working set from
+those produced by all JJ-T combinations. Since the
+code is yet to be transformed at this compilation stage,
+we estimate WSet(x) as
+MemCount i represents the number of different memory
+locations accessed in x iterations of loop J i . This
+estimation gives an upper-bound for WSet(x).
+MemCount i can be estimated during array data flow
+analysis by merging array regions accessed in each J i
+loop body [5]. Next, we determine the size of the tile.
+The objective is to maximize the tile size in order to
+maximize data reuse within the tile and to prevent
+anti- and output dependence from crossing backward
+more than one tile boundary, but the tile should not be
+so wide that its working set size exceeds the effective
+cache size [22].
+Algorithm 2 Profitability Test and Tile Size Deter-
+mination
+Input: A loop nest which conforms to our program
+model, the J-loop distance subgraph G l , the SLOPE
+value computed by Algorithm 1, the given cache size
+CS and ff, the effective-cache factor 1 [22].
+Output: The tile size, NSTEP, such that tiling is
+profitable, and a logical value PROFITABLE.
+Procedure:
+1. If holds for some 1 - i - m, go to
+STEP 2. Otherwise
+return from the procedure.
+2. Compute
+and then goto STEP 3.
+3. If NSTEP - SLOPE,
+and return from the procedure. Otherwise, goto
+STEP 4.
+4. Let
+ju; v are nodes in G l ; ! u; v ? is any anti- or output
+dependence edge with
+are nodes in G l ; ! u; v ? is any anti- or output
+dependence edge with 1.g. If NSTEP !
+Otherwise, guarantees that there is an overlap of iteration
+points for at least one J i loop between adjacent T
+iterations, i.e., holds for at
+least one J i loop. STEP 2 guarantees the working
+set to fit in the effective cache. According to Figure 4,
+makes NSTEP large enough to allow potential
+temporal reuse across T iterations. STEP 4 prevents
+any anti- or output dependence from crossing backward
+more than one tile boundary. In Jacobi's J-loop
+distance subgraph (Figure 6(b)), there exist two anti-
+dependence edges with which have
+and respectively. Recall that offset[J1
+There exist an anti-dependence edge and
+two output dependence edges with
+2.3.4 Array Duplication
+The next algorithm determines whether any particular
+anti- or output dependence needs to be removed by
+duplication.
+Algorithm 3 Odd-Even Duplication
+Input: A loop nest which conforms to our program
+model, the J-loop distance subgraph G l and data flow
+upward-exposure information.
+Output: A loop nest with odd-even array duplication
+inserted (as shown in Figure 3(b)).
+Procedure:
+\Theta CS is called the effective cache size, determined by
+various system factors, which is recommended by the computer
+vendor based on empirical locality measurement. We chose
+our experiments.
+ffl STEP A: For every anti- or output dependence
+with the distance vector
+check to see whether (a)
+then there is no need for odd-even array dupli-
+cation, and the procedure returns. Otherwise,
+continue to STEP B.
+ffl STEP B: Duplicate the T -loop body and insert
+an IF-statement such that one copy of the
+loop body becomes the THEN branch and the
+other copy the ELSE branch. The THEN branch
+is executed in odd T -iterations and the ELSE
+branch in the even T -iterations, respectively.
+ffl STEP C: For each anti- or output dependence
+with the distance vector
+condition (a) or (b) in STEP A
+does not hold, identify the array , say A, which
+contributes to this dependence. Declare a copy
+of A.
+ffl STEP D: Assume A is an original array, and
+C its new copy. For each write reference to A
+in the THEN branch, change the referenced array
+name from A to C. For each read reference to A,
+if the value is from an odd T -iteration, change
+A to C.
+ffl STEP E: Insert proper initialization statements
+for the new copies of arrays. The regions
+to be initialized for each newly declared array
+are upwardly-exposed to the entry of the second
+T iteration.In the worst case all the arrays could be duplicated. In
+Jacobi's J-loop distance subgraph (Figure 6(b)), the
+anti-dependence from J1 to J2 with
+makes it necessary to duplicate A. The array regions
+are upwardly exposed to the entry
+of the second T iteration. Their initial values should
+be copied to the duplicates.
+2.3.5 Tiled Code Generation
+Based on the calculation of SLOPE, NSTEP and
+offsets and the loop transformation performed in Algorithm
+3, the following algorithm calculates the loop
+bounds of the tiled J i loops, the modified T loop and
+the new JJ loop in Figure 3(c). It also forms the loop
+body for each tiled J i loop.
+Algorithm 4 Tiled Code Generation
+Input: (1) The J-loop distance subgraph, G l , (2)
+SLOPE calculated in Algorithm 1 and NSTEP calculated
+in Algorithm 2, and (3) the loop nest updated
+in Algorithm 3, which is in the form shown in Figure
+3(b).
+Output: A tiled loop nest.
+Procedure:
+END DO
+(a)
+END DO
+END IF
+END DO
+
+Figure
+
+7: The Tiled J i Loop
+ffl For every J i loop, whose current loop bounds
+are respectively,
+replace the whole loop body by the code segment
+shown in Figure 7(b) if offset[J
+represents the original J i loop body
+except that the loop index variable J i is replaced
+by K i in ! BODYK i ?. If offset[J i
+loop body is replaced by the code segment shown
+in
+
+Figure
+
+7(a).
+ffl The lower bound of JJ loop in the tiled loop nest
+is mg. The upper bound
+of JJ loop is
+mg. The lower bound of
+the new T loop is
+max(min fd
+The upper bound of the new T loop is
+c
+ITMAX).The proof of the correctness of Algorithm 4 is
+sketched in APPENDIX A. Figure 8 shows the Jacobi
+code transformed by Algorithm 4. Note that
+since offset[J1 the loop body in
+
+Figure
+
+7(a) applies. The T loop can be further im-
+proved, shown in Figure 9, by loop fusion [14, 25] and
+forward substitution [2], assuming array L is dead at
+the exit of the whole loop nest. Improvement by such
+known techniques will not be discussed in details in
+this paper.
+2.4 Techniques to Improve Profitability
+A number of compiler techniques can be applied to a
+given loop nest to shorten the backward dependence
+distances w.r.t. J i loops and hence to increase the
+profitability. We present two algorithms in this paper.
+The first one deals with the problem of incompatible J i
+loops. Take the example in Figure 10(a). There exists
+a flow dependence from J2 to J1 such that
+and hence 1. We say loops J1 and
+J2 are incompatible because their indices appear in
+different dimensions of array A. On the other hand,
+we say loops J1 and I2 are compatible because their
+END DO
+END DO
+IF (MOD(T; 2):EQ:1) THEN
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END IF
+END DO
+END DO
+
+Figure
+
+8: Jacobi Kernel Transformed by Tiling with
+Odd-Even Duplication
+IF (MOD(T; 2):EQ:1) THEN
+END DO
+END DO
+END DO
+END DO
+END IF
+END DO
+
+Figure
+
+9: Tiled Jacobi Kernel Improved by Simple
+Loop Fusion and Forward Substitution
+indices appear in the same array dimension. If loops
+J2 and I2 are permuted as shown in Figure 10(b),
+then the flow dependence from I2 to J1 has distance
+vector (1; 0), making the loop nest more profitable to
+tile. Similarly, loop I1 is said to be compatible with
+loop J2 and loop I1 and loop J1 can be permuted as
+shown in Figure 10(c). However, the cache-line spatial
+locality will suffer due to column-major memory
+allocation. Array A needs to be transposed [1, 8] in
+order to restore spatial locality. A formal definition of
+compatibility is given below.
+Definition 4 In the program model in Figure 3(a),
+suppose each J i loop contains s i inner loops, I i;1 , I i;2 ,
+which are perfectly nested within
+J i from the outmost one to the innermost one. Denote
+J i by I i;0 . A compatible set is an (m 1)-tuple
+such that (1) c i is a nonnegative
+integer, and c
+m, should appear in the same dimension of some arDO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+END DO
+(a) (b) (c)
+
+Figure
+
+10: A Example to Illustrate Compatible Set
+rays, and (3) type equals ROW (or COLUMN) if all the
+indices appear in the first (or second) dimension. We
+call this compatible set a row-compatible (or column-
+compatible) set, respectively. A 2-Dimensional array
+A is row-associated (or column-associated) with a row-
+compatible (or column-compatible) set if at least one
+loop index variable I i;c i in that set appears in the first
+(or second) dimension in some references to A. 2
+The following algorithm checks to see if a combination
+of array transpose [1, 8] and loop permutation
+[25] can produce a loop nest which can be profitably
+tiled. Although there exists an exponential number of
+possible combinations of permutations of J i loops and
+array transpose, only a small number of them need to
+be considered in practice.
+Algorithm 5 Loop Permutation and Array Transpose
+to Improve Profitability
+Input: (1) A loop nest LP which conforms to
+our program model, (2) comSets, all the compatible
+sets for LP, (3) a boolean array Outmost Allowed [1 :
+and an array Perm[1
+mg. Outmost Allowed [u][v]
+indicates whether loop Iu;v can become an outmost
+loop within the T loop after a legal permutation. If
+Outmost Allowed
+of such legal permutation vectors.
+Output: A transformed loop nest if the algorithm
+succeeds or the restored original loop nest if the algorithm
+aborts.
+Procedure:
+Profitable permutations are unlikely to exist */
+for (each element cs =! c1 ;
+array transpose on
+those arrays row-associated with cs.
+if (Outmost Allowed [i][c i
+Perform the permutation specified by
+Perm[i][c
+applying Algorithm
+return the transformed loop nest.
+Undo the permutation and array transpose performed
+in the above.
+end for
+Abort. 2
+In Jacobi code (Figure 2(a)), where
+we have two compatible sets, (0, 0, COLUMN) and
+(1, 1, ROW). In
+
+Figure
+
+10(a), the compatible set
+(0,1,COLUMN) calls for permutation of loop I2 and
+loop J2 if Outmost Allowed [2][1] is TRUE. The compatible
+set (1,0,ROW) calls for transposing array A
+and permutation of I1 and J1 if Outmost Allowed[1][1]
+is TRUE.
+Next, we show that a known loop transformation called
+circular loop skewing [25] can be used to enhance the
+profitability of our tiling technique. For example, suppose
+the code skeleton in Figure 11(a) has a wrapped-
+around computation stencil which is typical for PDEs
+with circular boundary conditions. Its iteration sub-space
+is shown in Figure 11(b). Assume that, within
+the same time step T , (1) the jth iteration of loop J2
+is flow-dependent on the (j \Gamma 1)th, jth and (j
+iterations of J1 for the first
+iteration of loop J2 is flow-dependent on the first,
+second and last iterations of J1 ; and (3) the last iteration
+of loop J2 is flow-dependent on the (N \Gamma 1)th,
+Nth and first iterations of J1 . Assume that the flow
+dependence from J2 to J1 has distance vector with
+all J i loops are free of loop-carried dependences. We
+can reduce SLOPE to 1 as follows. We change J2 's
+iteration order from (1; 2;
+for We
+also change J1 's iteration order from (1; 2; to
+and so on. Such a transformation will eliminate all
+the backward dependences with resulting
+in
+The following algorithm formalizes the circular loop
+skewing (CLS) technique for profitability enhancement,
+which circularly skews the bounds of every J i loop
+to shorten backward distances. It calls the procedure
+Find CLS Parameter
+to eliminate all the backward dependences whose distances
+are less than - in a given loop nest LP.
+Find CLS Parameter returns ffi, the skewing amount
+for every J i loop between adjacent T iterations. It
+also marks fi i , 1 - i - m, on node J i in the J-loop
+distance subgraph G l , where fi i is the initial skewing
+amount for each J i when
+Algorithm 6 Circular Loop Skewing to Shorten
+Backward Dependences
+Input: A loop nest LP, which conforms to our
+program model except that the J i loop index should
+have the form of L i and U i which are T -invariant, its
+J-loop distance subgraph G l , the real cache size CS
+and the effective cache size factor ff. Further, every
+loop is assumed free of loop-carried dependences.
+Output: A transformed loop nest if successful.
+Procedure:
+Calculate CSg.
+END DO
+END DO
+END DO
+J2
+J2
+END DO
+END DO
+END DO
+J2
+J2
+(a) (b) (c) (d)
+
+Figure
+
+11: A Sample Example Transformed by Algorithm Original Loop Nest Skeleton, (b) Simplified
+Iteration Space Graph before Transformation, (c) Transformed Loop Nest Skeleton, (d) Simplified Iteration Space
+Graph after Transformation
+(The code of procedure Find CLS Parameter is
+presented in APPENDIX B.)
+for (each J i loop)
+Assume the lower and upper loop bounds of J i
+are L i and U i respectively. Change the loop bounds to
+an assignment J at
+the beginning of the J i loop body.
+end for
+Apply Algorithm 2 to the transformed loop nest.
+return the transformed
+loop nest.
+else Abort.
+
+Figure
+
+11(c) shows the transformed code for Figure
+11(a) after applying Algorithm 6. Figure 11(d)
+shows its corresponding iteration subspace. Suppose
+Procedure Find CLS Parameter
+performs the following: (1) Initialize
+Remove all the edges with l . (3) For J1 ,
+since it does not have any predecessors, do nothing.
+(4) For J2 , increment fi 2 by 1 so the backward dependence
+distance Restore all the
+edges with back to G l . (6) After processing
+the edges with
+2.5 Complexity Analysis
+The construction of the J-loop distance subgraph requires
+information on array dataflow and dependence
+distances, which, in the worst case, requires exponential
+time to compute. However, in practice, such information
+can be obtained by efficiently implemented
+schemes (see [5, 25] for a list of references). Algorithm
+2 is dominated by working-set computation,
+which requires array region union operations. Such
+operations are simpler than constructing the J-loop
+distance subgraph.
+Given a J-loop distance subgraph G l = (V; E),
+Algorithm 1 takes O(jV In Algorithm
+3, finding the arrays to be duplicated needs O(jV
+time and renaming the references takes time proportional
+to the loop body size. Algorithm 4 takes
+time multiplied by the loop body size.
+Algorithm 5 theoretically takes O(
+by the loop body size. (m and s i are small in practice.)
+For Algorithm 6, procedure Find CLS Parameter has
+the worst-case time of O(jV jjEj 2 ).
+2.6 Discussion
+Our techniques can be extended to tile the inner loops
+within J i loops. Here we take one loop level below J i
+as an example. With this extension, each J i loop has a
+perfectly nested inner loop, I i , which has lower bound
+and upper bound U 0
+are both T -invariant and J i -invariant, and c i is a
+known nonnegative constant.
+The following changes should be made over previous
+definitions and algorithms.
+needs to be extended such that the
+distance vector is a triple (dT , dJ , dI ) instead of
+a pair (dT , dJ ). Definition 2 should be extended
+such that each edge in G l is marked with the
+new distance vector.
+Algorithm 1 now computes SLOPEJ and
+SLOPEI for J i loops and I i loops respectively.
+Also it needs to annotate G l with offset J and
+offset I for J i and I i loops respectively.
+Algorithms 2 now computes NSTEPJ and
+NSTEPI for J i and I i loops respectively. Definition
+3 is extended to define WSet(x;y), x for
+NSTEPJ and y for NSTEPI . In the new Algorithm
+2, we check to see whether WSet(NSTEPJ ,
+fNSTEP I
+g. If this is true, then we increase
+NSTEPJ to max fx j WSet(x; NSTEPI )
+- ff   CSg.
+ffl Algorithm 3 now duplicates A if condition (a)
+or (b) is TRUE for either J i or I i . Algorithm 4
+needs to generate correct loop bounds for II, I i ,
+in addition to JJ, J i and T .
+3 Tiling with Speculative Execution
+In numerical programs using iterative methods, there
+often exist convergence tests which may cause the
+maximum iteration count not to be reached. To enable
+our tiling algorithms presented above, we present an
+algorithm to partition the maximum iteration counts
+END DO
+END DO
+GOTO next
+END IF
+END DO
+next:
+(a) Extended Program Model
+A chunk from
+plus exit condition in each T iteration
+END IF
+END DO
+next:
+(b) Code with Iteration Chunks
+Initialize B to A.
+Execute the tiled chunk from
+to
+IF (ECOND.EQ.TRUE) THEN GO TO rollback
+Copy A(or its odd copy C) to backup copy B.
+IF (ACCUM:EQ:ITMAX) THEN GOTO next
+END IF
+END DO
+GO TO next
+roolback:
+Restore A from backup copy B.
+Execute the original loop nest (Figure 12(a))
+from
+next:
+(c) Tiled and Speculated Code
+
+Figure
+
+12: Tiling with Speculative Execution
+into chunks such that the exit condition is tested after
+the execution of a chunk of T -iterations instead of
+one T -iteration. We then tile the individual chunks.
+In case of overshooting some T -iterations, the execution
+is rolled back. In the speculative code, IF
+statements must be inserted to guard against potential
+exceptions such as overflow and divided-by-zero. If
+a possibility of exceptions is detected, the execution
+rolls back to the latest checkpoint. The model defined
+in Section 2.2 is hence extended to include a loop exit
+test, as shown in Figure 12(a). The exit condition can
+only reference the variables defined either within the
+same T -iteration or outside the T -loop, and it should
+not be the source of any T -carried flow dependences.
+The following algorithm implements the above idea.
+Algorithm 7 Tiling with Speculative Execution
+Input: A loop nest which conforms to the program
+model shown in Figure 12(a).
+Output: A tiled loop nest.
+Procedure:
+ffl STEP A: Estimate the chunk size, LMAX.
+ffl STEP B: Block the T -loop in Figure 12(a) into
+chunks of size LMAX as shown in Figure 12(b).
+ffl STEP C: Tile the chunk using Algorithm 4.
+ffl STEP D: Transform the loop nest into one
+shown in Figure 12(c) where the arrays referenced
+by exit condition are renamed (which is
+similar to renaming in Algorithm 3).In the transformed code, for every array A which is
+the source of T -carried flow dependences, we create
+a backup copy, B, which is an identical copy of A
+initially. Variable ACCUM accumulates the total T -
+iterations executed so far. In every iteration of the
+outmost DO loop, after executing the tiled program
+with LMAX steps, the condition for rollback is checked.
+If the execution must rollback, the values stored in B
+are restored and the computation resumes from the
+beginning of the (ACCUM+1)th T -iteration, which is
+the latest checkpoint. Otherwise, A (or its odd copy
+C) is copied to the backup copy B. If the execution
+reaches the ITMAXth T -iteration, the outmost
+DO loop terminates.
+The tradeoff between the over-shooting cost, the
+checkpointing overhead and the performance gain by
+tiling can be reasoned as follows. Let s be the original
+execution time per time step and let fLMAX be the
+speedup per time step due to tiling, which accounts for
+checkpointing overhead amortized over LMAX time
+steps. Assume that originally it takes T
+steps to converge. Since we incur
+a penalty of LMAX iterations when rollback occurs,
+tiling with speculation will gain in performance if and
+only if
+that is,
+total
+We currently use the formula
+e,
+which equals the estimated time steps per tile, given
+tile size NSTEP. (In future work, one can certainly
+experiment with other formulas. For instance, LMAX
+may vary at distinct computation stages.) In Section
+4 we can see that the gain from cache temporal
+reuse outweighs the loss due to checkpointing and
+over-shooting.
+4 Experimental Evaluation
+We have implemented our techniques in Panorama
+compiler [5]. We apply our algorithms to one well-known
+numerical kernel, Jacobi with convergence test
+and two SPEC95 benchmarks tomcatv and swim, which
+run on two SGI uniprocessor workstations, one based
+on a MIPS R5K processor and the other based on a
+MIPS R10K. The R5K processor has a 32KB 2-way
+data cache and 512KB 2-way unified L2 cache.
+The R10K processor also has a 32KB 2-way L1 data
+cache, but a 2MB 2-way unified L2 cache. Moreover,
+the MIPS R10K performs out-of-order instruction ex-
+ecution, provides data prefetching instructions, and
+permits multiple pending cache misses. The native
+compiler is MIPSPro F77 compiler. In all the experiments
+on the original code and on the peel-and-fused
+code, we turn on the "-O3" switch which enables a
+number of loop transformations including interchange,
+fusion, fission and tiling. For the code generated by
+our techniques, "-O2" and "-O3" delivers nearly the
+same performance. (we show "-O2" results here). The
+original tomcatv and swim programs fail the profitability
+test. We apply Algorithms 5 and 6 to these two
+programs before taking the general steps shown in
+
+Figure
+
+5. Algorithm 5 finds that tomcatv can be made
+profitable for tiling by loop permutation and array
+transpose. Algorithm 6 finds that swim can be made
+profitable by circular loop skewing. Algorithm 7 applies
+to Jacobi and tomcatv. (The swim program does
+not have exit conditions in the time-step loop.) Jacobi
+code is also further optimized by forward substitution
+
+Figure
+
+9).
+The Jacobi Program
+We fixed ITMAX to 100 and vary the input matrix
+size arbitrarily. Based on Algorithm 2, NSTEP is
+derived as 10, 9 and 7 respectively for
+and 1279 on the R5K-based workstation. For the
+same matrix sizes on the R10K-based workstations,
+NSTEP is derived as 44, 37 and 30 respectively. Table
+1 shows the performance results for the original
+program, peel-and-fusion and the program tiled with
+Algorithm 4, marked as "Tiling w/ Array Dup. Although
+based on our tiling technique, array A is dupli-
+cated, as shown in Figure 8, array L is eliminated after
+forward substitution (Figure 9), giving no increase of
+memory usage.
+For the peel-and-fusion scheme, we manually apply
+the methods presented in LRW [12] and TSS [6] to
+choose the tile size with both the real cache size and effective
+cache size [22]. The best of these four schemes,
+which gives shortest execution time, is chosen to evaluate
+peel-and-fusion. From Table 1, tiling with odd-even
+duplication always performs better than peel-
+and-fusion. It improves the performance by 70% to
+84% in R5K and by 159% to 164% in the R10K over
+the original code.
+The tomcatv Program
+Among the 7 N-by-N arrays in tomcatv, two arrays,
+are duplicated, increasing the memory usage
+by 29%. NSTEP equals 5 and 21 for the R5K-
+and the R10K-based workstations respectively. With
+the reference input data, tomcatv always runs to the
+maximum time step, i.e., 750. In order to measure
+the potential overhead of rollback, we alter the convergence
+test to trigger rollback for comparison. Different
+convergence tests result in different number of
+-iterations executed, both for the untransformed and
+the transformed programs. The execution time of
+different versions of tomcatv on the R5K is shown
+in
+
+Table
+
+2, where "Iter. Orig." means the number
+
+Table
+
+2: Execution Time (in Seconds) of tomcatv on
+R5K with Various Convergence Tests
+Iter. Orig. Iter.Trans. Exec. time Orig. Time Speedup
+43
+199 204 175 207 1.18
+731 736 593 717 1.28
+
+Table
+
+3: Execution Time(in Seconds) of swim
+Test
+Exec. Time Speedup Exec. Time Speedup
+Orig. Prog. 326.85 1.00 625 1.00
+Trans. Prog. 215.01 1.52 573 1.09
+of T iterations executed in the untransformed code,
+and "Iter. Trans." means the number of T iterations
+executed in the transformed code before rolling back.
+The chunk size LMAX is 5 based on our heuristic.
+When rollback happens we always incur a penalty of
+LMAX iterations. However, except for those cases
+which converge very fast, we still get steady speedup
+which is up to 1.28. When there is no rollback (the
+T -loop bound 750 is reached), the speedup is 1.69.
+On the R10K the original program executes for 366
+seconds. The transformed program takes 288 seconds,
+a speedup of 1.27. With the convergence test altered,
+the performance comparison is similar to that on the
+R5K. We also run tomcatv with peel-and-fusion, with
+which the transformed code takes 649 and 306 seconds
+on the R5K and the R10K and achieves a speedup of
+1.13 and 1.19 respectively over the original program.
+The swim Program
+are duplicated for swim. NSTEP equals
+5 and 22 for the R5K and the R10K respectively.
+The performance results are shown in Table 3, where
+"Orig. Prog." stands for the original program, and
+"Trans. Prog." represents the transformed program.
+The R5K has a smaller L2 cache and therefore a smaller
+which results in less overlap of iteration points
+between adjacent T iterations within a tile, thus yielding
+a lower speedup. Peel-and-fusion does not apply
+directly to swim due to long backward dependence
+distances.
+On the R10K, in addition to execution time, we
+also measure the secondary cache misses using perfex
+library based on R10K performance counters. Table 4
+shows the result where 'LS' stands for the number
+of dynamic load-store instructions, 'SM' for the number
+of misses for the secondary cache, and 'MR' for
+the secondary cache miss ratio. In Jacobi, even with
+checkpointing, the number of dynamic load-store instructions
+are reduced due to forward substitution.
+
+Table
+
+1: Execution Time (in Seconds) of Different Versions of Jacobi
+Different Scheme Matrix Size for R5K Matrix Size for R10K
+Original Time 46 68 102 24.43 44.65 52.93
+Peel-and-fusion Time 37 50 82 17.08 27.23 35.76
+Tiling w/ Array Dup. Time 25 38
+We believe that the difference in the number of load-store
+instructions between the original code and the
+peel-and-fusion code is due to the slightly more memory
+optimization opportunities for the native compiler
+after peel-and-fusion. For tomcatv, the number of
+load-store instructions is increased by our technique
+due to periodical checkpointing. In swim, the added
+number of load-store instructions is from the expansion
+of some arrays to make the program conforming
+to our program model. In all five cases the secondary
+cache miss rate is dramatically reduced. The gain in
+temporal locality across T iterations overcomes the
+loss of more memory instructions, thus improving the
+overall performance.
+During the experiments, we applied inter-variable
+padding (similar to the scheme in [18]) to the tiled
+swim. This padding reduces cache set conflicts, hence
+improving speedup from 1.08 to 1.52. We also applied
+inter-variable padding to all three original programs,
+but without noticeable performance gain. This is because
+cache overflow in the original program dominates
+the performance.
+5 Related Work
+Kodukula et al. propose data shackling [9], which
+blocks the arrays based on data flow analysis and then
+forms new loop nests to compute block by block. Although
+it can tackle certain imperfectly-nested loops,
+their method does not apply to the stencil computations
+handled in our work, because updating one
+block will destroy the boundary data necessary for its
+adjacent blocks.
+Manjikian et al. present peel-and-fusion [13]. Their
+method can partially fuse the adjacent loops within
+the same T loop and tile the fused loops, but it only
+exploits locality within the same T loop iteration. Our
+Algorithm 1 bears some similarity to their peel-factor
+computation, but they consider dependences within
+the same T -iteration only, while we further consider
+dependences across T -iterations.
+Kodukula and Pingali propose a matrix-based frame-work
+to represent transformations of imperfectly-nested
+loops [10] including permutation, reversal, skewing,
+scaling, alignment, distribution and jamming. Their
+work does not apply to tiling.
+Strout et al. discusses the minimum storage requirement
+to allow flexible loop scheduling such as
+tiling [21]. Their method does not deal with the imperfectly
+nested loops handled by our work.
+Collard proposes a method to speculatively execute
+while-loops on parallel machines [4]. His objective
+is to increase parallel process utilization while
+ours is to tile loops for better memory performance
+on uniprocessors. We use quite different algorithms.
+Pugh et al. present a method to handle exit conditions
+for iterative application in parallel environment
+[17]. Both works by Collard and by Pugh et
+al. present interesting ideas to handle loop exit condi-
+tions, which may be incorporated in our future work.
+McCalpin and Wonnacott develop a scheme called
+time skewing, which adopts a value-based flow analysis
+to optimize for memory locality [15]. Their method
+first performs full array expansion and forward sub-
+stitution, and then recompresses the expanded array
+while preserving data dependences. Their method
+handles a subset of the imperfectly-nested loops represented
+by our program model.
+6 Conclusion and Future Work
+In this paper, we have presented new techniques to tile
+nontrivial imperfectly-nested loops. We handle a class
+of imperfectly-nested loops which seem quite general
+in scientific computing. We develop two algorithms to
+shorten backward dependence distances so as to improve
+profitability. We also extend our program model
+to handle exit conditions, which are common in iterative
+algorithms. We implement our techniques in a
+Fortran source-to-source compiler, Panorama [5]. Preliminary
+experimental results show the transformed
+programs run faster by 9% to 164% than those only
+optimized by the native compiler.
+This work has opened several interesting subjects
+for our future work. The most important ones include
+the application of the idea of speculative execution
+to other locality-enhancement techniques and a study
+of the effect of aggressive locality-enhancement algorithms
+on the effective cache size.
+
+Acknowledgement
+
+We thank Chau-Wen Tseng for his careful review before
+this paper is finalized.
+
+
+
+--R
+
+Data and computation transformations for multiprocessors.
+Compiler transformations for high-performance comput- ing
+Symbolic range propa- gation
+
+Experience with efficient array data flow analysis for array privatization.
+Tile size selection using cache organization and data layout.
+Symbolic Dependence Analysis for High Performance Parallelizing Compilers.
+A matrix-based approach to the global locality optimization problem
+
+Transformations of imperfectly nested loops.
+The Structure of Computers and Computations
+The cache performance and optimizations of blocked algorithms.
+Fusion of loops for parallelism and locality.
+Improving data locality with loop transformations.
+Time Skewing: A Value-Based Approach to Optimizing for Memory Local- ity
+A Practical Algorithm for Exact Array Dependence Analysis.
+Exploiting Monotone Convergence Functions in Parallel Programs.
+Eliminating Conflict Misses for High Performance Architectures.
+
+Standard Performance Evaluation Corporation
+
+Combining loop transformations considering caches and scheduling.
+Improving Locality and Parallelism in Nested Loops.
+A data locality optimizing algorithm.
+High Performance Compilers for Parallel Computing.
+--TR
+The cache performance and optimizations of blocked algorithms
+A data locality optimizing algorithm
+A practical algorithm for exact array dependence analysis
+Improving locality and parallelism in nested loops
+Instruction-level parallel processing
+Compiler transformations for high-performance computing
+Tile size selection using cache organization and data layout
+Improving data locality with loop transformations
+Exploiting monotone convergence functions in parallel programs
+Combining loop transformations considering caches and scheduling
+Fusion of Loops for Parallelism and Locality
+multi-level blocking
+Experience with efficient array data flow analysis for array privatization
+Eliminating conflict misses for high performance architectures
+Schedule-independent storage mapping for loops
+Transformations for imperfectly nested loops
+Structure of Computers and Computations
+Symbolic range propagation
+A Matrix-Based Approach to the Global Locality Optimization Problem
+
+--CTR
+Claudia Leopold, On optimal temporal locality of stencil codes, Proceedings of the 2002 ACM symposium on Applied computing, March 11-14, 2002, Madrid, Spain
+Nawaaz Ahmed , Nikolay Mateev , Keshav Pingali, Synthesizing Transformations for Locality Enhancement of Imperfectly-Nested Loop Nests, International Journal of Parallel Programming, v.29 n.5, p.493-544, October 2001
+Shoaib Kamil , Kaushik Datta , Samuel Williams , Leonid Oliker , John Shalf , Katherine Yelick, Implicit and explicit optimizations for stencil computations, Proceedings of the 2006 workshop on Memory system performance and correctness, October 22-22, 2006, San Jose, California
+David Wonnacott, Achieving Scalable Locality with Time Skewing, International Journal of Parallel Programming, v.30 n.3, p.181-221, June 2002
+Roger Espasa , Federico Ardanaz , Joel Emer , Stephen Felix , Julio Gago , Roger Gramunt , Isaac Hernandez , Toni Juan , Geoff Lowney , Matthew Mattina , Andr Seznec, Tarantula: a vector extension to the alpha architecture, ACM SIGARCH Computer Architecture News, v.30 n.2, May 2002
+Guohua Jin , John Mellor-Crummey, Experiences tuning SMG98: a semicoarsening multigrid benchmark based on the hypre library, Proceedings of the 16th international conference on Supercomputing, June 22-26, 2002, New York, New York, USA
+Jingling Xue , Wentong Cai, Time-minimal tiling when rise is larger than zero, Parallel Computing, v.28 n.6, p.915-939, June 2002
+J. Hu , M. Kandemir , N. Vijaykrishnan , M. J. Irwin, Analyzing data reuse for cache reconfiguration, ACM Transactions on Embedded Computing Systems (TECS), v.4 n.4, p.851-876, November 2005
+Guohua Jin , John Mellor-Crummey , Robert Fowler, Increasing temporal locality with skewing and recursive blocking, Proceedings of the 2001 ACM/IEEE conference on Supercomputing (CDROM), p.43-43, November 10-16, 2001, Denver, Colorado
+Steve Carr , Soner nder, A case for a working-set-based memory hierarchy, Proceedings of the 2nd conference on Computing frontiers, May 04-06, 2005, Ischia, Italy
+Nawaaz Ahmed , Nikolay Mateev , Keshav Pingali, Synthesizing transformations for locality enhancement of imperfectly-nested loop nests, Proceedings of the 14th international conference on Supercomputing, p.141-152, May 08-11, 2000, Santa Fe, New Mexico, United States
+Induprakas Kodukula , Keshav Pingali, Data-Centric Transformations for Locality Enhancement, International Journal of Parallel Programming, v.29 n.3, p.319-364, June 2001
+Nawaaz Ahmed , Nikolay Mateev , Keshav Pingali, Tiling imperfectly-nested loop nests, Proceedings of the 2000 ACM/IEEE conference on Supercomputing (CDROM), p.31-es, November 04-10, 2000, Dallas, Texas, United States
+Gabriel Rivera , Chau-Wen Tseng, Locality optimizations for multi-level caches, Proceedings of the 1999 ACM/IEEE conference on Supercomputing (CDROM), p.2-es, November 14-19, 1999, Portland, Oregon, United States
+Qing Yi , Vikram Adve , Ken Kennedy, Transforming loops to recursion for multi-level memory hierarchies, ACM SIGPLAN Notices, v.35 n.5, p.169-181, May 2000
+Naraig Manjikian , Tarek S. Abdelrahman, Exploiting Wavefront Parallelism on Large-Scale Shared-Memory Multiprocessors, IEEE Transactions on Parallel and Distributed Systems, v.12 n.3, p.259-271, March 2001
+Yonghong Song , Rong Xu , Cheng Wang , Zhiyuan Li, Data locality enhancement by memory reduction, Proceedings of the 15th international conference on Supercomputing, p.50-64, June 2001, Sorrento, Italy
+Kristof Beyls , Erik H. D'Hollander, Intermediately executed code is the key to find refactorings that improve temporal data locality, Proceedings of the 3rd conference on Computing frontiers, May 03-05, 2006, Ischia, Italy
+A. Ya. Kalinov , A. L. Lastovetsky , I. N. Ledovskikh , M. A. Posypkin, Compilation of Vector Statements of C[] Language for Architectures with Multilevel Memory Hierarchy, Programming and Computing Software, v.27 n.3, p.111-122, May-June 2001
+Sriram Krishnamoorthy , Muthu Baskaran , Uday Bondhugula , J. Ramanujam , Atanas Rountev , P Sadayappan, Effective automatic parallelization of stencil computations, ACM SIGPLAN Notices, v.42 n.6, June 2007
+Jonathan Weinberg , Michael O. McCracken , Erich Strohmaier , Allan Snavely, Quantifying Locality In The Memory Access Patterns of HPC Applications, Proceedings of the 2005 ACM/IEEE conference on Supercomputing, p.50, November 12-18, 2005
+Gabriel Rivera , Chau-Wen Tseng, Tiling optimizations for 3D scientific computations, Proceedings of the 2000 ACM/IEEE conference on Supercomputing (CDROM), p.32-es, November 04-10, 2000, Dallas, Texas, United States
+Y. Charlie Hu , Alan Cox , Willy Zwaenepoel, Improving fine-grained irregular shared-memory benchmarks by data reordering, Proceedings of the 2000 ACM/IEEE conference on Supercomputing (CDROM), p.33-es, November 04-10, 2000, Dallas, Texas, United States
+Michelle Mills Strout , Larry Carter , Jeanne Ferrante , Barbara Kreaseck, Sparse Tiling for Stationary Iterative Methods, International Journal of High Performance Computing Applications, v.18 n.1, p.95-113, February  2004
+Chung-hsing Hsu , Ulrich Kremer, A Quantitative Analysis of Tile Size Selection Algorithms, The Journal of Supercomputing, v.27 n.3, p.279-294, March 2004
+Martha Mercaldi , Steven Swanson , Andrew Petersen , Andrew Putnam , Andrew Schwerin , Mark Oskin , Susan J. Eggers, Instruction scheduling for a tiled dataflow architecture, ACM SIGOPS Operating Systems Review, v.40 n.5, December 2006
+Karin Hgstedt , Larry Carter , Jeanne Ferrante, On the Parallel Execution Time of Tiled Loops, IEEE Transactions on Parallel and Distributed Systems, v.14 n.3, p.307-321, March
+Venkata K. Pingali , Sally A. McKee , Wilson C. Hseih , John B. Carter, Computation regrouping: restructuring programs for temporal data cache locality, Proceedings of the 16th international conference on Supercomputing, June 22-26, 2002, New York, New York, USA
+Chen Ding , Maksim Orlovich, The Potential of Computation Regrouping for Improving Locality, Proceedings of the 2004 ACM/IEEE conference on Supercomputing, p.13, November 06-12, 2004
+Swarup Kumar Sahoo , Sriram Krishnamoorthy , Rajkiran Panuganti , P. Sadayappan, Integrated Loop Optimizations for Data Locality Enhancement of Tensor Contraction Expressions, Proceedings of the 2005 ACM/IEEE conference on Supercomputing, p.13, November 12-18, 2005
+Venkata K. Pingali , Sally A. McKee , Wilson C. Hsieh , John B. Carter, Restructuring computations for temporal data cache locality, International Journal of Parallel Programming, v.31 n.4, p.305-338, August
+Abdel-Hameed A. Badawy , Aneesh Aggarwal , Donald Yeung , Chau-Wen Tseng, Evaluating the impact of memory system performance on software prefetching and locality optimizations, Proceedings of the 15th international conference on Supercomputing, p.486-500, June 2001, Sorrento, Italy
+D. Cociorva , J. W. Wilkins , C. Lam , G. Baumgartner , J. Ramanujam , P. Sadayappan, Loop optimization for a class of memory-constrained computations, Proceedings of the 15th international conference on Supercomputing, p.103-113, June 2001, Sorrento, Italy
+Jingling Xue , Xavier Vera, Efficient and Accurate Analytical Modeling of Whole-Program Data Cache Behavior, IEEE Transactions on Computers, v.53 n.5, p.547-566, May 2004
+Sandhya Krishnan , Sriram Krishnamoorthy , Gerald Baumgartner , Chi-Chung Lam , J. Ramanujam , P. Sadayappan , Venkatesh Choppella, Efficient synthesis of out-of-core algorithms using a nonlinear optimization solver, Journal of Parallel and Distributed Computing, v.66 n.5, p.659-673, May 2006
+Zhiyuan Li , Yonghong Song, Automatic tiling of iterative stencil loops, ACM Transactions on Programming Languages and Systems (TOPLAS), v.26 n.6, p.975-1028, November 2004
+Chen Ding , Ken Kennedy, Improving effective bandwidth through compiler enhancement of global cache reuse, Journal of Parallel and Distributed Computing, v.64 n.1, p.108-134, January 2004

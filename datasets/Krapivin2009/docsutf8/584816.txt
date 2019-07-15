@@ -1,0 +1,527 @@
+--T
+Query processing of streamed XML data.
+--A
+We are addressing the efficient processing of continuous XML streams, in which the server broadcasts XML data to multiple clients concurrently through a multicast data stream, while each client is fully responsible for processing the stream. In our framework, a server may disseminate XML fragments from multiple documents in the same stream, can repeat or replace fragments, and can introduce new fragments or delete invalid ones. A client uses a light-weight database based on our proposed XML algebra to cache stream data and to evaluate XML queries against these data. The synchronization between clients and servers is achieved through annotations and punctuations transmitted along with the data streams. We are presenting a framework for processing XML queries in XQuery form over continuous XML streams. Our framework is based on a novel XML algebra and a new algebraic optimization framework based on query decorrelation, which is essential for non-blocking stream processing.
+--B
+Introduction
+1.1 Motivation
+XML [31] has emerged as the leading textual language for representing and exchanging data on the web.
+Even though HTML is still the dominant format for publishing documents on the web, XML has become the
+prevalent exchange format for business-to-business transactions and for enterprise Intranets. It is expected
+that in the near future the Internet will be populated with a vast number of web-accessible XML les. One
+of the reasons of its popularity is that, by supporting simple nested structures of tagged elements, the XML
+format is able to represent both the structure and the content of complex data very eectively. To take
+advantage of the structure of XML documents, new query languages had to be invented that go beyond the
+simple keyword-based boolean formulas supported by current web search engines.
+There are several recent proposals for XML query languages [17], but none has been adopted as a
+standard yet. Nevertheless, there is a recent working draft of an XML query language released by the
+World-Wide Web Consortium (W3C), called XQuery [7], which may become a standard in the near future.
+The basic features of XQuery are illustrated by the following query (taken from a W3C web page [31]):
+f for $b in document(\http://www.bn.com")/bib/book
+return <book year=f $b/@year g> f $b//title g
+which lists books published by Addison-Wesley after 1991, including their year and title. The document(URL)
+expression returns an entry point to the XML data contained in the XML document located at the specied
+URL address. XQuery uses path expressions to navigate through XML data. For example, the tag selection,
+$b/publisher, returns all the children of $b with tag name, publisher, while the wildcard selection, $b//title,
+returns all the descendants of $b (possibly including $b itself) with tag name, title. In
+uenced by modern
+database query languages, such as the OQL language of the ODMG standard [6], XQuery allows complex
+queries to be composed from simpler ones and supports many advanced features for navigating and restructuring
+XML data, such as XML data construction, aggregations, universal and existential quantication,
+and sorting.
+There have been many commercial products recently that take advantage of the already established
+database management technology for storing and retrieving XML data, although none of them fully supports
+XQuery yet. In fact, nearly all relational database vendors now provide some functionality for storing and
+handling XML data in their systems. Most of these systems support automatic insertion of canonically-
+structured XML data into tables, rather than utilizing the XML schemas for generating application-specic
+database schemas. They also provide methods for exporting database data into XML form as well as querying
+and transforming these forms into HTML.
+The eective processing of XML data requires some of the storage and access functionality provided
+by modern database systems, such as query processing and optimization, concurrency control, integrity,
+recovery, distribution, and security. Unlike conventional databases, XML data may be stored in various
+forms, such as in their native form (as text documents), in a semi-structured database conforming to a
+standard schema, or in an application-specic database that exports its data in XML form, and may be
+disseminated from servers to clients in various ways, such as by broadcasting data to multiple clients as
+XML streams or making them available upon request.
+Based on previous experience with traditional databases, queries can be optimized more eectively if
+they are rst translated into a suitable internal form with clear semantics, such as an algebra or calculus. If
+XML data are stored in an application-specic database schema, then XML queries over these data can be
+translated into the native query language supported by the database system, which in turn can be compiled
+into its native algebraic form. A major research issue related to this approach, which has been addressed
+in our previous work [14], is the automatic generation of the database schema as well as the automatic
+translation of XML queries into database queries over the generated schema. On the other hand, if XML
+data are stored as semi-structured data or processed on the
+y as XML streams, then a new algebra is needed
+that captures the heterogeneity and the irregularities intrinsic to XML data [4]. In fact, there are already
+algebras for semi-structured data, including an algebra based on structural recursion [4], YATL [10, 8],
+SAL [3], x-algebra [16], and x-scan [22]. None of these algebras have been used for the emerging XML query
+languages yet, and there is little work on algebraic query optimization based on these algebras.
+This paper is focused on the e-cient processing of continuous XML streams. Most current web servers
+adopt the \pull-based" processing technology in which a client submits a query to a server, the server
+evaluates the query against a local database, and sends the result back to the client. An alternative approach
+is the \push-based" processing, in which the server broadcasts parts or the entire local database to multiple
+clients through a multicast data stream usually with no acknowledge or handshaking, while each client is fully
+responsible for processing the stream [1]. Pushing data to multiple clients is highly desirable when a large
+number of similar queries are submitted to a server and the query results are large [2], such as requesting a
+region from a geographical database. Furthermore, by distributing processing to clients, we reduce the server
+workload while increasing its availability. On the other hand, a stream client does not acknowledge correct
+receipt of the transmitted data, which means that, in case of a noise burst, it cannot request the server to
+resubmit a data packet to correct the errors. Stream data may be innite and transmitted in a continuous
+stream, such as measurement or sensor data transmitted by a real-time monitoring system continuously.
+We would like to support the combination of both processing technologies, pull and push, in the same
+framework. The unit of transmission in an XML stream is an XML fragment, which corresponds to one
+XML element from the transmitted document. In our framework, a server may prune fragments from the
+document XML tree, called llers, and replace them by holes. A hole is simply a reference to a ller (through
+a unique ID). Fillers, in turn, may be pruned into more llers, which are replaced by holes, and so on. The
+result is a sequence of small fragments that can be assembled at the client side by lling holes with llers.
+The server may choose to disseminate XML fragments from multiple documents in the same stream, can
+repeat some fragments when they are critical or in high demand, can replace them when they change by
+sending delta changes, and can introduce new fragments or delete invalid ones. The client is responsible
+for caching and reconstructing parts of the original XML data in its limited memory (if necessary) and for
+evaluating XML queries against these data. Like relational database data, stream data can be processed
+by relational operators. Unlike stored database data though, which may provide fast access paths, the
+stream content can only be accessed sequentially. Nevertheless, we would like to utilize the same database
+technology used in pulling data from a server for pushing data to clients and for processing these data at
+the client side with a light-weight database management system. For example, a server may broadcast stock
+prices and a client may evaluate a continuous query on a wireless, mobile device that checks and warns
+(by activating a trigger) on rapid changes in selected stock prices within a time period. Since stock prices
+may change through time, the client must be able to cache (in main memory or on secondary storage) old
+prices. Another example is processing MPEG-7 [24] streams to extract and query video context information.
+MPEG-7 is a standard developed by MPEG (Moving Picture Experts Group) and combines multimedia data
+of various forms, including content description for the representation of perceivable information.
+Since XML fragments are processed at the client side as they become available, the query processing
+system resembles a main-memory database, rather than a traditional, secondary-storage-based database. Although
+a main-memory database has a dierent back-end from a secondary-storage database, main-memory
+queries can be mapped to similar algebraic forms and optimized in a similar way as traditional queries. One
+di-cult problem of processing algebraic operators against continuous streams is the presence of blocking
+operators, such as sorting and group-by, which require the processing of the entire stream before generating
+the rst result. Processing these operators eectively requires that the server passes some hints, called punctuations
+[29], along with the data to indicate properties about the data. One example of a punctuation is
+the indication that all prices of stocks starting with 'A' have already been transmitted. This is very valuable
+information to a client that performs a group-by over the stock names because it can complete and
+ush
+from memory all the groups that correspond to these stock names. Extending a query processor to make an
+eective use of such punctuations has not yet been investigated by others.
+1.2 Our Approach
+This paper addresses the e-cient processing of continuous XML streams, in which a server broadcasts XML
+data to multiple clients concurrently. In our framework, a server may disseminate XML fragments from
+multiple documents in the same stream, can repeat or replace fragments, and can introduce new fragments
+or delete invalid ones. In our approach, a client uses a light-weight, in-memory database to cache stream
+data and physical algorithms based on an XML algebra to evaluate XML queries against these data. The
+synchronization between clients and servers is achieved through annotations and punctuations transmitted
+along with the data streams. A necessary information needed by a client is the structure of the transmitted
+XML document, called the Tag Structure. The server periodically disseminates this Tag Structure as a
+special annotation in XML form. For example, the following Tag Structure:
+<stream:structure>
+<tag name="bib" id="1">
+<tag name="vendor" id="2" attributes="id">
+<tag name="name" id="3"/>
+<tag name="email" id="4"/>
+<tag name="book" id="5" attributes="ISBN related_to">
+<tag name="title" id="6"/>
+<tag name="publisher" id="7"/>
+<tag name="year" id="8"/>
+<tag name="price" id="9"/>
+<tag name="author" id="10">
+<tag name="firstname" id="11"/>
+<tag name="lastname" id="12"/>
+
+</stream:structure>
+corresponds to the following partial DTD:
+<!ELEMENT bib (vendor*)>
+<!ELEMENT vendor (name, email, book*)>
+Query processing is performed at the client side with the help of a light-weight query optimizer. A
+major component of a query optimizer is an eective algebra, which would serve as an intermediate form
+from the translation of abstract queries to concrete evaluation algorithms. We are presenting a new XML
+algebra and a query optimization framework based on query normalization and query unnesting (also known
+as query decorrelation). There are many proposals on query optimization that are focused on unnesting
+nested queries [23, 18, 26, 11, 12, 9, 28]. Nested queries appear more often in XML queries than in relational
+queries, because most XML query languages, including XQuery, allow complex expressions at any point in
+a query. Current commercial database systems typically evaluate nested queries in a nested-loop fashion,
+which is unacceptable for on-line stream processing and does not leave many opportunities for optimization.
+Most proposed unnesting techniques require the use of outer-joins, to prevent loss of data, and grouping, to
+accumulate the data and to remove the null values introduced by the outer-joins. If considered in isolation,
+query unnesting itself does not result in performance improvement. Instead, it makes possible other opti-
+mizations, which otherwise would not be possible. More specically, without unnesting, the only choice of
+evaluating nested queries is a naive nested-loop method: for each step of the outer query, all the steps of the
+inner query need to be executed. Query unnesting promotes all the operators of the inner query into the
+operators of the outer query. This operator mixing allows other optimization techniques to take place, such
+as the rearrangement of operators to minimize cost and the free movement of selection predicates between
+inner and outer operators, which enables operators to be more selective. Our XML query unnesting method
+is in
+uenced by the query unnesting method for OODB queries presented in our earlier work [15].
+If the data stream were nite and its size were smaller than the client buer size, then the obvious
+way to answer XQueries against an XML stream is to reconstruct the entire XML document in memory
+and then evaluate the query against the cached document. But this is not a realistic assumption even for
+nite streams. Client computers, which are often mobile, have typically limited resources and computing
+power. After XQueries are translated to the XML algebra, each algebraic operator is assigned a stream-based
+evaluation algorithm, which does not require to consume the entire stream before it produces any
+output. Even when a data stream is nite, some operations, such as sorting and group-by with aggregation,
+may take too long to complete. However, clients may be simply satised with partial results, such as the
+average values of a small sample of the data rather than the entire database. Online aggregation [20, 21]
+has addressed this problem by displaying the progress at any point of time along with the accuracy of the
+result and by allowing the client to interrupt the aggregation process. Our approach is based on annotations
+pred
+pred Y
+v,path
+pred
+pred
+group;pred
+f
+
+Figure
+
+1: Semantics of the XML Algebra
+about the data content, called punctuations [29]. A punctuation is a hint sent by the server to indicate a
+property about the data already transmitted. This hint takes the form of a predicate that compares a path
+expression, which uses tsid's rather than tag names, with a constant value, as follows:
+<stream:punctuation property="path cmp constant"/>
+For example, the following punctuation
+<stream:punctuation property="/1/2[3]/5/@ISBN <= 1000"/>
+Here, according to the Tag Structure, the path /1/2[3]/5@ISBN corresponds to the XPath /bib/vendor[3]/book/@ISBN.
+This punctuation indicates that the server has already transmitted all books published by the 3rd vendor
+whose ISBN is less than or equal to 1000. We are presenting a set of stream-based evaluation algorithms for
+our XML algebraic operators that make use of these punctuations to reduce the amount of resources needed
+by clients to process streamed data. For example, suppose that a client joins the above stream of data about
+books with the stream of book prices provided by Amazon.com using the ISBN as a cross-reference. Then
+one way to evaluate this join is using an in-memory hash join [30] where both the build and probe tables
+reside in memory. When ISBN punctuations are received from both streams, some of the hash buckets in
+both hash tables can be
+ushed from memory since, according to the punctuations received, they will not be
+used again. In our framework, all punctuations are stored in a central repository at the client side and are
+being consulted on demand, that is, only when the local buer space of an evaluation operator over
+ows.
+The rest of the paper is organized as follows. Section 2 presents a new XML algebra and a new algebraic
+optimization framework based on query decorrelation. It also presents translation rules for compiling
+XQuery into an algebraic form. Our XML algebra can be used generically for processing any XML data. Section
+3 adapts this algebra to handle XML streams and presents various in-memory, non-blocking evaluation
+algorithms to process these operators.
+Algebra and Query Optimization
+2.1 XML Algebra
+We are proposing a new algebra and a new algebraic optimization framework well-suited for XML structures
+and stream processing. In this section, we are presenting the XML algebra without taking into account the
+fragmentation and reconstruction of XML data. These issues will be addressed in detail in Section 3.
+The algebraic bulk operators along with their semantics are given in Figure 1. The inputs and output of
+each operator are streams, which are captured as lists of records and can be concatenated with list append,
+++. There are other non-bulk operators, such as boolean comparisons, which are not listed here. The
+semantics is given in terms of record concatenation, -, and list comprehensions, f e unlike the
+set former notation, preserve the order and multiplicity of elements. The form =f    g reduces the elements
+resulted from the list comprehension using the associative binary operator,  (a monoid, such as [, +, *, ^,
+_, etc). That is, for a non-bulk monoid , such as +, we have =fa 1 ; a an  an , while
+for a bulk monoid, such as [, we have =fa 1 ; a an g. Sorting is captured by
+the special bulk monoid =sort(f ), which merges two sorted sequences by f into one sorted sequence by f .
+For example, returns f3; 2; 1g.
+The environment, -, is the current stream record, used in the nested queries. Nested queries are
+mapped into algebraic form in which some algebraic operators have predicates, headers, etc, that contain
+other algebraic operators. More specically, for each record, -, of the stream passing through the outer
+operator of a nested query, the inner query is evaluated by concatenating - with each record of the inner
+query stream.
+An unnest path is, and operator predicates may contain, a path expression, v=path, where v is a stream
+record attribute and path is a simple XPath of the form: A, @A, path=A, path=@A, path[n], path=text(),
+or path=data(), where n is an integer algebraic form. That is, these path forms do not contain wildcard
+selections, such as path==A, and predicate selections, such as path[e]. The unnest operation is the only
+mechanism for traversing an XML tree structure. Function P is dened over paths as follows:
+The extraction operator, , gets an XML data source, T , and returns a singleton stream whose unique
+element contains the entire XML tree. Selection (), projection (), merging ([), and join (./) are similar
+to their relational algebra counterparts, while unnest () and nest () are based on the nested relational
+algebra. The reduce operator, , is used in producing the nal result of a query/subquery, such
+as in aggregations and existential/universal quantications. For example, the XML universal quanti-
+cation every $v in $x/A satises $v/A/data()>5 can be captured by the  operator, with
+v=A=data()>5. Like the XQuery predicates, the predicates used in our XML algebraic operators
+have implicit existential semantics related to the (potentially multiple) values returned by path expres-
+sions. For example, the predicate v=A=data()>5 used in the previous example has the implicit semantics
+since the path v=A=data() may return more than one value. Finally, even though
+selections and projections can be expressed in terms of , for convenience, they are treated as separate
+operations.
+2.2 Translation from XQuery to the XML Algebra
+Before XQueries are translated to the XML algebra, paths with wildcard selections, such as e==A, are
+instantiated to concrete paths, which may be accomplished, in the absence of type information, with the
+help of the Tag Structure. Each XPath expression in an XQuery, which may contain wildcard selections, is
+expanded into a concatenation of concrete XPath expressions. For example, the XPath expression /A//X is
+expanded to (/A/B/C/X, /A/D/X), if these two concrete paths in the pair are the only valid paths in the
+Tag Structure that match the wildcard selection.
+Our translation scheme from XQuery to the XML algebra consists of two phases: First, XQueries are
+translated into list comprehensions, which are similar to those in Figure 1. Then, the algebraic forms are
+derived from the list comprehensions using the denitions in Figure 1.
+According to the XQuery semantics [7], the results of nearly all XQuery terms are mapped to sequences
+of values. This means that, if an XQuery term returns a value other than a sequence, this value is lifted to a
+singleton sequence that contains this value. A notable exception is a boolean value, which is mapped to the
+boolean value itself. The following are few rules for T [[e]], which maps XQuery terms into algebraic forms.
+First, we translate XPath terms into simple paths without path predicates. By adopting the semantics of
+XPath, the implicit reference to the current node in a path predicate, such as from the path A/B in the path
+predicate X/Y[A/B=1], is captured by the variable $dot, which is bound to the current element. That is,
+X/Y[A/B=1] is equivalent to X/Y[$dot/A/B=1]. Under this assumption, path predicates are removed in a
+straightforward way:
+T [[e[i to
+To complete our translation scheme, XQuery terms are mapped to the XML algebra:
+where the function element takes a tag name and a sequence of XML elements and constructs a new XML
+element, and e 2 [$v=e 1 ] replaces all free occurrences of variable $v in the term e 2 with the term e 1 . Note that
+boolean predicates, such as the equality in the last rule, are mapped to one boolean value as is implied by
+the existential semantics of XQuery predicates [7].
+Before the list comprehensions are translated to algebraic forms, the generator domains of the comprehensions
+are normalized into simple path expressions, when possible. This task is straightforward and has
+been addressed by earlier work [5, 15]. The following are some examples of normalization rules:
+where
+a sequence of terms separated by commas while [v=e2 ]
+terms in the sequence
+by replacing all occurrences of v with e 2 . The rst rule applies when the domain of a comprehension generator
+is another comprehension and is reduced to a case caught by the second rule. The second rule applies when
+the domain of a comprehension generator is a singleton sequence. The last rule distributes a tag selection
+to the header of a comprehension. The fourth rule may look counter-intuitive, but is a consequence of the
+ambiguous semantics of XQuery where non-sequence values are lifted to singleton sequences. According to
+the mapping rules and after normalization, a simple path, such as $v/A/B/C, is mapped to itself, that is,
+to v/A/B/C.
+For example, the following XQuery:
+for $b in document(\http://www.bn.com")/bib/book
+return   f $b/title g
+is translated to the following comprehension using the above mapping rules:
+and is normalized into the following comprehension:
+opr opr
++, head
++, head
+Y
+Z
+q'
+G
+pred
+pred
+q'
+Y
+Z
+
+Figure
+
+2: Algebraic Query Unnesting
+The second phase of our translation scheme maps a normalized term e, which consists of list comprehensions
+exclusively, into the algebraic form dened by the following rules:
+E)
+where =( [;e
+where doc is a shorthand for document. In addition, since the predicates used in our XML algebraic operators
+have existential semantics, similar to the semantics of XQuery predicates, we move the existentially quantied
+variables ranged over paths into the predicate iself, making it an implicit existential quantication. This is
+achieved by the following rules:
+For example, _=f b/publisher g is reduced to b/publisher = \Addison-Wesley",
+which has implicit existential semantics.
+Under these rules, the normalized list comprehension derived from our example query is mapped to:
+[;h
+where
+2.3 Algebraic Optimization
+There are many algebraic transformation rules that can be used in optimizing the XML algebra. Some of
+them have already been used successfully for the relational algebra, such as evaluating selections as early as
+possible. We are concentrating here on query unnesting (query decorrelation) because it is very important
+for processing streamed data. Without query unnesting, nested queries must be evaluated in a nested-loop
+fashion, which requires multiple passes through the stream of the inner query. This is unacceptable because
+of the performance requirements of stream processing.
+Our unnesting algorithm is shown in Figure 2.A: for each box, q, that corresponds to a nested query, it
+converts the reduction on top of q into a nest, and the blocking joins/unnests that lay on the input-output
+path of the box q into outer-joins/outer-unnests in the box q 0 (as is shown in the example of Figure 2.B).
+At the same time, it embeds the resulting box q 0 at the point immediately before is used. There is a very
+simple explanation why this algorithm is correct: The nested query, q, in Figure 2.A, consumes the same
+input stream as that of the embedding operation, opr, and computes a value that is used in the component,
+f , of the embedding query. If we want to splice this box onto the stream of the embedding query we need
+to guarantee two things. First, q should not block the input stream by removing tuples from the stream.
+This condition is achieved by converting the blocking joins into outer-joins and the blocking unnests into
+outer-unnests (box q 0 ). Second, we need to extend the stream with the new value v of q before it is used in f .
+This manipulation can be done by converting the reduction on top of q into a nest, since the main dierence
+between nest and reduce is that, while the reduce returns a value (a reduction of a stream of values), nest
+embeds this value to the input stream. At the same time, the nest operator will convert null values to zeros
+so that the stream that comes from the output of the spliced box q 0 will be exactly the same as it was before
+the splice.
+2.4 A Complete Example
+In this subsection, we apply our translation and optimization scheme over the following XQuery (taken
+from
+f
+for $u in document(\users.xml")//user tuple
+return
+f $u/name g
+f for $b in document(\bids.xml")//bid
+$i in document(\items.xml")//item
+return  f $i/description/text() g
+
+which lists all users in alphabetic order by name so that, for each user, it includes descriptions of all the
+items (if any) that were bid on by that user, in alphabetic order. Recall that sorting is captured in our
+algebra using the monoid sort(f ), which sorts a sequence by f . The algebraic form of the above query is:
+where the header h 1 is the XML construction contains a nested algebraic
+After query unnesting, the resulting decorrelated query is:
+da (X))
+where
+where =./ and = are left-outer join and outer unnest, respectively.
+Processing Continuous XML Streams
+In our framework, streamed XML data are disseminated to clients in the form:
+<stream:xxx hid=\.">XML fragment </stream:xxx>
+where xxx is the tag name ller, repeat, replace, or remove. The hole ID, hid, species the location of the
+fragment in the reconstructed XML tree. Our framework uses the XML algebra for processing XML streams.
+The main modication needed to the algebra is related to the evaluation of the simple path expressions used
+in predicates and the unnest operator since now they have to be evaluated against the document llers. More
+specically, function P , given in Section 2, must now be extended to handle holes:
+S(<stream:hole
+The returned bottom value, ?, indicates that the path has not been completely evaluated against the current
+fragment due to a hole in the fragment. If a ? is returned at any point during the path evaluation (as
+is dened by P), the XML fragment is suspended. Each client has one central repository of suspended XML
+fragments (regardless of the number of input streams), called fragment repository, which can be indexed by
+the combination of the stream number and hid (the hid of the stored ller). In addition, each operator has
+a local repository that maps hole IDs to ller IDs in the fragment repository. Suppose, for example, that a
+ller with hid=m is streamed through an XML algebraic operator and that this operator cannot complete
+the evaluation of three paths due to the holes with hid's h 1 , h 2 , and h 3 . Then, the local repository of the
+operator will be extended with three mappings: m). When later the ller for one
+of the holes arrives at the operator, say the ller for h 2 , then the hole h 2 inside the ller with hid=m in
+the fragment repository is replaced with the newly arrived ller. The h 2 mapping is removed from the local
+repository of the operator and the resulting ller with hid= m at the fragment repository is evaluated again
+for this operator, which may result to more hole mappings in the local repository of the operator. Finally, if
+there are no blocking holes during path evaluation, that is, when operator paths are completely evaluated,
+then the ller is processed by the operator and is removed from the fragment repository. It is not necessary
+for all the holes blocking the evaluation of the operator paths to be lled before the fragment is processed
+and released. For example, if both paths in the selection predicate are blocked by
+holes, then if one of the holes is lled and the corresponding predicate is false, there is no need to wait for
+the second hole to be lled since the fragment can be removed from the stream.
+If the server sends repeat, replace, or remove fragments, then the client modies its fragment repository
+and may stream some of the fragments through the algebraic operators. If it is a repeat fragment and its
+hid is already in the fragment repository, then it is ignored, otherwise it is streamed through the query as
+a ller fragment (since the client may have been connected in the middle of the stream broadcast). If it is
+a replace fragment and its hid is already in the fragment repository, then the stored fragment is replaced,
+otherwise it is streamed through the query as a ller fragment. Finally, if it is a remove fragment, then the
+fragment with the referenced hid is removed from the fragment repository (if it exists).
+Our evaluation algorithms for the XML algebra are based on in-memory hashing. Blocking operators,
+such as join and nest, require buers for caching stream records. The evaluation algorithms for these
+operators are hash-based, when possible (it is not possible for non-equijoins). For example, for the join
+X./ x=A=B=y=C=D=E Y , we will have two hash tables in memory with the same number of buckets, one for
+stream X with a hash function based on the path x=A=B and one for the stream Y based on the path
+y=C=D=E. When both streams are completed, the join is evaluated by joining the associated buckets in
+pairs. The nest operator can be evaluated using a hash-based algorithm also, where the hash key is the
+combination of all group-by paths.
+As we have mentioned, to cope with continuous streams and with streams larger than the available
+memory, we make use of punctuations sent by the server along with the data. In our framework, when
+punctuations are received at the client site, they are stored at a central repository, called punctuation
+repository, and are indexed by their stream number. Each blocking operation, such as join or nesting, is
+associated with one (for unary) or two (for binary) pairs of stream numbers/hash keys. The hash key is a
+path that can be identied by a Tag Structure ID. The blocking operators are evaluated continuously by
+reading fragments from their input streams without producing any output but by lling their hash tables.
+As soon as one of their hash tables is full, they consult the punctuation repository to nd all punctuations
+that match both their stream number and Tag Structure ID. Then they perform the blocking operation over
+those hashed fragments that match the retrieved punctuations, which may result to the production of some
+output. The last phase,
+ushing the hash tables, can be performed in a pipeline fashion, that is, one output
+fragment at a time (when is requested by the parent operation). The punctuation repository is cleared from
+all the punctuation of a stream when the entire stream is repeated (i.e., when the root fragment is repeated).
+Sorting is a special case and is handled separately. It is implemented with an in-memory sorting, such
+as quicksort. Each sort operator remembers the largest key value of all data already
+ushed from memory.
+In the beginning, of course, the largest key is null. Like the other blocking operators, when the buer used
+for sorting is full, the punctuation repository is consulted to nd punctuations related to the sorting key. If
+there is a punctuation that indicates that we have seen all data between the largest key value (if not null)
+and some other key value, then all buered data smaller or equal to the latter key value are
+ushed and this
+value becomes the new largest key.
+4 Future Plans
+When we described our XML algebra, we assumed that all the XPath paths used in operator predicates
+and by the unnest operators (as unnesting paths) are fully mapped to concrete paths that do not contain
+any wildcard selections. This is possible if the XML Tag Structure is provided, as is done when a server
+disseminates XML data to clients in our stream processing framework. In the absence of such information,
+wildcard selections of the form e==A, can be evaluated with a transitive closure operator that walks through
+the XML tree e to nd all branches with tag A. Transitive closures are very hard to optimize and very few
+general techniques have been proposed in the literature, such as magic sets [25]. To address this problem,
+we are planning to incorporate structural recursion over tree types to our XML algebra. Our starting point
+will be our previous work on structural recursion over tree-like data structures [13], which satises very
+eective optimization rules, reminiscent to loop fusion and deforestation (elimination of intermediate data
+structures) used in functional programming languages. These operators and optimization techniques can
+also be used for optimizing queries over xed-point types, supported directly in DTDs and XML Schemas,
+such as the part-subpart hierarchy. XQuery does not provide any special language construct for traversing
+such structures, but can simulate such operations with unrestricted recursion. We are planning to introduce
+language extensions to XQuery to handle structural recursion directly and a mapping from these extensions
+to the structural recursion algebraic operators. In addition, we are planning to dene an update language
+for XQuery, give it a formal semantics, and optimize it.
+Related to query processing of XML streams, we have only presented evaluation algorithms based on
+in-memory hashing. We are planning to investigate more evaluation algorithms for our XML algebraic
+operators. An alternative approach to hashing is sorting. For example, an alternative way of implementing
+a group-by operation is to sort the input by the group-by attributes and then aggregate over consecutive
+tuples in the sorted result that belong to the same group [19]. Sorting is a blocking operation, which requires
+the availability of the entire stream before it produces any output. It can be turned into a non-blocking
+operator if punctuations related to the sorting attributes are transmitted from the server. Supporting
+multiple evaluation algorithms for each algebraic operator poses new challenges. How can a good evaluation
+plan be selected at the client side? Most relational database systems use a cost-based, dynamic programming
+plan selection algorithm, and rely heavily on data statistics for cost estimation [27]. If the server sends a
+sorted data stream, then this may indicate that a sort-based algorithm that requires the same order may
+be faster and may require less memory than a hash-based one. This is very valuable information to the
+client query optimizer and should be transmitted as another stream annotation by the server, maybe as
+frequently as the document Tag Structure itself. Another useful information needed by the client and must
+be transmitted by the server is statistics about the streamed data. It is still an open problem what form these
+statistics should take and how they should be used by the client. One possibility is to annotate each node
+in the document Tag Structure with the total number of XML elements in the document that correspond to
+that node. Hence, we are planning to investigate cost-based plan selection for streamed data.
+5 Conclusion
+We have presented a framework for processing streamed XML data based on an XML algebra and an
+algebraic optimization framework. The eectiveness of our framework depends not only on the available
+resources at the client site, especially buer size, and on the ability of the client to optimize and evaluate
+queries eectively, but also on the willingness and the ability of servers to broadcast useful punctuations
+through the data stream to help clients utilize their resources better. The server must be aware of all possible
+anticipated client queries and disseminate punctuations that reduce the maximum and average sizes of client
+resources. In addition, the server can disseminate the fragmentation/repetition policy used in splitting its
+XML data as well as statistics about the data sent between punctuations before streaming the actual data.
+This information may help clients to allocate their limited memory to various query operations more wisely.
+We are planning to address these issues in future work.
+
+Acknowledgments
+
+This work is supported in part by the National Science Foundation under the grant
+IIS-9811525 and by the Texas Higher Education Advanced Research Program grant 003656-0043-1999.
+
+
+
+--R
+
+Broadcast Disks: Data Management for Asymmetric Communications Environments.
+Continuous Queries Over Data Streams.
+SAL: An Algebra for Semistructured Data and XML.
+A Query Language and Optimization Techniques for Unstructured Data.
+Comprehension Syntax.
+The Object Data Standard: ODMG 3.0.
+A Query Language for XML.
+
+Optimizing Queries with Universal Quanti
+Your Mediators Need Data Conversion!
+
+Nested Queries in Object Bases.
+
+Query Engines for Web-Accessible XML Data
+Optimizing Object Queries Using an E
+An Algebra for XML Query.
+Database Techniques for the World-Wide Web: A Survey
+Optimization of Nested SQL Queries Revisited.
+Query Evaluation Techniques for Large Databases.
+Interactive Data Analysis: The Control Project.
+Online Aggregation.
+
+On Optimizing an SQL-like Nested Query
+Overview of the MPEG-7 Standard (version 5.0)
+Magic is Relevant.
+Improved Unnesting Algorithms for Join Aggregate SQL Queries.
+Access Path Selection in a Relational Database Management System.
+Optimization of Nested Queries in a Complex Object Model.
+Punctuating Continuous Data Streams.
+Data ow Query Execution in a Parallel Main-Memory Environment
+World Wide Web Consortium (W3C).
+--TR
+Comprehension syntax
+Broadcast disks
+A query language and optimization techniques for unstructured data
+Online aggregation
+Your mediators need data conversion!
+Database techniques for the World-Wide Web
+On wrapping query languages and efficient XML integration
+Optimizing object queries using an effective calculus
+Dataflow query execution in a parallel main-memory environment
+Continuous queries over data streams
+Query Engines for Web-Accessible XML Data
+An Algebra for XML Query
+
+--CTR
+Christoph Koch , Stefanie Scherzinger , Nicole Schweikardt , Bernhard Stegmaier, FluXQuery: an optimizing XQuery processor for streaming XML data, Proceedings of the Thirtieth international conference on Very large data bases, p.1309-1312, August 31-September 03, 2004, Toronto, Canada
+Kevin Beyer , Don Chambrlin , Latha S. Colby , Fatma zcan , Hamid Pirahesh , Yu Xu, Extending XQuery for analytics, Proceedings of the 2005 ACM SIGMOD international conference on Management of data, June 14-16, 2005, Baltimore, Maryland
+Christoph Koch , Stefanie Scherzinger , Nicole Schweikardt , Bernhard Stegmaier, Schema-based scheduling of event processors and buffer minimization for queries on structured data streams, Proceedings of the Thirtieth international conference on Very large data bases, p.228-239, August 31-September 03, 2004, Toronto, Canada
+Peter A. Tucker , David Maier , Tim Sheard , Leonidas Fegaras, Exploiting Punctuation Semantics in Continuous Data Streams, IEEE Transactions on Knowledge and Data Engineering, v.15 n.3, p.555-568, March
+Song Wang , Elke A. Rundensteiner , Murali Mani, Optimization of nested XQuery expressions with orderby clauses, Data & Knowledge Engineering, v.60 n.2, p.303-325, February, 2007
+Sujoe Bose , Leonidas Fegaras, Data stream management for historical XML data, Proceedings of the 2004 ACM SIGMOD international conference on Management of data, June 13-18, 2004, Paris, France
+Haifeng Jiang , Howard Ho , Lucian Popa , Wook-Shin Han, Mapping-driven XML transformation, Proceedings of the 16th international conference on World Wide Web, May 08-12, 2007, Banff, Alberta, Canada
+Sharma Chakravarthy , Alp Aslandogan , Ramez Elmasri , Leonidas Fegaras , JungHwan Oh, Database research at UT Arlington, ACM SIGMOD Record, v.32 n.1, March
+Christoph Koch , Stefanie Scherzinger, Attribute grammars for scalable query processing on XML streams, The VLDB Journal  The International Journal on Very Large Data Bases, v.16 n.3, p.317-342, July      2007
+Norman May , Sven Helmer , Guido Moerkotte, Strategies for query unnesting in XML databases, ACM Transactions on Database Systems (TODS), v.31 n.3, p.968-1013, September 2006

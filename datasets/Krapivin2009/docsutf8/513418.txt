@@ -1,0 +1,607 @@
+--T
+Guaranteed.
+--A
+We describe a distributed memory parallel Delaunay refinement algorithm for polyhedral domains which can generate meshes containing tetrahedra with circumradius to shortest edge ratio less than 2, as long as the angle separating any two incident segments and/or facets is between 90 and 270 degrees. Input to our implementation is an element--wise partitioned, conforming Delaunay mesh of a restricted polyhedral domain which has been distributed to the processors of a parallel system. The submeshes of the distributed mesh are then independently refined by concurrently inserting new mesh vertices.Our algorithm allows a new mesh vertex to affect both the submesh tetrahedralizations and the submesh interfaces induced by the partitioning. This flexibility is crucial to ensure mesh quality, but it introduces unpredictable and variable latencies due to long delays in gathering remote data required for updating mesh data structures. In our experiments, more than 80% of this latency was masked with computation due to the fine--grained concurrency of our algorithm.Our experiments also show that the algorithm is efficient in practice, even for certain domains whose boundaries do not conform to the theoretical limits imposed by the algorithm. The algorithm we describe is the first step in the development of much more sophisticated guaranteed--quality parallel mesh generation algorithms.
+--B
+INTRODUCTION
+A recent trend in many control systems is to connect distributed elements of a control system via a shared
+broadcast bus instead of using point-to-point links [1]. However, there are fundamental differences between a
+shared bus and point-to-point links. Firstly, because the bus is shared between a number of subsystems, there is
+contention for access to the bus, which must be resolved using a protocol. Secondly, transmission of a signal
+or data is not virtually instantaneous; different signals will be able to tolerate different latencies. Therefore
+there is a fundamental need for scheduling algorithms to decide how contention is resolved in such a way that
+all latency requirements are met.
+There are a number of existing bus technologies, but in this paper we are concerned with Controller Area
+Network (CAN) [2], and for comparison the Time Triggered Protocol (TTP) [3]. These two buses differ in the
+way that they are scheduled: CAN takes a dynamic approach, using a priority-based algorithm to decide which
+of the connected stations is permitted to send data on the bus. TTP uses a static approach, where each station
+is permitted a fixed time slice in which to transmit data. A common misconception within the automotive
+industry is that while CAN is very good at transmitting the most urgent data, it is unable to provide guarantees
+that deadlines are met for less urgent data [3, 5]. This is not the case: the dynamic scheduling algorithm used
+by CAN is virtually identical to scheduling algorithms commonly used in real-time systems to schedule
+computation on processors. In fact, the analysis of the timing behaviour of such systems can be applied almost
+1 The authors can be contacted via e-mail as ken@minster.york.ac.uk; copies of York technical reports cited in this paper
+are available via FTP from minster.york.ac.uk in the directory /pub/realtime/papers
+without change to the problem of determining the worst-case latency of a given message queued for
+transmission on CAN.
+This paper reproduces the existing processor scheduling analysis, and shows how this analysis is applied to
+CAN. In order for the analysis to remain accurate, details of the implementation of CAN controllers must be
+known, and therefore in this paper we assume an existing controller (the Intel 82527) to illustrate the
+application of the analysis. We then apply the SAE 'benchmark' for class C automotive systems (safety critical
+control applications) [4]. We then extend the CAN analysis to deal with some fault tolerance issues.
+The paper is structured as follows: the next section outlines the behaviour of CAN (as implemented by the
+Intel 82527) and the assumed system model. Section 3 applies the basic processor scheduling analysis to the
+82527. Section 4 then applies this analysis to the standard benchmark, using a number of approaches. Section
+5 extends the basic analysis to deal with error recovery on CAN, and shows how the revised analysis can be
+re-applied to the benchmark when there are certain fault tolerance requirements. Finally, section 6 discusses
+some outstanding issues, and offers conclusions.
+2. system MODEL
+CAN is a broadcast bus where a number of processors are connected to the bus via an interface (Figure 1).
+Host
+CPU Network
+controller
+CAN bus
+
+Figure
+
+1: CAN architecture
+A data source is transmitted as a message, consisting of between 1 and 8 bytes ('octets'). A message may be
+transmitted periodically, sporadically, or on-demand. So, for example, a data source such as 'road speed'
+could be encoded as a 1 byte message and broadcast every 100 milliseconds. The data source is assigned a
+unique identifier, represented as an 11 bit number (giving 2032 identifiers - CAN prohibits identifiers with
+the seven most significant bits equal to '1'). The identifier servers two purposes: filtering messages upon
+reception, and assigning a priority to the message. As we are concerned with closed control systems we
+assume a fixed set of messages each having a unique priority and temporal characteristics such as rate and
+A station on a CAN bus is able to receive a message based on the message identifier: if a particular host CPU
+needs to obtain the road speed (for example) then it indicates the identifier to the bus controller. Only
+messages with desired identifiers are received and presented to the host CPU. Thus in CAN a message has no
+destination.
+The use of the identifier as priority is the most important part of CAN regarding real-time performance. In any
+bus system there must be a way of resolving contention: with a TDMA bus, each station is assigned a pre-determined
+time slot in which to transmit. With Ethernet, each station waits for silence and then starts
+transmitting. If more than one station try to transmit together then they all detect this, wait for a randomly
+determined time period, and try again the next time the bus is idle. Ethernet is an example of a carrier-sense
+broadcast bus, since each station waits until the bus is idle (i.e. no carrier is sensed), and monitors its own
+traffic for collisions. CAN is also a carrier-sense broadcast bus, but takes a much more systematic approach to
+contention. The identifier field of a CAN message is used to control access to the bus after collisions by taking
+advantage of certain electrical characteristics.
+With CAN, if multiple stations are transmitting concurrently and one station transmits a '0' bit, then all
+stations monitoring the bus will see a '0'. Conversely, only if all stations transmit a `1' will all processors
+monitoring the bus see a '1'. In CAN terminology, a `0' bit is termed dominant, and a '1' bit is termed
+recessive. In effect, the CAN bus acts like a large AND-gate, with each station able to see the output of the
+gate. This behaviour is used to resolve collisions: each station waits until bus idle (as with Ethernet). When
+silence is detected each station begins to transmit the highest priority message held in its queue whilst
+monitoring the bus. The message is coded so that the most significant bit of the identifier field is transmitted
+first. If a station transmits a recessive bit of the message identifier, but monitors the bus and sees a dominant
+bus then a collision is detected. The station knows that the message it is transmitting is not the highest priority
+message in the system, stops transmitting, and waits for the bus to become idle. If the station transmits a
+recessive bit and sees a recessive bit on the bus then it may be transmitting the highest priority message, and
+proceeds to transmit the next bit of the identifier field. Because CAN requires identifiers to be unique within
+the system, a station transmitting the last bit (least significant bit) of the identifier without detecting a collision
+must be transmitting the highest priority queued message, and hence can start transmitting the body of the
+message (if identifiers were not unique then two stations attempting to transmit different messages with the
+same identifier would cause a collision after the arbitration process has finished, and an error would occur).
+There are some general observations to make on this arbitration protocol. Firstly, a message with a smaller
+identifier value is a higher priority message. Secondly, the highest priority message undergoes the arbitration
+process without disturbance (since all other stations will have backed-off and ceased transmission until the bus
+is next idle). The whole message is thus transmitted without interruption.
+The overheads of a CAN frame amount to a total of 47 bits (including 11 bits for the identifier field, 4 bits for
+a message length field, 16 bits for a CRC field, 7 bits for the end-of-frame signal, and 3 bits for the
+intermission between frames). Some of these fields are 'bit stuffed': when five consecutive bits of the same
+polarity are sent, the controller inserts an extra 'stuff bit' of opposite polarity into the stream (this bit stuffing
+is used as part of the error signalling mechanism). Out of the 47 overhead bits, 34 are subject to bit-stuffing.
+The data field in a message (between 0 and 8 bytes) is also bit-stuffed. The smallest CAN message is 47 bits,
+and the largest 130 bits.
+CAN has a number of other features, most important of which are the error recovery protocol, and the
+'remote transmission request' messages. CAN is able to perform a number of checks for errors, including the
+use of a 16 bit CRC (which applied over just 8 bytes of data provides a high error coverage), violation of the
+'bit stuffing' rule, and failure to see an acknowledge bit from receiving stations. When any station (including
+the sending station) detects an error, it immediately signals this by transmitting an error frame. This consists of
+six bits of the same polarity, and causes all other stations to detect an error. These stations concurrently
+transmit error frames, after which all stations are re-sychronised. Most controllers automatically re-enter
+arbitration to re-transmit the failed message. In order to recover from a single error, the protocol requires the
+transmission of at most 29 bits of error frame, and the re-transmission of the failed message. The error
+recovery overheads can be bounded by knowing the expected upper bound on the number of errors in an
+interval.
+As well as data messages, there are also 'remote transmission request' (RTR) messages. These messages are
+contentless (i.e. are zero bytes long) and have a special meaning: they instruct the station holding a data
+message of the same identifier to transmit that message. RTR messages are intended for quickly obtaining
+infrequently used remote data. However, the 'benchmark' [4] does not require RTR messages, and so do not
+discuss these types of messages further.
+We can only apply the analysis to a particular controller, since different controllers can have different
+behaviours (the Philips 82C200 controller can have a much worse timing performance that the 'ideal'
+behaviour [6]). A controller is connected to the host processor via dual-ported RAM (DPRAM), whereby the
+CPU and the controller can access the memory simultaneously. A perfect CAN controller would contain 2032
+'slots' for messages, where a given message to be sent is simply copied into the slot corresponding to the
+message identifier. A received message would also be copied into a corresponding slot. However, since a slot
+requires at least 8 bytes, a total of at least 16526 bytes of memory would be required. In an automotive
+environment such an amount of memory would be prohibitively expensive (an extra 50- per station multiplied
+over ten stations per vehicle and a million vehicles is $5M!), and the Intel 82527 makes the compromise of
+giving just 15 slots. One of these slots is dedicated to receiving messages; the remaining 14 slots can be set to
+either transmit or receive messsages. Each slot can be mapped to any given identifier; slots programmed to
+receive can be set to receive any message matching an identifier mask. Each slot can be independently
+programmed to generate an interrupt when receiving a message into the slot, or sending a message from the
+slot. This enables 'handshaking' protocols with the CPU, permitting a given slot to be multiplexed between a
+number of messages. This is important when controlling the dedicated receive slot 15: this special slot is
+'double buffered' so that the CPU has time to empty one buffer whilst the shadow buffer is available to the
+controller. In this paper we assume that slots are statically allocated to messages, with slot 15 used to receive
+messages that cannot be fitted into the remaining slots. The 82527 has the quirk that messages stored in the
+slots are entered into arbitration in slot order rather than identifier (and hence priority) order. Therefore it is
+important to allocate the messages to the slots in the correct order.
+We now outline a 'system model' for message passing that we are able to analyse. A system is deemed to be
+composed of a static set of hard real-time messages, each statically assigned to a set of stations connected to
+the bus. These hard real-time messages are typically control messages, and have deadlines that must be met, or
+else a serious error is said to occur. Messages will typically be queued by a software task running on the host
+CPU (the term 'task' encompasses a number of activities, ranging from interrupt handlers, to heavyweight
+processes provided by an operating system). A given task is assumed to be invoked by some event, and to then
+take a bounded time to queue the message. Because this time is bounded instead of fixed, there is some
+variability, or jitter, between subsequent queuings of the message; we term this queuing jitter. For the
+purposes of this paper, we assume that there is a minimum time between invocations of a given task; this time
+is termed the period 2 . If the given task sends a message once every few invocations of the task, then the
+message inherits a period from the sending task.
+A given message is assigned a fixed identifier (and hence a fixed priority). We assume that each given hard
+real-time message must be of bounded size (i.e. contain a bounded number of bytes). Given a bounded size,
+and a bounded rate at which the message is sent, we effectively bound the peak load on the bus, and can then
+apply scheduling analysis to obtain a latency bound for each message.
+We assume that there may also be an unbounded number of soft real-time messages: these messages have no
+hard deadline, and may be lost in transmission (for example, the destination processor may be too busy to
+receive them). They are sent as 'added value' to the system (i.e. if they arrive in reasonable time then some
+quality aspect of the system is improved). In this paper we do not discuss special algorithms to send these, and
+for simplicity instead assume that they are sent as "background" traffic (i.e. assigned a priority lower than all
+hard real-time messages) 3 .
+As mentioned earlier, the queuing of a hard real-time message can occur with jitter (variability in queuing
+times). The following diagram illustrates this:
+Queueing
+window
+a b
+
+Figure
+
+2: message queuing jitter
+The shaded boxes in the above diagram represent the 'windows' in which a task on the host CPU can queue
+the message. Jitter is important because to ignore it would lead to insufficient analysis. For example, ignoring
+jitter in Figure 2 would lead to the assumption that message m could be queued at most once in an interval of
+duration (b - a). In fact, in the interval (a . b] the message could be queued twice: once at a (as late as
+Of course, the task could be invoked once only (perhaps in response to an emergency), and would therefore have an infinite
+period.
+3 There are a number of algorithms that could potentially lead to very short average response times for soft real-time messages;
+the application of these algorithms to CAN bus is the subject of on-going research at York.
+possible in the first queuing window), and once at b (as early as possible in the next queuing window).
+Queuing jitter can be defined as the difference between the earliest and latest possible times a given message
+can be queued. In reality, it may be possible to reduce the queuing jitter if we know where in the execution of
+a task a message is queued (for example, there may be a minimum amount of computation required before the
+task could queue a message, and therefore event b in the diagrams would occurs later than the start of the
+task); other work has addressed this [13].
+The diagram above also shows how the period of a message can be derived from the task sending the
+message. For example, if the message is sent once per invocation of the task, then the message inherits a
+period equal to the period of the task.
+To keep the queuing jitter of a message small, we might decompose the task generating the message into two
+tasks: the first task calculates the message contents, and the second 'output' task merely queues the message.
+The second task is invoked a fixed time after the first task, such that first task will always have completed
+before the second task runs. Since the second task has very little work to do, it can typically have a short
+worst-case response time, and the queuing jitter inherited by the message will therefore be small (this general
+technique is discussed in more detail elsewhere [14]).
+We briefly discuss how a message is handled once received. At a destination station the results of an incoming
+message must be made available. If the message is a sporadic one (i.e. sent as the result of a 'chance' event)
+then there is a task which should be invoked by the message arrival. In this case, the message arrival should
+raise an interrupt on the host CPU (and hence be assigned to slot 15 on the Intel 82527 bus controller). Of
+course, it is possible for the arrival of the message to be polled for by the task, but if the required end-to-end
+latency is small then the polling period may have to be unacceptably high. The arrival of a periodic message
+can be dealt with without raising an interrupt: the message can be statically assigned to a slot in the 82527 and
+then be picked up by the application task. This task could be invoked by a clock (synchronised to a notional
+global clock) so that the message is guaranteed to have arrived when the task runs.
+As can be seen, the sole requirement on the communications bus is that messages have bounded latencies. We
+now proceed to develop analysis to give these. Clearly, this analysis will form a key part of a wider analysis of
+the complete system to give end-to-end timing guarantees; such end-to-end analysis is the subject of on-going
+research at York.
+Having established the basic model for CAN and the system we are now able to give analysis bounding the
+timing behaviour of a given hard real-time message.
+3. ANALYSIS OF 82527 CAN
+In this section we present analysis that bounds the worst-case latency of a given hard real-time message type.
+The analysis is an almost direct application of processor scheduling theory [7, 8, 9]. However, there are some
+assumptions made by this analysis: Firstly, the deadline of a given message m (denoted D m ) must not be more
+than the period of the message (denoted T m ). Secondly, the bus controller must not release the bus to lower
+priority messages if there are higher priority messages pending (i.e. the controller cannot release the bus
+between sending one message and entering any pending message into the arbitration phase; note that the
+Philips 82C200 CAN controller fails to meet this assumption).
+The worst-case response time of a given message m is denoted by R m , and defined as the longest time between
+the start of a task queuing m and the latest time that the message arrives at the destination stations. Note that
+this time includes the time taken for the sender task to execute and queue message m, and is at first sight a
+curious definition (measuring the time from the queuing of the message to the latest arrival might seem better).
+However, the contents of the message reflects the results of some action undertaken by the task (itself
+triggered in response to some event), and it is more desirable to measure the wider end-to-end time associated
+with an event.
+The jitter of a given message m is denoted J m , and inherited from the response time of the tasks on the host
+CPU. If these tasks are scheduled by fixed priority pre-emptive scheduling then related work can bound the
+time taken to queue the message [10, 7] and hence determine the queuing jitter.
+We mentioned earlier how CAN operates a fixed priority scheduling algorithm. However, a message is not
+fully pre-emptive, since a high priority message cannot interrupt a message that is already transmitting 4 . The
+work of Burns et al [9] allows for this behaviour, and from other processor scheduling work [8] we can bound
+the worst-case response time of a given hard real-time message m by the following:
+R J w C
+The term J m is the queuing jitter of message m, and gives the latest queuing time of the message, relative to
+the start of the sending task. The term w m represents the worst-case queuing delay of message m (due to both
+higher priority messages pre-empting message m, and a lower priority message that has already obtained the
+bus).
+The represents the longest time taken to physically send message m on the bus. This time includes the
+time taken by the frame overheads, the data contents, and extra stuff bits (recall from section 2 that the
+message contents and 34 bits of the overheads are subject to bit stuffing with a stuff width of 5). The
+following equation gives
+The denotes the bounded size of message m in bytes. The term t bit is the bit time of the bus (on a bus
+running at 1 Mbit/sec this is 1ms).
+The queuing delay is given by:
+
+4 It is commonly understood in the computing field that pre-emption can include stopping one activity to start or continue with
+another.
+(2)
+The set hp(m) is the set of messages in the system of higher priority than m. T j is the period of a given
+message j, and J j is the queuing jitter of the message. B m is the longest time that the given message m can be
+delayed by lower priority messages (this is equal to the time taken to transmit the largest lower priority
+message), and can be defined by:
+Where lp(m) is the set of lower priority messages. Note that if there are an unbounded number of soft real-time
+messages of indeterminate size, then B m is equal to 130t bit .
+Notice that in equation 2 term w m appears on both the left and right hand sides, and the equation cannot be re-written
+in terms of w m . A simple solution is possible by forming a recurrence relation:
+A value of zero for w m
+0 can be used. The iteration proceeds until convergence (i.e. w w
+The above equations do not assume anything about how identifiers (and hence priorities) are chosen.
+However, from work on processor scheduling [11, 8] we know that the optimal ordering of priorities is the
+deadline monotonic one: a task with a short value of D - J should be assigned a high priority.
+We can now apply this analysis to the SAE benchmark [4].
+4. THE SAE 'BENCHMARK'
+The SAE report describes a set of signals sent between seven different subsystems in a prototype electric car.
+Although the car control system was engineered using point-to-point links, the set of signals provide a good
+example to illustrate the application of CAN bus to complex distributed real-time control systems.
+The seven subsystems are: the batteries ('Battery'), the vehicle controller (`V/C'), the inverter/motor
+controller ('I/M C'), the instrument panel display (`Ins'), driver inputs ('Driver'), brakes (`Brakes'), and the
+transmission control ('Trans'). The network connecting these subsystems is required to handle a total of 53
+messages, some of which contain sporadic signals, and some of which contain control data sent periodically. A
+periodic message has a fixed period, and implictly requires the latency to be less than or equal to this period.
+messages have latency requirements imposed by the application: for example, all messages sent as a
+result of a driver action have a latency requirement of 20ms so that the response appears to the driver to be
+instantaneous.
+The reader is referred to the work of Kopetz [3] for a more detailed description of the benchmark. Note that
+Kopetz is forced to 'interpret' the benchmark specification, giving sensible timing figures where the
+benchmark fails to specify them (for example, the latency requirement of 20ms for driver-initiated messages is
+a requirement imposed by Kopetz rather than the benchmark). There is still some unspecified behaviour in the
+benchmark: the system model assumed by this paper requires that even sporadic messages are given a period
+(representing the maximum rate at which they can occur), but no periods for the sporadic messages in the
+benchmark can be inferred (Kopetz implicitly assumes that sporadic messages have a period of 20ms). Like
+Kopetz, we are forced to assume sensible values. We also hypothesise queuing jitter values.
+The following table details the requirements of the messages to be scheduled. There are a total of 53
+messages, some simple periodic messages, and some 'chance' messages (i.e. queued sporadically in response
+to an external event).
+Signal
+Number
+Signal
+Description
+Size
+/bits
+/ms
+/ms
+Periodic
+/ms
+From To
+Traction Battery Voltage 8 0.6 100.0 P 100.0 Battery V/C
+Traction Battery Current 8 0.7 100.0 P 100.0 Battery V/C
+3 Traction Battery Temp, Average 8 1.0 1000.0 P 1000.0 Battery V/C
+Auxiliary Battery Voltage 8 0.8 100.0 P 100.0 Battery V/C
+5 Traction Battery Temp, Max. 8 1.1 1000.0 P 1000.0 Battery V/C
+6 Auxiliary Battery Current 8 0.9 100.0 P 100.0 Battery V/C
+9 Brake Pressure, Line 8
+Transaxle Lubrication Pressure 8 Trans V/C
+Transaction Clutch Line Pressure 8 Trans V/C
+Traction Battery Ground Fault 1 1.2 1000.0 P 1000.0 Battery V/C
+14 Hi&Lo Contactor Open/Close 4 0.1 50.0 S 5.0 Battery V/C
+Key Switch Start 1 0.3 50.0 S 20.0 Driver V/C
+19 Emergency Brake 1 0.5 50.0 S 20.0 Driver V/C
+Motor/Trans Over Temperature 2 0.3 1000.0 P 1000.0 Trans V/C
+22 Speed Control 3 0.7 50.0 S 20.0 Driver V/C
+26 Brake Mode (Parallel/Split) 1 0.8 50.0 S 20.0 Driver V/C
+28 Interlock 1 0.5 50.0 S 20.0 Battery V/C
+29 High Contactor Control 8 0.3 10.0 P 10.0 V/C Battery
+Battery
+Reverse and 2nd Gear Clutches 2 0.5 50.0 S 20.0 V/C Trans
+l
+Number
+Signal
+Description
+Size
+/bits
+/ms
+/ms
+Periodic
+/ms
+From To
+Battery
+Battery
+34 DC/DC Converter Current Control 8 0.6 50.0 S 20.0 V/C Battery
+Battery
+36 Traction Battery Ground Fault Test
+38 Backup Alarm 1 0.9 50.0 S 20.0 V/C Brakes
+Warning Lights 7 1.0 50.0 S 20.0 V/C Ins.
+42 Torque Command 8
+43 Torque Measured 8
+44 FWD/REV 1 1.2 50.0 S 20.0 V/C I/M C
+48 Shift in Progress 1 1.4 50.0 S 20.0 V/C I/M C
+Processed Motor Speed 8
+50 Inverter Temperature Status 2 0.6 50.0 S 20.0 I/M C V/C
+52 Status/Malfunction (TBD) 8 0.8 50.0 S 20.0 I/M C V/C
+53 Main Contactor Acknowledge 1 1.5 50.0 S 20.0 V/C I/M C
+A simple attempt at implementing the problem on CAN is to map each of these messages to a CAN message.
+messages generally require a latency of 20 ms or less (although Kopetz gives a required latency of
+5ms for one sporadic message). These messages may be queued infrequently (for example, it is reasonable to
+assume that there at least 50 ms elapses between brake pedal depressions). The benchmark does not give
+periods for these messages, and so we assume a period of 50ms for all sporadic messages.
+We mentioned in section 2 how a special 'output task' could be created for each message with the job of
+merely queuing the pre-assembled message, and we assume this model is adopted for the benchmark system
+analysed here. The following table lists the messages in order of priority (i.e. in D - J order), and gives the
+worst-case latencies as computed by the analysis of the previous section. The signal numbers in bold indicate
+that the signal is a sporadic one. The symbol - indicates that the message fails to meet its latency requirements
+(i.e. the message is not guaranteed to always reach its destinations within the time required); the symbol '-'
+indicates that no valid response time can be found because the message is not guaranteed to have been sent
+before the next is queued (i.e. R > D - J).
+Signal N
+/bytes
+/ms
+/ms
+/ms
+R
+R
+R
+(500Kbit/s
+R
+Signal N
+/bytes
+/ms
+/ms
+/ms
+R
+R
+R
+(500Kbit/s
+R
+43 1 0.1 5.0 5.0 4.568 2.284 1.142 0.571
+44 1 1.2 50.0 20.0 - 39.848 4.300 2.150 1.075
+26 1 0.8 50.0 20.0 - 8.080 3.032 1.516
+28 1 0.5 50.0 20.0 - 12.868 4.166 2.083
+Signal N
+/bytes
+/ms
+/ms
+/ms
+R
+R
+R
+(500Kbit/s
+R
+There is a problem with the approach of mapping each signal to a CAN message approach: the V/C subsystem
+transmits more than 14 message types, and so the 82527 cannot be used (recall that there are 15 slots in the
+82527, one of which is a dedicated receive slot). We will return to this problem shortly.
+As can be seen, at a bus speed of 125Kbit/s the system cannot be guaranteed to meet its timing constraints. To
+see the underlying reason why, consider the following table:
+Bus
+Speed
+Message
+Utilisation
+Bus
+Utilisation
+a
+500 Kbit/s 3.98% 31.32% 3.09
+1Mbit/s 1.99% 15.66% 5.79
+The 'message utilisation' is calculated using the number of data bytes in a given CAN message. The 'bus
+utilisation' is calculated by using the total number of bits (including overhead) in a given CAN message. The
+column headed a details the breakdown utilisation [12] of the system for the given bus speed. The breakdown
+utilisation is the largest value of a such that when all the message periods are divided by a the system remains
+schedulable (i.e. all latency requirements are met). It is an indication of how much slack there is in the system:
+a value of a close to but greater than 1 indicates that although the system is schedulable, there is little room
+for increasing the load. The symbol '-' for a for the bus speed of 125Kbit/s indicates that no value for
+breakdown utilisation can be found, since even a = 0 still results in an unschedulable system.
+As can be seen, there is a large difference between the message and bus utilisations. This is because of the
+relatively large overhead of a CAN message. At a bus speed of 125Kbit/s the bus utilisation is greater than
+100%, and it is therefore no surprise that the bus is unschedulable.
+One way of reducing the bus utilisation (and the message utilisation) is to 'piggyback' messages sent from the
+same source. For example, consider the Battery subsystem: this periodically sends four single byte messages
+each with a period of 100 ms (message numbers 1, 2, 4, and 6). If we were to collect these into a single
+message then we could sent one four byte message at the same rate. This would reduce the overhead, and
+hence the bus utilisation. Another advantage with piggybacking is that the number of slots required in the bus
+controller is reduced (we have only 14 slots available with the 82527 CAN controller, and the V/C subsystem
+has more than 14 signals).
+We can piggyback the following periodic messages:
+New message name Size
+/bytes
+/ms
+Composed from
+Battery high rate 4 100.0 1,2,4,6
+Battery low rate 3 1000.0 3,5,13
+Brakes high rate 2 5.0 8,9
+I/M C high rate 2 5.0 43,49
+V/C high rate 4 5.0
+V/C low rate 1 1000.0 33,36
+The piggybacking would be implemented by the application tasks computing the message contents as before,
+but where several signals are piggybacked on a single message there would be a single task created with the
+simple job of queuing the message periodically. Because there are fewer messages to send from a given node,
+the queuing jitter of a given message may be slightly less.
+Note that signals 29 and are required to be sent with a period of 10ms, but that they are piggybacked into a
+message ('V/C high rate') sent once every 5ms (and thus every other message sent would contain null data for
+these signals). We need to do this so that there not more than 14 message types sent from the V/C subsystem.
+The following table gives the timing details of all the messages in this new message set:
+Signal N
+/bytes
+/ms
+/ms
+/ms
+R
+R
+R
+(500Kbit/s)
+R
+28
+26 1 0.3 50.0 20.0 19.240 6.708 2.626 1.313
+Signal N
+/bytes
+/ms
+/ms
+/ms
+R
+R
+R
+(500Kbit/s)
+R
+44 1 0.5 50.0 20.0 - 38.448 11.944 4.516 2.258
+Notice how the timing requirements are met for many more messages than with the simple approach. We also
+are able to send the above messages using the Intel 82527 CAN controller, since no subsystem sends more
+than 14 message types.
+For comparison, the following table gives the utilisations of the above set of messages, and the breakdown
+utilisation of the system:
+Bus
+Speed
+Message
+Utilisation
+Bus
+Utilisation
+a
+500 Kbit/s 3.80% 18.94% 4.12
+1Mbit/s 1.9% 9.47% 7.61
+As can be seen, the piggybacking of messages leads to a reduction in overheads, and hence a reduction in bus
+utilisation. In general, this in turn leads to increased real-time performance. However, by piggybacking signals
+into a single message we require that the signals are always generated together; this may restrict the
+applicability of piggybacking.
+It is possible to piggyback signals that are not neccesarily generated together (for example, sporadic signals).
+The approach we take is to send a 'server' message periodically. A sporadic signal to be sent is stored in the
+memory of the host CPU. When the 'server' message is to be sent, the sender task polls for signals that have
+occurred, and fills the contents of the message appropriately. With this approach, a sporadic signal may be
+delayed for up to a polling period plus the worst-case latency of the 'server' message. So, to piggyback a
+number of sporadic signals with latency requirements of 20ms or longer, a server message with a period of
+10ms and a worst-case response time of 10ms would be sufficient. Alternatively, a server message with a
+period of 15ms and a worst-case response time of 5ms could be used.
+We transform the set of messages to include these server messages. We choose server messages with periods
+of 10ms and latency requirements of 10ms. The following table lists the messages in the system:
+Signal
+/bytes
+/ms
+/ms
+/ms
+R
+(125Kbit/s
+R
+(250Kbit/s
+R
+(500Kbit/s
+R
+There are two sporadic signals that remain implemented by sporadic messages: Signal 14 has a deadline that is
+too short to meet by polling. Signal is the only sporadic sent from the Brakes subsystem, and cannot
+therefore be piggybacked with other sporadic signals.
+The following table gives the utilisation and breakdown utilisation of the above system:
+Bus
+Speed
+Message
+Utilisation
+Bus
+Utilisation
+a
+500 Kbit/s 4.62% 21.11% 3.812
+1Mbit/s 2.31% 10.55% 7.082
+Notice that the breakdown utilisation figure for the system running over a 125Kbit/s bus is very close to 1,
+showing that the system is only just schedulable, and probably cannot accommodate any more urgent signals.
+Notice also how the bus utilisation has increased, despite the system now being schedulable at all four bus
+speeds. Although the overheads are now higher (due to polling for sporadics), the peak load in the system is
+lower. This illustrates that 'utilisation' is a figure valid only over sizeable intervals; in real-time systems the
+peak load is far more important, and can be independent of the overall bus utilisation.
+5. EXTENDING THE ANALYSIS: ERROR RECOVERY
+We have so far assumed that no errors can occur on the bus. However, the analysis of section 3 can be easily
+extended to handle this. Equation 2 is amended to:
+Where the worst-case response time is given by equation 1. E m (t) is termed the error recovery overhead
+function, and gives the expected upper bound on the overheads due to error recovery than could occur in an
+interval of duration t.
+This function can be determined either from observation of the behaviour of CAN under high noise conditions,
+or by building a statistical model. In this paper we use a very simple error function for illustration:
+Let n error be the number of burst errors that could occur in an arbitrarily small interval (i.e. n error errors could
+occur error be the residual error period (i.e. after the initial n errors , errors cannot occur
+before T error has elapsed, and at a rate not higher than one every T error ). The number of errors in an interval of
+duration t is bounded by:
+error
+error
+With the CAN protocol, each error can give rise to at most 29 bits of error recovery overhead, followed by
+the re-transmission of a message. Only messages of higher priority than message m and message m itself can
+be re-transmitted and delay message m (a station attempting to re-transmit a lower priority message after
+message m is queued will lose the arbitration). The largest of these messages is:
+Therefore, a bound on the overheads in an interval, and hence the error function, is given by:
+error
+error
+We can now return to the SAE benchmark and see how CAN performs under certain error conditions. Let
+n error be 4, and let T error be 10ms (this is a very pessimistic assumption: at a bit rate of 1 Mbit/s this is
+equivalent to an error rate of 1 bit in 10 000; measurements of CAN suggest a typical rate of 1 bit in 10 5 ).
+The following table gives the results when the updated analysis is applied to the previously schedulable
+message set:
+Signal
+/bytes
+/ms
+/ms
+/ms
+R
+(125Kbit/s
+R
+R
+(500Kbit/s)
+R
+The results show how a CAN network running at 125Kbit/s cannot tolerate the assumed error rate. At a speed
+of 250Kbit/s or more the system can tolerate such an error rate. Note that we do not need to transmit each
+message multiple times, and can instead rely on the CAN protocol to detect errors and retransmit failed
+messages.
+An alternative fault tolerance strategy is to disable the CAN error recovery mechanism and to use a replicated
+bus where a message is sent on both buses concurrently (this approach is taken by Kopetz with the TTP bus).
+However, we can see that this solution is far less flexible than using the dynamic error recovery approach,
+since the bandwidth is effectively wasted under normal conditions. If assumptions about the rate of errors are
+used (indeed, for any system we must make such assumptions) then we can apply these assumptions to the
+dynamic recovery approach.
+6. DISCUSSION AND CONCLUSIONS
+The analysis reported in this paper enables the CAN protocol to be used in a wide range of real-time
+applications. Indeed its use of system-wide priorities to order message transmissions makes it an ideal control
+network. The use of a global approach to priorities also has the advantage that the wealth of scheduling
+analysis developed for fixed priority processor scheduling can be easily adapted for use with CAN. Tools
+already exist that embody processor scheduling. Similar tools could be developed for CAN. These would not
+only accurately predict the worst case message latencies (for all message classes in the system) but could also
+be used, by the systems engineer, to ask "what if" questions about the intended application.
+By applying the analysis to an existing benchmark an assessment of its applicability has been made. However,
+the benchmark does not illustrate all of the advantages the full flexibility of CAN can provide when supported
+by priority based analysis. In particular, sporadic messages with tight deadlines but long inter-arrival times can
+easily accommodated. It is also possible to incorporate many different failure models and to predict the
+message latencies when different levels of failure are being experienced.
+7.
+
+
+
+--R
+
+"Electronic Exit from Spaghetti Junction"
+"Road Vehicles - Interchange of Digital Information - Controller Area Network (CAN) for High Speed Communication"
+"A Solution to an Automotive Control System Benchmark"
+"Class C Application Requirement Considerations"
+"Survey of Known Protocols"
+"Guaranteeing Message Latencies on Controller Area Network"
+"Fixed Priority Scheduling of Hard Real-Time Systems"
+"Applying New Scheduling Theory to Static Priority Pre-emptive Scheduling"
+"Allocating and Scheduling Hard Real-Time Tasks on a Point-to-Point Distributed System"
+"Fixed Priority Scheduling with Deadlines Prior to Completion"
+"On The Complexity of Fixed-Priority Scheduling of Periodic Real-Time Tasks"
+"The Rate Monotonic Scheduling Algorithm: Exact Characterisation and Average Case Behaviour"
+"Analysis of Hard Real-Time Communications"
+"Holistic Schedulability Analysis for Distributed Hard Real-Time Systems"
+--TR
+Construction of three-dimensional Delaunay triangulations using local transformations
+Parallel unstructured grid generation
+Active messages
+A data-parallel algorithm for three-dimensional Delaunay triangulation and its implementation
+A condition guaranteeing the existence of higher-dimensional constrained Delaunay triangulations
+Tetrahedral mesh generation by Delaunay refinement
+Mesh generation for domains with small angles
+Mobile object layer
+Simultaneous mesh generation and partitioning for Delaunay meshes
+
+--CTR
+Daniel A. Spielman , Shang-Hua Teng , Alper ngr, Time complexity of practical parallel steiner point insertion algorithms, Proceedings of the sixteenth annual ACM symposium on Parallelism in algorithms and architectures, June 27-30, 2004, Barcelona, Spain
+Christos D. Antonopoulos , Xiaoning Ding , Andrey Chernikov , Filip Blagojevic , Dimitrios S. Nikolopoulos , Nikos Chrisochoides, Multigrain parallel Delaunay Mesh generation: challenges and opportunities for multithreaded architectures, Proceedings of the 19th annual international conference on Supercomputing, June 20-22, 2005, Cambridge, Massachusetts
+Computational Database System for Generatinn Unstructured Hexahedral Meshes with Billions of Elements, Proceedings of the 2004 ACM/IEEE conference on Supercomputing, p.25, November 06-12, 2004
+Andrey N. Chernikov , Nikos P. Chrisochoides, Practical and efficient point insertion scheduling method for parallel guaranteed quality delaunay refinement, Proceedings of the 18th annual international conference on Supercomputing, June 26-July 01, 2004, Malo, France
+Benot Hudson , Gary L. Miller , Todd Phillips, Sparse parallel Delaunay mesh refinement, Proceedings of the nineteenth annual ACM symposium on Parallel algorithms and architectures, June 09-11, 2007, San Diego, California, USA

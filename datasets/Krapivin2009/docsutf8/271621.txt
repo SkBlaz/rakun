@@ -1,0 +1,842 @@
+--T
+The Spectral Decomposition of Nonsymmetric Matrices on Distributed Memory Parallel Computers.
+--A
+The implementation and performance of a class of divide-and-conquer algorithms for computing the spectral decomposition of nonsymmetric matrices on distributed memory parallel computers are studied in this paper. After presenting a general framework, we focus on a spectral divide-and-conquer (SDC) algorithm with Newton iteration. Although the algorithm requires several times as many floating point operations as the best serial QR algorithm, it can be simply constructed from a small set of highly parallelizable matrix building blocks within Level 3 basic linear algebra subroutines (BLAS). Efficient implementations of these building blocks are available on a wide range of machines.  In some ill-conditioned cases, the algorithm may lose numerical stability, but this can easily be detected and compensated for.The algorithm reached 31% efficiency with respect to the underlying PUMMA matrix multiplication and 82% efficiency with respect to the underlying ScaLAPACK matrix inversion on a 256 processor Intel Touchstone Delta system, and 41% efficiency with respect to the matrix multiplication in CMSSL on a Thinking Machines CM-5 with vector units. Our performance model predicts the performance reasonably accurately.To take advantage of the geometric nature of SDC algorithms, we have designed a graphical user interface to let the user choose the spectral decomposition according to specified regions in the complex plane.
+--B
+Introduction
+A standard technique in parallel computing is to build new algorithms from existing high
+performance building blocks. For example, the LAPACK linear algebra library [1] is writ-
+Department of Mathematics, University of Kentucky, Lexington, KY 40506.
+y Computer Science Division and Mathematics Department, University of California, Berkeley, CA 94720.
+z Department of Computer Science, University of Tennessee, Knoxville, TN 37996 and Mathematical
+Sciences Section, Oak Ridge National Laboratory, Oak Ridge, TN 37831.
+x Department of Computer Science, University of Tennessee, Knoxville, TN 37996.
+- Department of Mathematics, University of California, Berkeley, CA 94720.
+Computer Science Division, University of California, Berkeley, CA 94720.
+ten in terms of the Basic Linear Algebra Subroutines (BLAS)[38, 23, 22], for which efficient
+implementations are available on many workstations, vector processors, and shared memory
+parallel machines. The recently released ScaLAPACK 1.0(beta) linear algebra library [26]
+is written in terms of the Parallel Block BLAS (PB-BLAS) [15], Basic Linear Algebra Communication
+Subroutines (BLACS) [25], BLAS and LAPACK. ScaLAPACK includes routines
+for LU, QR and Cholesky factorizations, and matrix inversion, and has been ported to the
+Intel Gamma, Delta and Paragon, Thinking Machines CM-5, and PVM clusters. The Connection
+Machine Scientific Software Library (CMSSL)[54] provides analogous functionality
+and high performance for the CM-5.
+In this work, we use these high performance kernels to build two new algorithms for
+finding eigenvalues and invariant subspaces of nonsymmetric matrices on distributed memory
+parallel computers. These algorithms perform spectral divide and conquer, i.e. they
+recursively divide the matrix into smaller submatrices, each of which has a subset of the
+original eigenvalues as its own. One algorithm uses the matrix sign function evaluated with
+Newton iteration [8, 42, 6, 4]. The other algorithm avoids the matrix inverse required by
+Newton iteration, and so is called the inverse free algorithm [30, 10, 44, 7]. Both algorithms
+are simply constructed from a small set of highly parallelizable building blocks, including
+matrix multiplication, QR decomposition and matrix inversion, as we describe in section 2.
+By using existing high performance kernels in ScaLAPACK and CMSSL, we have
+achieved high efficiency. On a 256 processor Intel Touchstone Delta system, the sign function
+algorithm reached 31% efficiency with respect to the underlying matrix multiplication
+(PUMMA [16]) for 4000-by-4000 matrices, and 82% efficiency with respect to the underlying
+ScaLAPACK 1.0 matrix inversion. On a Thinking Machines CM-5 with
+vector units, the hybrid Newton-Schultz sign function algorithm obtained 41% efficiency
+with respect to matrix multiplication from CMSSL 3.2 for 2048-by-2048 matrices.
+The nonsymmetric spectral decomposition problem has until recently resisted attempts
+at parallelization. The conventional method is to use the Hessenberg QR algorithm. One
+first reduces the matrix to Schur form, and then swaps the desired eigenvalues along the
+diagonal to group them together in order to form the desired invariant subspace [1]. The
+algorithm had appeared to required fine grain parallelism and be difficult to parallelize
+[5, 27, 57], but recently Henry and van de Geijn[32] have shown that the Hessenburg QR
+algorithm phase can be effectively parallelized for distributed memory parallel computers
+with up to 100 processors. Although parallel QR does not appear to be as scalable as
+the algorithms presented in this paper, it may be faster on a wide range of distributed
+memory parallel computers. Our algorithms perform several times as many floating point
+operations as QR, but they are nearly all within Level 3 BLAS, whereas implementations
+of QR performing the fewest floating point operations use less efficient Level 1 and 2 BLAS.
+A thorough comparison of these algorithms will be the subject of a future paper.
+Other parallel eigenproblem algorithms which have been developed include earlier par-
+allelizations of the QR algorithm [29, 50, 56, 55], Hessenberg divide and conquer algorithm
+using either Newton's method [24] or homotopies [17, 39, 40], and Jacobi's method
+[28, 47, 48, 49]. All these methods suffer from the use of fine-grain parallelism, instability,
+slow or misconvergence in the presence of clustered eigenvalues of the original problem or
+some constructed subproblems [20], or all three.
+The methods in this paper may be less stable than QR algorithm, and may fail to
+converge in a number of circumstances. Fortunately, it is easy to detect and compensate
+for this loss of stability, by choosing to divide the spectrum in a slightly different location.
+Compared with the other approaches mentioned above, we believe the algorithms discussed
+in this paper offer an effective tradeoff between parallelizability and stability.
+The other algorithms most closely related to the approaches used here may be found
+in [3, 9, 36], where symmetric matrices, or more generally matrices with real spectra, are
+treated.
+Another advantage of the algorithms described in this paper is that they can compute
+just those eigenvalues (and the corresponding invariant subspace) in a user-specified region
+of the complex plane. To help the user specify this region, we will describe a graphical user
+interface for the algorithms.
+The rest of this paper is organized as follows. In section 2, we present our two algorithms
+for spectral divide and conquer in a single framework, show how to divide the spectrum
+along arbitrary circles and lines in the complex plane, and discuss implementation details.
+In section 3, we discuss the performance of our algorithms on the Intel Delta and CM-5. In
+section 4, we present a model for the performance of our algorithms, and demonstrate that
+it can predict the execution time reasonably accurately. Section 5 describes the design of
+an X-window user interface. Section 6 draws conclusions and outlines our future work.
+Parallel Spectral Divide and Conquer Algorithms
+Both spectral divide and conquer (SDC) algorithms discussed in this paper can be presented
+in the following framework. Let
+be the Jordan canonical form of A, where the eigenvalues of the l \Theta l submatrix J+ are the
+eigenvalues of A inside a selected region D in the complex plane, and the eigenvalues of the
+are the eigenvalues of A outside D. We assume that there
+are no eigenvalues of A on the boundary of D, otherwise we reselect or move the region D
+slightly. The invariant subspace of the matrix A corresponding to the eigenvalues inside D
+are spanned by the first l columns of X . The matrix
+I 0
+is the corresponding spectral projector. Let QR\Pi be the rank revealing QR decomposition
+of the matrix P+ , where Q is unitary, R is upper triangular, and \Pi is a permutation
+matrix chosen so that the leading l columns of Q span the range space of P+ . Then Q yields
+the desired spectral decomposition:
+A 11 A 12
+where the eigenvalues of A 11 are the eigenvalues of A inside D, and the eigenvalues of A 22
+are the eigenvalues of A outside D. By substituting the complementary projector I \Gamma P+
+for P+ in (2.2), A 11 will have the eigenvalues outside D and A 22 will have the eigenvalues
+inside D.
+The crux of a parallel SDC algorithm is to efficiently compute the desired spectral
+projector P+ without computing the Jordan canonical form.
+2.1 The SDC algorithm with Newton iteration
+The first SDC algorithm uses the matrix sign function, which was introduced by Roberts
+[46] for solving the algebraic Riccati equation. However, it was soon extended to solving
+the spectral decomposition problem [8]. More recent studies may be found in [11, 42, 6].
+The matrix sign function, sign(A), of a matrix A with no eigenvalues on the imaginary
+axis can be defined via the Jordan canonical form of A (2.1), where the eigenvalues of J+
+are in the open right half plane D, and the eigenvalues of J \Gamma are in the open left half plane
+D. Then sign(A) is
+I 0
+It is easy to see that the matrix
+is the spectral projector onto the invariant subspace corresponding to the eigenvalues of A
+in D. l is the number of the eigenvalues of A in D. I \Gamma is the spectral projector corresponding to the eigenvalues of A in -
+D.
+Now let QR\Pi be the rank revealing QR decomposition of the projector P+ . Then
+Q yields the desired spectral decomposition (2.3), where the eigenvalues of A 11 are the
+eigenvalues of A in D, and the eigenvalues of A 22 are the eigenvalues of A in -
+D.
+Since the matrix sign function, sign(A), satisfies the matrix equation
+we can use Newton's method to solve this matrix equation and obtain the following simple
+iteration:
+The iteration is globally and ultimately quadratically convergent with lim j!1 A
+provided A has no pure imaginary eigenvalues [46, 35]. The iteration fails otherwise, and
+in finite precision, the iteration could converge slowly or not at all if A is "close" to having
+pure imaginary eigenvalues.
+There are many ways to improve the accuracy and convergence rate of this basic iteration
+[12, 33, 37]. For example, if may use the so called Newton-Schulz iteration
+to avoid the use of the matrix inverse. Although it requires twice as many flops, it is more
+efficient whenever matrix multiply is at least twice as efficient as matrix inversion. The
+Newton-Schulz iteration is also quadratically convergent provided that
+hybrid iteration might begin with Newton iteration until kA 2
+then switch to
+Newton-Schulz iteration (we discuss the performance of one such hybrid later).
+Hence, we have the following algorithm which divides the spectrum along the pure
+imaginary axis.
+Algorithm 1 (The SDC Algorithm with Newton Iteration)
+Let A
+For convergence or j ? j max do
+if
+End
+Compute
+Compute
+A 11 A 12
+Compute
+Here - is the stopping criterion for the Newton iteration (say, " is the
+machine precision), and j max limits the maximum number of iterations (say j
+return, the generally nonzero quantity measures the backward stability of the
+computed decomposition, since by setting E 21 to zero and so decoupling the problem into
+A 11 and A 22 , a backward error of
+For simplicity, we just use the QR decomposition with column pivoting to reveal rank,
+although more sophisticated rank-revealing schemes exist [14, 31, 34, 51].
+All the variations of the Newton iteration with global convergence still need to compute
+the inverse of a matrix explicitly in one form or another. Dealing with ill-conditioned
+matrices and instability in the Newton iteration for computing the matrix sign function
+and the subsequent spectral decomposition is discussed in [11, 6, 4] and the references
+therein.
+2.2 The SDC algorithm with inverse free iteration
+The above algorithm needs an explicit matrix inverse. This could cause numerical instability
+when the matrix is ill-conditioned. The following algorithm, originally due to Godunov,
+Bulgakov and Malyshev [30, 10, 44] and modified by Bai, Demmel and Gu [7], eliminates
+the need for the matrix inverse, and divides the spectrum along the unit circle instead of
+the imaginary axis. We first describe the algorithm, and then briefly explain why it works.
+Algorithm 2 (The SDC Algorithm with Inverse Free Iteration)
+Let A
+For convergence or j ? j max do
+!/
+R j!
+End
+Compute
+Compute
+A 11 A 12
+Compute
+As in Algorithm 1, we need to choose a stopping criterion - in the inner loop, as well as
+a limit j max on the maximum number of iterations. On convergence, the eigenvalues of
+A 11 are the eigenvalues of A inside the unit disk D, and the eigenvalues of A 22 are the
+eigenvalues of A outside D. It is assumed that no eigenvalues of A are on the unit circle.
+As with Algorithm 1, the quantity measures the backward stability.
+To illustrate how the algorithm works we will assume that all matrices we want to invert
+are invertible. From the inner loop of the algorithm, we see that
+22 A j
+R j!
+so
+22 A j or B j A \Gamma1
+22 . Therefore
+A
+so the algorithm is simply repeatedly squaring the eigenvalues, driving the ones inside the
+unit circle to 0 and those outside to 1. Repeated squaring yields quadratic convergence.
+This is analogous to the sign function iteration where computing (A+A \Gamma1 )=2 is equivalent
+to taking the Cayley transform and taking the inverse
+Cayley transform. Further explanation of how the algorithm works can be found in [7].
+An attraction of this algorithm is that it can equally well deal with the generalized
+nonsymmetric eigenproblem A \Gamma -B, provided the problem is regular, i.e.
+not identically zero. One simply has to start the algorithm with B
+Regarding the QR decomposition in the inner loop, there is no need to form the entire
+2n \Theta 2n unitary matrix Q in order to get the submatrices Q 12 and Q 22 . Instead, we can
+compute the QR decomposition of the 2n \Theta n matrix (B H
+implicitly as Householder vectors in the lower triangular part of the matrix and another n
+dimensional array. We can then apply Q - without computing it - to the 2n \Theta n matrix
+(0; I) T to obtain the desired matrices Q 12 and Q 22 .
+We now show how to compute Q in the rank revealing QR decomposition of
+computing the explicit inverse subsequent products. This
+will yield the ultimate inverse free algorithm. Recall that for our purposes, we only need the
+unitary factor Q and the rank of It turns out that by using the generalized
+QR decomposition technique developed in [45, 2], we can get the desired information without
+computing In fact, in order to compute the QR decomposition with pivoting
+of first compute the QR decomposition with pivoting of the matrix A
+and then we compute the RQ factorization of the matrix Q H
+From (2.7) and (2.8), we have (R
+The Q is the desired unitary
+factor. The rank of R 1 is also the rank of the matrix
+2.3 Spectral Transformation Techniques
+Although Algorithms 1 and 2 only divide the spectrum along the pure imaginary axis and
+the unit circle, respectively, we can use M-obius and other simple transformations of the
+input matrix A to divide along other more general curves. As a result, we can compute
+the eigenvalues (and corresponding invariant subspace) inside any region defined as the
+intersection of regions defined by these curves. This is a major attraction of this kind of
+algorithm.
+Let us show how to use M-obius transformations to divide the spectrum along arbitrary
+lines and circles. Transform the eigenproblem Az = -z to
+Then if we apply Algorithm 1 to A fiI) we can split the spectrum
+with respect to a region
+0:
+If we apply Algorithm 2 to I), we can split along the curve
+For example, by computing the matrix sign function of
+then Algorithm 1 will split the spectrum of A along a circle centered at - with radius r. If
+A is real, and we choose - to be real, then all arithmetic will be real.
+If A will split the spectrum of A along a circle
+centered at - with radius r. If A is real, and we choose - to be real, then all arithmetic in
+the algorithm will be real.
+Y
+a
+O X
+
+Figure
+
+1: Different Geometric Regions for the Spectral Decomposition
+Other more general regions can be obtained by taking A 0 as a polynomial function of
+A. For example, by computing the matrix sign function of , we can divide the
+spectrum within a "bowtie" shaped region centered at ff. Figure 1 illustrates the regions
+which the algorithms can deal with assuming that A is real and the algorithms use only
+real arithmetic.
+2.4 Tradeoffs
+Algorithm 1 computes an explicit inverse, which could cause numerical instability if the
+matrix is ill-conditioned. The provides an alternative approach for
+achieving better numerical stability. There are some very difficult problems where Algorithm
+2 gives a more accurate answer than Algorithm 1. Numerical examples can be found in [7].
+However, neither algorithm avoids all accuracy and convergence difficulties associated with
+eigenvalues very close to the boundary of the selected region.
+The stability advantage of the inverse free approach is obtained at the cost of more
+storage and arithmetic. Algorithm 2 needs 4n 2 more storage space than Algorithm 1. This
+will certainly limit the problem size we will be able to solve. Furthermore, one step of the
+Algorithm 2 does about 6 to 7 times more arithmetic than the one step of Algorithm 1.
+QR decomposition, the major component of Algorithm 2, and matrix inversion, the main
+component of Algorithm 1, require comparable amounts of communication per flop. (See
+table 4 for details.) Therefore, Algorithm 2 can be expected to run significantly slower than
+Algorithm 1.
+Algorithm 1 is faster but somewhat less stable than Algorithm 2, and since testing
+stability is easy (compute use the following 3 step algorithm:
+1. Try to use Algorithm 1 to split the spectrum. If it succeeds, stop.
+2. Otherwise, try to split the spectrum using Algorithm 2. If it succeeds, stop.
+3. Otherwise, use the QR algorithm.
+This 3-step approach works by trying the fastest but least stable method first, falling back
+to slower but more stable methods only if necessary. The same paradigm is also used in
+other parallel algorithms [19].
+If a fast parallel version of the QR algorithm[32] becomes available, it would probably
+be faster than the inverse free algorithm and hence would obviate the need for the second
+step listed above. Algorithm 2 would still be of interest if only a subset of the spectrum is
+desired (the QR algorithm necessarily computes the entire spectrum), or for the generalized
+eigenproblem of a matrix pencil A \Gamma -B.
+3 Implementation and Performance
+We started with a Fortran 77 implementation of Algorithm 1. This code is built using the
+BLAS and LAPACK for the basic matrix operations, such as LU decomposition, triangular
+inversion, QR decomposition and so on. Initially, we tested our software on SUN and
+IBM RS6000 workstations, and then the CRAY. Some preliminary performance data of
+the matrix sign function based algorithm have been reported in [6]. In this report, we will
+focus on the implementation and performance evaluation of the algorithms on distributed
+memory parallel machines, namely the Intel Delta and the CM-5.
+We have implemented Algorithm 1, and collected a large set of data for the performance
+of the primitive matrix operation subroutines on our target machines. More performance
+evaluation and comparison of these two algorithms and their applications are in progress.
+3.1 Implementation and Performance on Intel Touchstone
+The Intel Touchstone Delta computer system is 16 \Theta 32 mesh of i860 processors with a
+wormhole routing interconnection network [41], located at the California Institute of Technology
+on behalf of the Concurrent Supercomputing Consortium. The Delta's communication
+characteristics are described in [43].
+In order to implement Algorithm 1, it was natural to rely on the ScaLAPACK 1.0
+library (beta version) [26]. This choice requires us to exploit two key design features of this
+package. First, the ScaLAPACK library relies on the Parallel Block BLAS (PB-BLAS)[15],
+which hides much of the interprocessor communication. This hiding of communication
+makes it possible to express most algorithms using only the PB-BLAS, thus avoiding explicit
+calls to communication routines. The PB-BLAS are implemented on top of calls to the
+BLAS and to the Basic Linear Algebra Communication Subroutines (BLACS)[25]. Second,
+ScaLAPACK assumes that the data is distributed according to the square block cyclic
+decomposition scheme, which allows the routines to achieve well balanced computations
+and to minimize communication costs. ScaLAPACK includes subroutines for LU, QR and
+Cholesky factorizations, which we use as building blocks for our implementation. The
+PUMMA routines [16] provide the required matrix multiplication.
+matrix order
+time
+ScaLAPACK on 256 PEs Intel Touchstone Delta (timing in second)
+GEMM
+INV
+QRP
+1000 2000 3000 4000 5000 6000 7000 800051525matrix order
+mflops
+per
+node
+ScaLAPACK on 256 PEs Intel Touchstone Delta (Mflops per Node)
+GEMM
+INV
+QRP
+
+Figure
+
+2: Performance of ScaLAPACK 1.0 (beta version) subroutines on 256 (16 \Theta 16) PEs
+Intel Touchstone Delta system.
+The matrix inversion is done in two steps. After the LU factorization has been computed,
+the upper triangular U matrix is inverted, and A \Gamma1 is obtained by substitution with L. Using
+blocked operations leads to performance comparable to that obtained for LU factorization.
+The implementation of the QR factorization with or without column pivoting is based
+on the parallel algorithm presented by Coleman and Plassmann [18]. The QR factorization
+with column pivoting has a much larger sequential component, processing one column at
+a time, and needs to update the norms of the column vectors at each step. This makes
+using blocked operations impossible and induces high synchronization overheads. However,
+as we will see, the cost of this step remains negligible in comparison with the time spent in
+the Newton iteration. Unlike QR factorization with pivoting, the QR factorization without
+pivoting and the post- and pre-multiplication by an orthogonal matrix do use blocked
+operations.
+
+Figure
+
+2 plots the timing results obtained by the PUMMA package using the BLACS
+for the general matrix multiplication, and ScaLAPACK 1.0 (beta version) subroutines for
+the matrix inversion, QR decomposition with and without column pivoting. Corresponding
+tabular data can be found in the Appendix.
+To measure the efficiency of Algorithm 1, we generated random matrices of different
+sizes, all of whose entries are normally distributed with mean 0 and variance 1. All computations
+were performed in real double precision arithmetic. Table 1 lists the measured
+results of the backward error, the number of Newton iterations, the total CPU time and the
+megaflops rate. In particular, the second column of the table contains the backward errors
+and the number of the Newton iterations in parentheses. We note that the convergence
+rate is problem-data dependent. From Table 1, we see that for a 4000-by-4000 matrix, the
+algorithm reached 7.19/23.12=31% efficiency with respect to PUMMA matrix multiplica-
+tion, and 7.19/8.70=82% efficiency with respect to the underlying ScaLAPACK 1.0 (beta)
+matrix inversion subroutine. As our performance model shows, and tables 9, 10, 11, 12,
+and 14 confirm, efficiency will continue to improve as the matrix size n increases. Our
+
+Table
+
+1: Backward accuracy, timing in seconds and megaflops of Algorithm 1 on a 256 node
+Intel Touchstone Delta system.
+Timing Mflops Mflops GEMM-Mflops INV-Mflops
+(iter) (seconds) (total) (per node) (per node) (per node)
+1000 2000 3000 4000 5000 6000 7000 8000 9000135matrix size
+Gflops
+The Newton Iteration based Algorithm on Intel Delta System (Gflops)
+
+Figure
+
+3: Performance of Algorithm 1 on the Intel Delta system as a function of matrix size
+for different numbers of processors.
+performance model is explained in section 4. Figure 3 shows the performance of Algorithm
+1 on the Intel Delta system as a function of matrix size for different numbers of processors.
+
+Table
+
+gives details of the total CPU timing of the Newton iteration based algorithm,
+summarized in Table 1). It is clear that the Newton iteration (sign function) is most
+expensive, and takes about 90% of the total running time.
+To compare with the standard sequential algorithm, we also ran the LAPACK driver
+routine DGEES for computing the Schur decomposition (with reordering of eigenvalues) on
+one i860 processor. It took 592 seconds for a matrix of order 600, or 9.1 megaflops/second.
+Assuming that the time scales like n 3 , we can predict that for a matrix of order 4000, if the
+matrix were able to fit on a single node, then DGEES would take 175,000 seconds (48 hours)
+to compute the desired spectral decomposition. In contrast, Algorithm 1 would only take
+1,436 seconds (24 minutes). This is about 120 times faster! However, we should note that
+DGEES actually computes a complete Schur decomposition with the necessary reordering
+of the spectrum. Algorithm 1 only decomposes the spectrum along the pure imaginary axis.
+In some applications, this may be what the users want. If the decomposition along a finer
+region or a complete Schur decomposition is desired, then the cost of the Newton iteration
+based algorithms will be increased, though it is likely that the first step just described will
+
+Table
+
+2: Performance Profile on a 256 processor Intel Touchstone Delta system (time in
+seconds)
+1000 123.06(91%) 6.87(5%) 4.27(5%) 134.22
+2000 413.95(92%) 18.60(4%) 16.13(4%) 448.69
+3000 717.04(90%) 36.76(5%) 38.37(5%) 792.18
+take most of the time [13].
+3.2 Implementation and Performance on the CM-5
+The Thinking Machines CM-5 was introduced in 1991. The tests in this section were run on
+a processor CM-5 at the University of California at Berkeley. Each CM-5 node contains a
+with an FPU and 64 KB cache, four vector floating points units, and
+of memory. The front end is a 33 HMz Sparc with 32 MB of memory. With the vector
+units, the peak 64-bit floating point performance is 128 megaflops per node (32 megaflops
+per vector unit). See [53] for more details.
+Algorithm 1 was implemented in CM Fortran (CMF) version 2.1 - an implementation of
+Fortran 77 supplemented with array-processing extensions from the ANSI and ISO (draft)
+standard Fortran 90 [53]. CMF arrays come in two flavors. They can be distributed across
+CM processor memory (in some user defined layout) or allocated in normal column major
+fashion on the front end alone. When the front end computer executes a CM Fortran pro-
+gram, it performs serial operations on scalar data stored in its own memory, but sends any
+instructions for array operations to the CM. On receiving an instruction, each node executes
+it on its own data. When necessary, CM processors can access each other's memory by any
+of three communication mechanisms, but these are transparent to the CMF programmer
+[52].
+We also used CMSSL version 3.2, [54], TMC's library of numerical linear algebra rou-
+tines. CMSSL provides data parallel implementations of many standard linear algebra
+routines, and is designed to be used with CMF and to exploit the vector units.
+CMSSL's QR factorization (available with or without pivoting) uses standard Householder
+transformations. Column blocking can be performed at the user's discretion to
+improve load balance and increase parallelism. Scaling is available to avoid situations when
+a column norm is close to
+underflow or
+overflow, but this is an expensive "insurance
+policy". Scaling is not used in our current CM-5 code, but should perhaps be made available
+in our toolbox for the informed user. The QR with pivoting (QRP) factorization routine,
+which we shall use to reveal rank, is about half as fast as QR without pivoting. This is
+due in part to the elimination of blocking techniques when pivoting, as columns must be
+processed sequentially.
+Gaussian elimination with or without partial pivoting is available to compute LU factorizations
+and perform back substitution to solve a system of equations. Matrix inversion is
+matrix order
+time
+CMSSL 3.2 on 32 PEs with VUs CM-5 (timing in second)
+GEMM
+INV
+QRP
+matrix order
+mflops
+per
+node
+CMSSL 3.2 on 32 PEs with VUs CM-5 (Mflops per node)
+GEMM
+INV
+QRP
+
+Figure
+
+4: Performance of some CMSSL 3.2 subroutines on 32 PEs with VUs CM-5
+performed by solving the system I . The LU factors can be obtained separately - to
+support Balzer's and Byers' scaling schemes to accelerate the convergence of Newton, and
+which require a determinant computation - and there is a routine for estimating kA
+from the LU factors to detect ill-conditioning of intermediate matrices in the Newton iter-
+ation. Both the factorization and inversion routines balance load by permuting the matrix,
+and blocking (as specified by the user) is used to improve performance.
+The LU, QR and Matrix multiplication routines all have "out-of-core" counterparts to
+support matrices/systems that are too large to fit in main memory. Our current CM5
+implementation of the SDC algorithms does not use any of the out-of-core routines, but in
+principle our algorithms will permit out-of-core solutions to be used.
+
+Figure
+
+4 summarizes the performance of the CMSSL routines underlying this implementation
+Algorithm 1.
+We tested the Newton-Schulz iteration based algorithm for computing the spectral decomposition
+along the pure imaginary axis, since matrix multiplication can be twice as
+fast as matrix inversion; see Figure 4. The entries of random test matrices were uniformly
+distributed on [\Gamma1; 1]. We use the inequality kA
+n as switching criterion
+from the Newton iteration (2.5) to the Newton-Schulz iteration (2.6), i.e., we relaxed the
+convergence condition
+for the Newton-Schulz iteration to
+because this optimized performance over the test cases we ran.
+
+Table
+
+3 shows the measured results of the backward accuracy, total CPU time and
+megaflops rate. The second column of the table is the backward error, the number of
+Newton iterations and the number of the Newton-Schulz iterations, respectively. From
+the table, we see that by comparing to CMSSL 3.2 matrix multiplication performance, we
+obtain 32% to 45% efficiency with the matrices sizes from 512 to 2048, even faster than the
+CMSSL 3.2 matrix inverse subroutine.
+We profiled the total CPU time on each phase of the algorithm, and found that about
+83% of total time is spent on the Newton iteration, 9% on the QR decomposition with pivot-
+4Actual Predicted GEMM- Inverse-
+(iter1, iter2) (seconds) (seconds) (total) (per node) (per node) (per node)
+
+Table
+
+3: Backward accuracy, timing in seconds and megaflops of the SDC algorithm with
+Newton-Schulz iteration on a 32 PEs with VUs CM-5.
+ing, and 7.5% on the matrix multiplication for the Newton-Schulz iteration and orthogonal
+transformations.
+Performance Model
+Our model is based on the actual operation counts of the ScaLAPACK implementation and
+the following problem parameters and (measured) machine parameters.
+Matrix size
+p Number of processors
+b Block size (in the 2D block cyclic matrix data layout) [20]
+lat Time required to send a zero length message from one processor to another.
+- band Time required to send one double word from one processor to another.
+- DGEMM Time required per BLAS3 floating point operation
+Models for each of the building blocks are given in Table 4. Each model was created
+by counting the actual operations in the critical path. The load imbalance cost represents
+the discrepancy between the amount of work which the busiest processor must perform and
+the amount of work which the other processors must perform. Each of the models for the
+building blocks were validated against the performance data shown in the appendix. The
+load imbalance increases as the block size increases.
+Because it is based on operation counts, we can not only predict performance, but also
+estimate the importance of various suggested modifications either to the algorithm, the
+implementation or the hardware. In general, predicting performance is risky because there
+are so many factors which control actual performance, including the compiler and various
+library routines. However, since the majority of the time spent in Algorithm 1 is spent in
+either the BLACS or the level 3 PB-BLAS[15] (which are in turn implemented as calls to the
+BLACS[25] and the BLAS[38, 23, 22]), as long as the performance of the BLACS and the BLAS
+Computation Communication Cost Load Imbalance Cost
+Task Cost latency bandwidth \Gamma1 computation bandwidth \Gamma1
+TRI 4n 3
+Matrix
+multiply
+p- lat (1+ lg p
+Householder
+application
+
+Table
+
+4: Models for each of the building blocks
+inversions applications
+Computation cost \Theta n 3
+Latency cost \Thetan- lat 160+20 lg p 3 lg p 160+23lg p
+Bandwidth cost \Theta n 2
+Imbalanced
+computation cost \Theta bn 2
+Imbalanced
+bandwidth cost \Thetabn- band 20+35 lg p 20+35 lg p
+
+Table
+
+5: Model of Algorithm 1
+are well understood and the input matrix is not too small, we can predict the performance
+of Algorithm 1 on any distributed memory parallel computer. In Table 5, the predicted
+running time of each of the steps of Algorithm 1 is displayed. Summing the times in Table 5
+yields:
+Using the measured machine parameters given in Table 8 with equation (4.9) yields the predicted
+times in Table 7 and Table 3. To get Table 4 and Table 5 and hence equation (4.9), we
+have made a number of simplifying assumptions based on our empirical results. We assume
+that 20 Newton iterations are required. We assume that the time required to send a single
+message of d double words is - lat regardless of how many messages are being sent
+in the system. Although there are many patterns of communication in the ScaLAPACK
+implementation, the majority of the communication time is spent in collective communica-
+tions, i.e. broadcasts and reductions over rows or columns. We therefore choose - lat and
+band based on programs that measure the performance of collective communications. We
+assume a perfectly square p p-by-
+processor grid. These assumptions allow us to keep
+the model simple and understandable, but limit its accuracy somewhat.
+Table
+
+Performance of the Newton iteration based algorithm (Algorithm 1) for the spectral
+decomposition along the pure imaginary axis, all backward errors
+(sec) (total) (sec) (total) (sec) (total)
+2000
+3000
+
+Table
+
+7: Predicted performance of the Newton iteration based algorithm (Algorithm 1) for
+the spectral decomposition along the pure imaginary axis.
+actual predicted actual predicted actual predicted
+time
+2000 502.57 444.3 448.69 362.3 336.34 310.8
+3000 1037.03 994.7 792.18 756.8 576.68 610.4
+As
+
+Tables
+
+6 and 7 show, our model underestimates the actual time on the Delta by no
+more than 20% for the machine and problem sizes that we timed. Table 3 shows that our
+model matches the performance on the CM5 to within 25% for all problem sizes except the
+smallest, i.e.
+The main sources of error in our model are:
+1. uncounted operations, such as small BLAS1 and BLAS2 calls, data copying and norm
+computations,
+2. non-square processor configurations,
+3. differing numbers of Newton iterations required
+4. communications costs which do not fit our linear model,
+5. matrix multiply costs which do not fit our constant cost/flop model, and
+6. the higher cost of QR decomposition with pivoting.
+We believe that uncounted operations account for the main error in our model for small
+n. The actual number of Newton iterations varies between
+exactly 20 Newton iterations are needed. Non-square processor configurations are slightly
+less efficient than square ones. Actual communication costs do not fit a linear model and
+depend upon the details such as how many processors are sending data simultaneously and
+to which processors they are sending. Actual matrix multiply costs depend upon the matrix
+Model Performance measured values -s
+Parameter Description limited by CM5
+- DGEMM BLAS3 peak flop rate 1/90. 1/34.
+lat message latency comm. software 150 157
+
+Table
+
+8: Machine parameters
+sizes involved, the leading dimensions and the actual starting locations of the matrices. The
+cost of any individual call to the BLACS or to the BLAS may differ from the model by 20%
+or more. However, these differences tend to average out over the entire execution.
+Data layout, i.e. the number of processor rows and processor columns and the block
+size, is critical to the performance of this algorithm. We assume an efficient data layout.
+Specifically that means a roughly square processor configuration and a fairly large block
+size (say 16 to 32). The cost of redistributing the data on input to this routine would be
+tiny, O((n 2 =p)- band ), compared to the total cost of the algorithm.
+The optimal data layout for LU decomposition is different from the optimal data layout
+for computing U . The former prefers slightly more processor rows than columns while
+the latter prefers slightly more processor columns than rows. In addition, LU decomposition
+works best with a small block size, 6 on the Delta for example, whereas computing
+U best done with a large block size, 30 on the Delta for example. The difference
+is significant enough that we believe a slight overall performance gain, maybe 5% to 10%,
+could be achieved by redistributing the data between these two phases, even though this
+redistribution would have to be done twice for each Newton step.
+
+Table
+
+3 shows that except for n ! 512 our model estimates the performance Algorithm
+1 based on CMSSL reasonably well. Note that this table is for a Newton-Shultz iteration
+scheme which is slightly more efficient on the CM5 than the Newton based iteration. This
+introduces another small error. The fact that our model matches the performance of the
+CMSSL based routine, whose internals we have not examined, indicates to us that the implementation
+of matrix inversion on the CM5 probably requires roughly the same operation
+counts as the ScaLAPACK implementation.
+The performance figures in Table 8 are all measured by an independent program, except
+for the CM5 BLAS3 performance. The communication performance figures for the Delta in
+
+Table
+
+8 are from a report by Littlefield 1 [43]. The communication performance figures for the
+CM5 are as measured by Whaley 2 [58]. The computation performance for the Delta is from
+the Linpack benchmark[21] for a 1 processor Delta. There is no entry for a 1 processor CM5
+in the Linpack benchmark, so - DGEMM in Table 8 above is chosen from our own experience.
+Graphical User Interface to SDC
+To take advantage of the graphical nature of the spectral decomposition process, a graphical
+user interface (GUI) has been implemented for SDC. Written in C and based on X11R5's
+1 The BLACS use protocol 2, and the communication pattern most closely resembles the "shift" timings.- lat is from Table 8 in[58] and -band is from Table 5.
+CODE
+XI
+CODE
+USER
+PARALLEL EXECUTION
+Interface of 7 routines
+
+Figure
+
+5: The X11 Interface (XI) and SDC
+standard Xlib library, the Xt toolkit and MIT's Athena widget set, it has been nicknamed
+XI for "X11 Interface". When XI is paired with code implementing SDC we call the union
+XSDC.
+The programmer's interface to XI consists of seven subroutines designed independently
+of any specific SDC implementation. Thus XI can be attached to any SDC code. At present,
+it is in use with the CM-5 CMF/CMSSL implementation and the Fortran 77 version of our
+algorithm (both of which use real arithmetic only). Figure 1 shows the coupling of the SDC
+code and the XI library of subroutines.
+Basically, the SDC code calls an XI routine which handles all interaction with the user
+and returns only when it has the next request for a parallel computation. The SDC code
+processes this request on the parallel engine, and if necessary calls another XI routine to
+inform the user of the computational results. If the user had selected to split the spectrum,
+then at this point the size of the highlighted region, and the error bound on the computation
+(along with some performance information) is reported, and the user is given the choice of
+confirming or refusing the split. Appropriate action is taken depending on the choice. This
+process is repeated until the user decides to terminate the program.
+All data structures pertaining to the matrix decomposition process are managed by
+XI. A binary tree records the size and status (solved/not solved) of each diagonal block
+corresponding to a spectral region, the error bounds of each split, and other information.
+Having the X11 interface manage the decomposition data frees the SDC programmer of
+these responsibilities and encapsulates the decomposition process. The SDC programmer
+obtains any useful information via the interface subroutines.
+
+Figure
+
+6 pictures a sample session of xsdc on the CM-5 with a 500 \Theta 500 matrix. The
+large, central window (called the "spectrum window") represents the region of the complex
+plane indicated by the axes. Its title - "xsdc :: Eigenvalues and Schur Vectors" - indicates
+that the task is to compute eigenvalues and Schur vectors for the matrix under analysis.
+Figure
+
+sample xsdc session
+The lines on the spectrum window (other than the axes) are the result of spectral divide
+and conquer, while the shading indicates that the "bowtie" region of the complex plane is
+currently selected for further analysis. The other windows (which can be raised/lowered at
+the user's request) show the details of the process and will be described later.
+The buttons at the top control I/O, the appearance of the spectrum window, and algorithmic
+choices:
+ffl File lets one save the matrix one is working on, start on a new matrix, or quit.
+ffl Zoom lets one navigate around the complex plane by zooming in or out on part of the
+spectrum window.
+Toggle turns on or off the features of the spectrum window (for example the axes,
+Gershgorin disks, eigenvalues).
+ffl Function lets one modify the algorithm, or display more or less detail about the
+progress being made.
+The buttons at the bottom are used in splitting the spectrum. For example clicking
+on Right halfplane and then clicking at any point on the spectrum window will split the
+spectrum into two halfplanes at that point, with the right halfplane selected for further
+division. This would signal the SDC code to decompose the matrix A to
+k A 11 A 12
+where the k eigenvalues of A 11 are the eigenvalues of A in the right halfplane, and the
+eigenvalues of A 22 are the eigenvalues of A in the left halfplane. The button Left Halfplane
+works similarly, except that the left halfplane would then be selected for further processing
+and the roles of A 11 and A 22 would be reversed. In the same manner, Inside Circle and
+Outside Circle divide the complex plane at the boundary of a circle, while East-West
+Crosslines and North-South Crosslines split the spectrum with lines at 45 degrees to
+the real axis (described below).
+The Split Information window in the lower right corner of Figure 2 keeps track of
+the matrix splitting process. It reports the two splits performed to arrive at this current
+(shaded) spectral region. The first, an East-West Crossline split at the point 1.5 on the
+real axis, divided the entire complex plane into four sectors by drawing two lines at \Sigma 45
+degrees through the point 1.5 on the real axis. SDC decomposed the starting matrix into:
+260 A 11 A 12
+where the East and West sectors correspond to the A 11 block while the North and South
+sectors correspond to the A 22 block.
+Continuing in the East-West sectors as indicated by the previous split, that region is
+divided into two sub-regions separated by the boundary of the circle of radius 4 centered
+at the origin. The circle is drawn, making sure that its boundary only intersects the East
+and West sectors, and the matrix is reduced to:B
+@
+106 154 240
+106 A 11 A 12 A 13
+A
+The shading indicates that the "bowtie" region (corresponding to the interior of the circle,
+and the A 11 block) is currently selected for further analysis.
+In the upper right corner of Figure 2 the Matrix Information window displays the
+status of the matrix decomposition process. Each of the three entries corresponds to a
+spectral region and a square diagonal block of the 3 \Theta 3 block upper triangular matrix,
+and informs us of the block's size, whether its eigenvalues (eigenvectors, Schur vectors)
+have been computed or not, and the maximum error bound encountered along this path
+of the decomposition process. The highlighted entry corresponds to the shaded region and
+reports that the A 11 block contains 106 eigenvalues, has been solved, and is in error by up
+to 1:44 \Theta 10 \Gamma13 . The eigenvalues - listed in the window overlapping the Matrix Information
+window - can be plotted on the spectrum at the user's request.
+The user may select any region of the complex plane (and hence any sub-matrix on the
+diagonal) for further decomposition by clicking the pointer in the desired region. A click at
+the point 10 on the imaginary axis for example, would unhighlight the current region and
+shade the North and South sectors. Since this region corresponds to the A 33 block, the third
+entry in the Matrix-Information window would be highlighted. The Split-Information
+window would also be updated to detail the single split performed in arriving at this region
+of the spectrum.
+Once a block is small enough, the user may choose to solve it (via the Function button
+at the top of the spectrum window). In this case the eigenvalues, and Schur vectors for that
+block would be computed using QR (as per the user's request) and the eigenvalues plotted
+on the spectrum.
+The current XI code supports real SDC only. It will be extended to handle the complex
+case as implementations of complex SDC become available.
+6 Conclusions and Future work
+We have written codes that solve one of the hardest problems of numerical linear algebra:
+spectral decomposition of nonsymmetric matrices. Our implementation uses only highly
+efficient matrix computation kernels, which are available in the public domain and from
+distributed memory parallel computer vendors. The performance attained is encouraging.
+This approach merits consideration for other numerical algorithms.
+The object oriented user interface XI developed in this paper provides a paradigm for
+us in the future to design a more user friendly interface in the massively parallel computing
+environment.
+We note that all the approaches discussed here can be extended to compute the both
+right and left deflating subspaces of a regular matrix pencil A \Gamma -B. See [4, 7] for more
+details.
+As the spectrum is repeatedly partitioned in a divide-and-conquer fashion, there is
+obviously task parallelism available because of the independent submatrices that arise, as
+well as the data parallel-like matrix operations considered in this paper. Analysis in [13]
+indicates that this task parallelism can contribute at most a small constant factor speedup,
+since most of the work is at the root of the divide-and-conquer tree. This can simplify the
+implementation.
+Our future work will include the implementation and performance evaluation of the
+based algorithm, comparison with parallel QR, the extension of the
+algorithms to the generalized spectral decomposition problem, and the integration of the
+3-step approach (see section 2.3) to an object oriented user interface.
+
+Acknowledgements
+
+Bai and Demmel were supported in part by the ARPA grant DM28E04120 via a subcontract
+from Argonne National Laboratory. Demmel and Petitet were supported in part by NSF
+grant ASC-9005933, Demmel, Dongarra and Robinson were supported in part by ARPA
+contact DAAL03-91-C-0047 administered by the Army Research Office. Ken Stanley was
+supported by an NSF graduate student fellowship. Dongarra was also supported in part by
+the Office of Scientific Computing, U.S. Department of Energy, under Contract DE-AC05-
+84OR21400.
+This work was performed in part using the Intel Touchstone Delta System operated
+by the California Institute of Technology on behalf of the Concurrent Supercomputing
+Consortium. Access to this facility was provided through the Center for Research on Parallel
+Computing.
+
+
+
+--R
+
+Generalized QR factorization and its applictions.
+on parallelizable eigensolvers.
+Design of a parallel nonsymmetric eigenroutine toolbox
+on a block implementation of Hessenberg multishift QR it- eration
+Design of a parallel nonsymmetric eigenroutine toolbox
+Inverse free parallel spectral divide and conquer algorithms for nonsymmetric eigenproblems.
+A computational method for eigenvalue and eigen-vectors of a matrix with real eigenvalues
+A divide and conquer method for tridiagonalizing symmetric matrices with repeated eigenvalues.
+Circular dichotomy of the spectrum of a matrix.
+Numerical stability and instability in matrix sign function based algorithms.
+Solving the algebraic Riccati equation with the matrix sign function.
+on the benefit of mixed parallelism.
+Rank revealing QR factorizations.
+PB-BLAS: A set of Parallel Block Basic Linear Algebra Subprograms.
+PUMMA: Parallel universal matrix multiplication algorithms on distributed memory concurrent computers.
+A note on the homotopy method for linear algebraic eigenvalue problems.
+A parallel nonlinear least-squares solver: Theoretical analysis and numerical results
+Trading off parallelism and numerical stability.
+Parallel numerical linear algebra.
+Performance of various computers using standard linear equations soft- ware
+A set of Level 3 Basic Linear Algebra Subprograms.
+An Extended Set of FORTRAN Basic Linear Algebra Subroutines.
+A parallel algorithm for the non-symmetric eigenvalue problem
+A Users' Guide to the BLACS.
+The design of linear algebra libraries for high performance computers.
+The multishift QR algorithm: is it worth the trouble?
+on the Schur decomposition of a matrix for parallel computation.
+Finding eigenvalues and eigenvectors of unsymmetric matrices using a distributed memory multiprocessor.
+Problem of the dichotomy of the spectrum of a matrix.
+An efficient algorithm for computing a rank-revealing QR de- composition
+Parallelizing the QR algorithm for the unsymmetric algebraic eigenvalue problem: myths and reality.
+Computing the polar decomposition - with applications
+The rank revealing QR and SVD.
+The sign matrix and the separation of matrix eigenvalues.
+A parallel implementation of the invariant subspace decomposition algorithm for dense symmetric matrices.
+Rational iteration methods for the matrix sign function.
+Basic Linear Algebra Subprograms for Fortran usage.
+
+Solving eigenvalue problems of nonsymmetric matrices with real homotopies.
+The Touchstone
+A parallel algorithm for computing the eigenvalues of an unsymmetric matrix on an SIMD mesh of processors.
+Characterizing and tuning communication performance on the Touchstone DELTA and iPSC/860.
+Parallel algorithm for solving some spectral problems of linear algebra.
+Some aspects of generalized QR factorization.
+Linear model reduction and solution of the algebraic Riccati equation.
+on Jacobi and Jacobi-like algorithms for a parallel computer
+A parallel algorithm for the eigenvalues and eigenvectors of a general complex matrix.
+A Jacobi-like algorithm for computing the Schur decomposition of a non-Hermitian matrix
+A parallel implementation of the QR algorithm.
+Updating a rank-revealing ULV decomposition
+CM Fortran Reference Manual
+The Connection Machine CM-5 Technical Summary
+CMSSL for CM Fortran: CM-5 Edition
+Implementing the QR Algorithm on an Array of Processors.
+Efficient parallel implementation of the nonsymmetric QR algorithm.
+Shifting strategies for the parallel QR algorithm.
+Basic linear algebra communication subroutines: Analysis and implementation across multiple parallel architectures.
+--TR
+
+--CTR
+Peter Benner , Enrique S. Quintana-Ort , Gregorio Quintana-Ort, State-space truncation methods for parallel model reduction of large-scale systems, Parallel Computing, v.29 n.11-12, p.1701-1722, November/December
+Peter Benner , Ralph Byers , Rafael Mayo , Enrique S. Quintana-Ort , Vicente Hernndez, Parallel algorithms for LQ optimal control of discrete-time periodic linear systems, Journal of Parallel and Distributed Computing, v.62 n.2, p.306-325, February 2002
+Leo Chin Sim , Graham Leedham , Leo Chin Jian , Heiko Schroder, Fast solution of large N  N matrix equations in an MIMD-SIMD hybrid system, Parallel Computing, v.29 n.11-12, p.1669-1684, November/December
+Peter Benner , Maribel Castillo , Enrique S. Quintana-Ort , Vicente Hernndez, Parallel Partial Stabilizing Algorithms for Large Linear Control Systems, The Journal of Supercomputing, v.15 n.2, p.193-206, Feb.1.2000

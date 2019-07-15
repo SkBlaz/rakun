@@ -1,0 +1,976 @@
+--T
+A Practical Approach to Dynamic Load Balancing.
+--A
+AbstractThis paper presents a cohesive, practical load balancing framework that improves upon existing strategies. These techniques are portable to a broad range of prevalent architectures, including massively parallel machines, such as the Cray T3D/E and Intel Paragon, shared memory systems, such as the Silicon Graphics PowerChallenge, and networks of workstations. As part of the work, an adaptive heat diffusion scheme is presented, as well as a task selection mechanism that can preserve or improve communication locality. Unlike many previous efforts in this arena, the techniques have been applied to two large-scale industrial applications on a variety of multicomputers. In the process, this work exposes a serious deficiency in current load balancing strategies, motivating further work in this area.
+--B
+Introduction
+A number of trends in computational science and engineering have increased the need for effective
+dynamic load balancing techniques. In particular, particle/plasma simulations, which have
+recently become more common, generally have less favorable load distribution characteristics
+than continuum calculations, such as Navier-Stokes flow solvers. Even for continuum problems,
+the use of dynamically adapted grids for moving boundaries and solution resolution necessitates
+runtime load balancing to maintain efficiency. In the past ten years, researchers have proposed a
+This research is sponsored by the Advanced Research Projects Agency under contract number DABT63-95-
+C-0116.
+number of strategies for dynamic load balancing [2, 3, 4, 5, 6, 7, 9, 10, 11, 17, 19, 20, 22, 23, 24].
+The goal of this work was to build upon the best of these methods and to develop new algorithms
+to remedy shortcomings in previous efforts. The techniques are designed to be scalable, portable
+and easy-to-use. Improvements over existing algorithms include the derivation of a faster diffusive
+scheme that transfers less work to achieve a balanced state than other algorithms. Mechanisms
+for selecting and transferring tasks are also introduced. The techniques attempt to maintain
+or improve communication locality in the underlying application. Parametric studies illustrate
+the benefits offered by the faster diffusion algorithm as well as the efficacy of the locality
+preservation techniques. Finally, the framework is applied to two large-scale applications running
+on hundreds of processors. The success of the methods in one case demonstrates the utility
+of the techniques, and their failure for the second application motivates further research in this
+area by revealing limitations in current approaches.
+The abstract goal of load balancing can be stated as follows:
+Given a collection of tasks comprising a computation and a set of computers on which these
+tasks may be executed, find the mapping of tasks to computers that results in each computer
+having an approximately equal amount of work.
+A mapping that balances the workload of the processors will typically increase the overall efficiency
+of a computation. Increasing the overall efficiency will typically reduce the run time of
+the computation.
+In considering the load balancing problem it is important to distinguish between problem
+decomposition and task mapping. Problem decomposition involves the exploitation of concurrency
+in the control and data access of an algorithm. The result of this decomposition is a set
+of communicating tasks that solve the problem in parallel. These tasks can then be mapped to
+computers in a way that best fits the problem. One concern in task mapping is that each computer
+have a roughly equal workload. This is the load balancing problem, as stated above. In
+some cases the computation time associated with a given task can be determined a priori. In
+such circumstances one can perform the task mapping before beginning the computation; this is
+called static load balancing. For an important and increasingly common class of applications,
+the workload for a particular task may change over the course of a computation and cannot be
+estimated beforehand. For these applications the mapping of tasks to computers must change
+dynamically during the computation.
+A practical approach to dynamic load balancing is to divide the problem into the following
+five phases:
+Some estimate of a computer's load must be provided to first determine
+that a load imbalance exists. Estimates of the workloads associated with individual tasks
+must also be maintained to determine which tasks should be transferred to best balance
+the computation.
+Profitability Determination: Once the loads of the computers have been calculated, the
+presence of a load imbalance can be detected. If the cost of the imbalance exceeds the cost
+of load balancing, then load balancing should be initiated.
+Calculation: Based on the measurements taken in the first phase,
+the ideal work transfers necessary to balance the computation are calculated.
+Tasks are selected for transfer or exchange to best fulfill the vectors provided
+by the previous step. Task selection is typically constrained by communication locality
+and task size considerations.
+Once selected, tasks are transferred from one computer to another; state
+and communication integrity must be maintained to ensure algorithmic correctness.
+By decomposing the load balancing process into distinct phases, one can experiment in a "plug-
+and-play" fashion with different strategies at each of the above steps, allowing the space of techniques
+to be more fully and readily explored. It is also possible to customize a load balancing
+algorithm for a particular application by replacing more general methods with those specifically
+designed for a certain class of computations.
+3 Assumptions and Notation
+The following assumptions are made with regard to the scenario under which the techniques
+herein are applied. First, the computers are assumed to be of homogeneous processing capac-
+ity, and there are no sources of external load. The underlying software system must provide a
+basic message-passing library with simple point-to-point communication (send and receive op-
+erations) and basic global operations (global sum, for example). Finally, access to an accurate
+(milli- to microsecond level) system clock must be provided.
+The following variables and notations are used to denote various quantities in the system:
+ffl There are P computers in the system.
+ffl If the network connecting the computers is a d-dimensional mesh or torus, the sizes of its
+dimensions are Q
+ffl The diameter of the network is denoted D and is the length of the longest path between
+any two computers in the network, according to the routing algorithm used. (E.g., for a d-dimensional
+mesh, D would be
+assuming messages are routed fully through
+each dimension before proceeding to the next.)
+ffl The mapping function from tasks to their respective computers is called M . Thus, M(i)
+is the computer to which task i is mapped.
+is the set of tasks mapped to computer i.
+ffl The set of neighbors of either computer i or task i is denoted N i , as appropriate to the
+context in which i is used. The neighbors of a computer are those adjacent to it in the
+physical network. The neighbors of a task are those tasks with which it communicates.
+4 Algorithms and Implementation
+This section presents some of the design choices in the implementation of the methodology outlined
+in Section 2. Choices among algorithms and techniques are motivated when necessary.
+4.1 Load Evaluation
+The usefulness of any load balancing scheme is directly dependent on the quality of load measurement
+and prediction. Accurate load evaluation is necessary to determine that a load imbalance
+exists, to calculate how much work should be transferred to alleviate that imbalance and
+ultimately to determine which tasks best fit the work transfer vectors. Load evaluation can be
+performed either completely by the application, completely by the load balancing system or with
+a mixture of application and system facilities.
+The primary advantage of an application-based approach is its predictive power. The application
+developer, having direct knowledge of the algorithms and their inputs, has the best chance
+of determining the future workload of a task. In a finite-element solver, for example, the load
+may be a function of the number of grid cells. If the number of cells changes due to grid adap-
+tation, news of that change can be immediately propagated to the load balancing system. For
+more complex applications, the disadvantage of this approach is in determining how the abstract
+workload of a task translates into actual CPU cycles. System dependent factors such as cache
+size and virtual memory paging can easily skew the execution time for a task by a large factor.
+One way to overcome the performance peculiarities of a particular architecture is to measure
+the load of a task by directly timing it. One can use timing facilities to profile each task, providing
+accurate measurements in the categories of execution time and communication overhead. These
+timings can easily be provided by a library or runtime system: Such systems label any execution
+time between communication operations as runtime and any execution time actually sending or
+receiving data as communication time. A system-only approach may fall short when it comes to
+load prediction, however, because past behavior may be a poor predictor of future performance.
+For applications in which the load evolves in a relatively smooth fashion, data modeling techniques
+from data modeling and statistics, such as robust curve fitting, can be used. ("Robust"
+techniques are those which have some tolerance to noise, for example, by discarding spurious
+values in a rigorous way.) However, if the load evolves in a highly unpredictable manner, given
+that the system has no knowledge of the quantities affecting the load, additional information may
+be required.
+The most robust and flexible approach is perhaps a hybrid of both the application- and system-
+only methods. By combining application-specific information with system timing facilities, it is
+much more practical to predict performance in a complex application. In a particle simulation,
+for example, the time required in one iteration on a partition of the problem may be a function
+of the number of grid cells as well as the number of particles contained in those grid cells. By
+using timing routines, the application can determine how to weight each in predicting the execution
+time for the next iteration.
+Given the limitations of application-only and system-only approaches, a general purpose
+load balancing framework must allow the use of an application-specific load prediction model
+and provide the profiling routines necessary to make that model accurate. The system can provide
+a set of generic models that are adequate for broad classes of applications. Our own experience
+has been that simple techniques such as keeping enough load history to predict the load as
+a linear or quadratic function are often sufficient. In any case, the system should provide feed-back
+on the quality of the load prediction model being used. If the load predictions are inaccurate
+relative to the actual run times, the system should generate appropriate warnings.
+Whatever the load prediction model used, the output of load evaluation is the following: For
+a given task j, the workload of that task is determined to be l j . The load of a computer i is
+therefore
+l j .
+4.2 Load Balance Initiation
+For load balancing to be useful, one must first determine when to load balance. Doing so is comprised
+of two phases: detecting that a load imbalance exists and determining if the cost of load
+balancing exceeds its possible benefits.
+The load balance (or efficiency) of a computation is the ratio of the average computer load
+to the maximum computer load,
+. A load balancing framework might, therefore,
+consider initiating load balancing whenever the efficiency of a computation is below some user-specified
+threshold eff min . In applications where the total load is expected to remain fairly con-
+stant, load balancing would be undertaken only in those cases where the load of some computer
+exceeds Lavg
+eff min
+, where L avg is calculated initially or provided by the application. A similar approach
+was described in [10, 11, 22] in which load balancing was initiated whenever a com-
+puter's load falls outside specified upper and lower limits.
+The above method is poorly suited for situations in which the total load is changing. For
+example, if a system is initially balanced and the load of every computer doubles, the system is
+still balanced; the above method would load cause load balancing to be initiated if eff min was
+less than 50 percent. Another method that has been suggested is to load balance if the difference
+between a computer's load and the local load average (i.e., the average load of a computer
+and its neighbors) exceeds some threshold [22]. The problem with this technique is that it may
+fail to guarantee global load balance. Consider, for example, the case of a linear array. If computer
+i has load iL const , then the local load average at any of the non-extremal computers would
+be (i\Gamma1)+i+(i+1)
+const , so load balancing would not be initiated even for a very small
+threshold, despite the fact that the global efficiency is only 50 percent. (I.e., L const and
+const .) Load balancing would only be initiated by the extremal computers if the relative
+threshold was O
+, which would be unreasonably small even for moderate
+values of eff min on large arrays. The same analysis applies in the case where a computer would
+initiate load balancing whenever the relative difference between its load and that of one of its
+neighbors exceeded some threshold. Once again, to guarantee an efficiency of eff min , the relative
+difference must in general be less than O
+. The problem with such a tight
+bound is that, in many cases when it is violated, load balancing may actually be unnecessary.
+The reason these ad-hoc methods have been suggested is that they are inexpensive and completely
+local. They also introduce no synchronization point into an otherwise asynchronous ap-
+plication. Certainly these are qualities for which to strive. Given the increasing availability of
+threads and asynchronous communication facilities, global load imbalance detection may be less
+costly than previously perceived. By using a separate load balancing thread at each computer,
+the load imbalance detection phase can be overlapped with an application. If the load balancing
+threads synchronize, this would have no affect on the application. Thus, the simplest way to determine
+the load balance may be to calculate the maximum and average computer loads using
+global maximum and sum operations, which will complete in O(log 2 P ) steps on most architec-
+tures. Using these quantities, one can calculate the efficiency directly.
+Even if a load imbalance exists, it may be better not to load balance, simply because the cost
+of load balancing would exceed the benefits of a better work distribution. The time required to
+load balance can be measured directly using available facilities. The expected reduction in run
+time due to load balancing can be estimated loosely by assuming efficiency will be increased
+to eff min or more precisely by maintaining a history of the improvement in past load balancing
+steps. If the expected improvement exceeds the cost of load balancing, the next stage in the load
+balancing process should begin [22].
+4.3 Work Transfer Vector Calculation
+After determining that it is advantageous to load balance, one must calculate how much work
+should ideally be transferred from one computer to another. In the interest of preserving communication
+locality, these transfers should be undertaken between neighboring computers. Of
+the transfer vector algorithms presented in the literature, three in particular stand out: the hierarchical
+balancing method, the generalized dimensional exchange and diffusive techniques.
+The hierarchical balancing (HB) method is a global, recursive approach to the load balancing
+problem [7, 22]. In this algorithm, the set of computers is divided roughly in half, and the total
+load is calculated for each partition. The work transfer vector between those partitions is that
+required to make the load per computer in each equal. I.e., for one partition of P 1 computers
+with total workload L 1 and another partition of P 2 computers having an aggregate workload of
+the transfer from the first partition to the second is given by
+\DeltaL
+(1)
+Once the transfer vector has been calculated, each partition is itself divided and balanced recur-
+sively, taking into account transfers calculated at higher levels. The HB algorithm calculates the
+transfer vectors required to achieve "perfect" load balance in O(log 2 (P steps.
+One disadvantage of the HB method is that all data transfer between two partitions occurs
+at a single point. While this may be acceptable on linear array and tree networks, it will fail
+to fully utilize the bandwidth of more highly connected networks. A simple generalization of
+the HB method for meshes and tori is to perform the algorithm separately in each dimension.
+For example, on a 2-D mesh, the computers in each column could perform the HB method (re-
+sulting in each row having the same total load), then in each row (resulting in each computer
+having the same total load). For general, d-dimensional meshes and tori, this algorithm requires
+O
+steps. Note that, in the case of hypercubes, this dimensional hierarchical balancing
+(DHB) method reduces to the dimensional exchange (DE) method presented in [2, 22].
+In the DE method, the computers of a hypercube pair up with their neighbors in each dimension
+and exchange half the difference in their respective workloads. This results in balance in
+log steps. The authors of [24] present a generalization of this technique for arbitrary connected
+graphs, which they call the generalized dimensional exchange (GDE). For a network of
+maximum degree jN max j, the links between neighboring computers are minimally colored so
+that no computer has two links of the same color. For each edge color, a computer exchanges
+with its neighbor across that link - times their load difference. This process is repeated until a
+balanced state is reached.
+\DeltaL (k+1)
+where
+\DeltaL (0)
+For the particular case where - is 0.5, the GDE algorithm is called the averaging GDE method
+(AGDE) [24]. (The AGDE method was also presented in [7] but was judged to be inferior to the
+HB method because of the latter's lower time complexity.) The authors of [24] also present a
+method for determining the value of - for which the algorithm converges most rapidly; they call
+the GDE method using this parameter the optimal GDE method (OGDE). While these methods
+are very diffusion-like and have been described as "diffusive" in the literature [7], they are not
+based on diffusion, as the authors of [24] rightly point out.
+Diffusive methods are based on the solution of the diffusion equation, @L
+was first presented as a method for load balancing in [2]. Diffusion was also explored
+in [22] and was found to be superior to other load balancing strategies in terms of its perfor-
+mance, robustness and scalability. A more general diffusive strategy is given in [5]; unlike previous
+work, this method uses a fully implicit differencing scheme to solve the heat equation on a
+multi-dimensional torus to a specified accuracy. The advantage of an implicit scheme is that the
+timestep size in the diffusion iteration is not limited by the dimension of the network. For explicit
+schemes, the timestep size is limited to 2 \Gammad on a d-dimensional mesh or torus. While the
+algorithm in [5] quickly decimates large load imbalances, it converges slowly once a smooth,
+low-frequency state is reached. One way to overcome this difficulty is to increase the timestep
+size as the load imbalance becomes less severe. A rigorous technique to do this can be borrowed
+from work on integrating ordinary differential equations (ODE's) [13]. In particular, view the
+problem as a system of ODE's, @L
+apply two methods to calculate ffiL for a particular
+ffit. (Recognize that although A is the matrix that results from the spatial discretization
+of the curvature operator in partial differential equation (PDE), the load balancing problem is
+actually spatially discrete to begin with and is thus a system of ODE's instead of a PDE. The
+analogy to the diffusion PDE only guides the construction of A.) The first method for calculating
+ffiL is the first-order accurate implicit technique described in [5]. This method produces a
+local error of O(ffit 2 ), where ffit is the timestep size. The second-order accurate method in [18]
+produces a local error of O(ffit 3 ). Thus, if we take a timestep with both methods, the difference
+between the values produced by each gives us an estimate of the error for that ffit. Taking the
+maximum such difference at any computer to be denoted err max , we will take the relative error
+to be err rel = errmax
+. Using this error estimate, which is proportional to ffit 2 , we can adjust ffit to
+be as large as possible to achieve the desired error
+s ff
+err rel
+is the desired accuracy. (The is a safety factor to avoid having
+to readjust the timestep size if the previous adjustment was too large.) The resulting adaptive
+timestepping diffusion algorithm is given in Figure 1.
+4.4 Task Selection
+Once work transfer vectors between computers have been calculated, it is necessary to determine
+which tasks should be moved to meet those vectors. The quality of task selection directly impacts
+the ultimate quality of the load balancing.
+There are two options in satisfying a transfer vector between two computers. One can attempt
+to move tasks unidirectionally from one computer to another, or one can exchange tasks between
+the two computers, resulting in a net transfer of work. If the tasks' average workload is high
+relative to the magnitude of the transfer vectors, it may be very difficult to find tasks that fit the
+vectors. On the other hand, by exchanging tasks one can potentially satisfy small transfer vectors
+by swapping two sets of tasks with roughly the same total load. In cases where there are enough
+tasks for one-way transfers to be adequate, a cost metric such as that described below can be
+used to eliminate unnecessary exchanges.
+The problem of selecting which tasks to move to satisfy a particular transfer vector is weakly
+NP-complete, since it is simply the subset sum problem. Fortunately, approximation algorithms
+exist which allow the subset sum problem to be solved to a specified non-zero accuracy in polynomial
+time [12]. Before considering such an algorithm, it is important to note that other concerns
+may constrain task transfer options. In particular, one would like to avoid costly trans-
+diffuse(.)
+\DeltaL i;j := 0 for each neighbor j 2 N i
+send L i to all neighbors j 2 N i
+receive L j from all neighbors j 2 N i
+while Lavg
+do
+neighbors
+do
+for k := 1 to m do
+send hL (k\Gamma1)
+i i to all neighbors j 2 N i
+receive hL (k\Gamma1)
+j i from all neighbors j 2 N i
+end for
+err
+if errmax
+while errmax
+send L i to all neighbors j 2 N i
+receive L j from all neighbors j 2 N i
+\DeltaL i;j := \DeltaL i;j
+for each neighbor j 2 N i
+if errmax
+while
+diffuse
+
+Figure
+
+1: The adaptive timestepping diffusion algorithm, executed at each computer i.
+fers of either large numbers of tasks or large quantities of data unless absolutely necessary. One
+would also like to guide task selection to preserve, as best possible, existing communication locality
+in an application. In general, one would like to associate a cost with the transfer of a given
+set of tasks and then find the lowest cost set for a particular desired transfer. This problem can be
+attacked by considering a problem related to the subset sum problem, namely the 0-1 knapsack
+problem. In the latter problem, one has a knapsack with a maximum weight capacity W and a
+set of n items with weights w i and values v i , respectively. One seeks to find the maximum-value
+subset of items whose total weight does not exceed W . In the context of task selection, one has
+a set of tasks each with loads l i and transfer costs c i . (It is important to note that l i can be negative
+if task i is being transferred onto a given computer and that c i can also be negative if it is
+actually advantageous to transfer task i to or from that computer.) For a given transfer, \DeltaL, one
+wishes to find the minimum-cost set of tasks whose exchange achieves that transfer. One can
+specify a cost function, C(l; i), which is the minimum cost of a subset of tasks 0 through
+that achieves a net transfer of l. Letting C(0; 0) be zero, and C(l; 0) be 1 for l 6= 0, one can
+find the values of C(l; i) by computing, in order of increasing i, the following:
+In the end, the lowest cost for transfer l is given by C(l; n). The problem with this algorithm is
+that the runtime is O(n 2 l max ), where l max is the largest absolute value any of l i . The algorithm is
+therefore pseudopolynomial [12]. One can overcome this difficulty by approximating the values
+l i . If we truncate the lower b bits of each l i , where
+l
+log ffll max
+, the relative deviation from
+the optimal load transfer is at most
+l
+. The proof of this follows in same manner as the
+proof given for the 0-1 knapsack approximation algorithm in [12]; for the sake of space, we do
+not produce it here. The run time is thereby reduced to O( n 2 l max
+). So, for any positive,
+non-zero ffl, we can find the lowest-cost transfers in polynomial time.
+Now that function C(l; n) has been calculated, the question becomes which transfer to use.
+The value of C(l; n) which is finite and for which l is closest to \DeltaL, without exceeding it, is
+lowest cost of a transfer within ffl of the transfer actually closest to \DeltaL (i.e., the transfer that would
+have been found by an exact search). One might be tempted to take the subset that yielded that
+value. However, by using a subset that is somewhat further away from \DeltaL, one can potentially
+achieve a much lower cost. A rigorous approach for this is as follows: Given a target accuracy
+ffl, define ffl
+ffl. If we perform the above approximation algorithm to accuracy ffl 0 , we
+will have the lowest cost of the transfer closest, within an accuracy of ffl 0 , to \DeltaL. If we then take
+the subset with the lowest cost that is within ffl 0 of that closest transfer, we will have the lowest
+cost subset that is within ffl of the transfer actually nearest to \DeltaL.
+The next question is how to determine the target accuracy ffl. In general, it may be unnecessary
+for a computer to fully satisfy its transfer vectors. The work transfer vectors given by
+the algorithms in the previous section are eager algorithms. That is, they specify the transfer of
+work in instances where it may be unnecessary. In the case of a large point disturbance, for ex-
+ample, the failure of two computers far from that disturbance to satisfy their own transfer vectors
+may have little or no effect on the global load balance. One way of determining to what extent
+a computer must satisfy its transfer vectors is the following. In general, a computer has a set
+of outgoing (positive) transfer vectors and a set of incoming (negative) transfer vectors. For a
+particular computer i, denote the sum of the former by \DeltaL
+i and the sum of the latter by \DeltaL \Gamma
+In order to achieve the desired efficiency, a computer must guarantee that its new load is less
+than Lavg
+eff min
+. Assuming that all of its incoming transfer vectors are satisfied, either by necessity
+or by chance, its new load will be at least L
+. Thus, in order to guarantee that its new
+load is less than Lavg
+eff min
+, a computer must leave at most a fraction ffl of its outgoing transfer vectors
+unsatisfied, according to
+eff min
+Solving for the maximum such ffl gives
+eff min
+In practice, ffl max should have a lower limit of 10 \Gamma2 or 10 \Gamma3 , since a value of zero is possible,
+especially in the case of the computer with the maximum load. Also, note that using ffl max in the
+approximation algorithm does not guarantee that a satisfactory exchange of tasks will be found.
+No accuracy can guarantee that, since such an exchange may be impossible with a given set of
+tasks. Instead, it merely provides some guidance as to how hard the approximation algorithm
+should try to find the best solution and the degree to which tradeoffs with cheaper exchanges are
+acceptable.
+Since the selection algorithm cannot, in general, satisfy a transfer vector in a single attempt, it
+is necessary to make multiple attempts. For example, in the worst-case scenario where all of the
+tasks are on one computer, only those computers that are neighbors of the overloaded computer
+can hope to have their incoming transfer vectors satisfied in the first round of exchanges. In
+such a case, one would expect that at least O(D) exchange rounds would be necessary. The
+algorithm we propose for task selection is thus as follows. The transfer vectors are colored in
+the same manner as described for the GDE algorithm. For each color, every computer attempts
+to satisfy its transfer vector of that color, adjusting ffl max to account for the degree to which its
+transfer vectors have thus far been fulfilled. The algorithm is repeated when the colors have been
+exhausted. Termination occurs when no more progress is made in reducing the transfer vectors.
+Termination can occur earlier if all of the computers have satisfied the minimum requirement
+of their outgoing transfer vectors (i.e., if ffl max is one at every computer). The first termination
+condition is guaranteed to be met: For a given configuration of tasks, there is some minimum
+non-zero exchange. The total of outstanding transfer vectors will be reduced by at least that
+amount at each step. Since the transfer vectors are finite in size, the algorithm will terminate.
+This is admittedly a very weak bound. In typical situations, we have never seen task selection
+require more than a few iterations-at most it has required O(D) steps in the case of severe load
+imbalance. A safe approach would be to bound the number of steps by some multiple of D.
+As the above selection algorithm suggests, a task may move multiple hops in the process of
+satisfying transfer vectors. This movement may be discouraged by appropriate cost functions.
+Since the data structures for a task may be large, this store-and-forward style of remapping may
+prove costly. A better method is to instead transfer a token, which contains information about a
+task such as its load and the current location of its data structures. Once task selection is complete
+and these tokens have arrived at their final destinations, the computers can send the tasks' states
+directly to their final locations. Note that if a cost function is used that encourages locality a
+token may be moved back to the computer on which the corresponding task actually resides,
+eliminating the need for any data transfer.
+4.5 Task Migration
+In addition to selecting which tasks to move, a load balancing framework must also provide
+mechanisms for actually moving those tasks fromone computer to another. Task movement must
+preserve the integrity of a task's state and any pending communication. Transport of a task's
+state typically requires assistance from the application, especially when complex data structures
+such as linked lists or hash tables are involved. For example, the user may be required to write
+routines which pack, unpack and free the state of a task.
+5 Parametric Experiments
+This section presents the results of various parametric experiments, exposing the trade-offs between
+different load balancing mechanisms. In particular, comparisons are drawn between the
+various transfer vector algorithms, and the influence of cost metrics on task migration and application
+locality is demonstrated.
+5.1 Comparison of Transfer Vector Algorithms
+Some of the transfer vector algorithms presented in Section 4.3 have been previously compared
+in terms of their execution times [2, 7, 22, 24]. What has been poorly studied, with the exception
+of experiments in [22], is the amount of work transfer these algorithms require to achieve
+load balance. The algorithms in Section 4.3 were implemented using the Message Passing Interface
+[16] and were run on up to 256 processors of a Cray T3D. The HB algorithm was mapped to
+the three-dimensional torus architecture of the T3D by partitioning the network along the largest
+dimension at each stage and transferring work between the processors at the center of the plane
+of division. The GDE and diffusion algorithms took advantage of the wrap-around connections.
+
+Figure
+
+2 compares the total work transfer and execution times for the above transfer vector algorithms
+on varying numbers of processors. In this case, a randomly chosen computer contained all
+of the work in the system, and the transfer vector algorithms improved the efficiency to at least
+percent. This scenario was intended to illustrate the worst-case behavior of the algorithms and
+is the case for which much analysis of the algorithms has been done. In Figure 3 the same quantities
+are compared, except that the load was continuous random variable distributed uniformly
+between 0.8 and 1.2. The goal here was to illustrate the algorithms' performance characteristics
+in a more realistic situation-in particular, that of balance maintenance.
+As
+
+Figure
+
+shows, with the exception of the HB method, all of the algorithms transferred a
+fairly judicious amount of work. The diffusion and AGDE algorithms transferred the least work,
+with the DHB and OGDE algorithms transferring up to 30 and 12 percent more work, respec-
+Total
+work
+transfer
+Number of processors
+OGDE
+diff-1
+diff-20.100.300.500.700.9050 100 150 200 250 300
+Time
+(sec)
+Number of processors
+OGDE
+diff-1
+diff-2
+
+Figure
+
+2: Worst-case total work transfer (left) and execution times (right) of various transfer
+vector algorithms for varying numbers of processors.
+tively. (diff-1 denotes the diffusion algorithm presented in [5], and diff-2 is the diffusion algorithm
+presented here.) In this case, the AGDE algorithm seems to be the best bet, transferring
+the same amount of work as the diffusion algorithms and doing so at least ten times faster. It is
+on such basis that the GDE algorithm has been considered superior to diffusion [24]. However,
+the more typical case in Figure 3 tells a somewhat different story. In this case we see that the
+diffusion algorithms transferred the least work. Specifically, the other algorithms transferred up
+to 127 percent more work in the case of the HB method, 80 percent more for the DHB technique,
+percent more for AGDE and 60 percent more for OGDE. As the number of processors grew,
+however, the speed advantage of the non-diffusive algorithms was much less apparent than in
+the point disturbance scenario. Given that the transfer of tasks can be quite costly in applications
+involving gigabytes of data, the small performance advantage (at most 14 milliseconds in
+this case) offered by the non-diffusive algorithms is of questionable value.
+A few other important points to note are these: Although the OGDE algorithm was somewhat
+faster that the AGDE algorithm, as its proponents in [24] have shown, it transferred around 20
+percent more work in the above test cases. Also, despite the speed of the HB algorithm, which
+was the primary consideration in [7], the algorithm transfers an extraordinary amount of work
+in order to achieve load balance, as was also illustrated in [22]. There thus appears to be little to
+recommend it, except perhaps in the case of tree or linear array networks.
+Total
+work
+transfer
+Number of processors
+OGDE
+diff-1
+diff-20.020.060.100.1450 100 150 200 250 300
+Time
+(sec)
+Number of processors
+OGDE
+diff-1
+diff-2
+
+Figure
+
+3: Average-case total work transfer (left) and execution times (right) of various transfer
+vector algorithms for varying numbers of processors.
+5.2 Task Movement Reduction and Locality Preservation
+If cost is not used to constrain task movement, a prodigious number of tasks will often be trans-
+ferred, and the transfer of those tasks will negatively impact communication locality. The following
+experiments demonstrate that, by providing an appropriate cost function for task move-
+ment, one can drastically reduce the impact of load balancing on an application.
+If task movement is deemed "free," a large number of tasks will often be transferred in order
+to achieve load balance. For example, in 100 trials of an artificial computation on 256 nodes of
+an Intel Paragon with 10 tasks per node and a mean efficiency of 70 percent, an average of 638
+tasks were transferred to achieve an efficiency of at least 90 percent. Certainly one would not
+expect that 25 percent of the tasks needed to be transferred for such an improvement. By setting
+the transfer cost of a task to be one instead of zero, the average number of tasks transferred was
+reduced to by a factor of four to 160. This is approximately six percent of the tasks in the system.
+Reducing the size of the tasks transferred may prove more important than reducing the number
+of tasks transferred. For example, it may be less expensive to transfer two very small tasks
+than a single, but much larger one. In an experiment the same as the above where the size of the
+tasks' data structures were uniformly distributed on the interval between 128 and 512 kilobytes,
+taking a task's transfer cost to be the size of its data structures reduced the average time to migrate
+all of the tasks from 8.4 to 3.8 seconds. Similar results were obtained in the simulation of a
+silicon wafer manufacturing reactor running on a network of 20 workstations. This application
+is briefly described in Section 6.2. In that case, using unit task transfer cost reduced the transfer
+time by 50 percent over zero cost, and using the tasks' sizes as the transfer cost reduced the
+transfer time by 61 percent.
+Another concern in the transfer of tasks is that such transfers not disrupt the communication
+locality of an application. If the communication costs of an application are significantly
+increased by relocating tasks far from the tasks with which they communicate, it may be better
+not to load balance. Under random load conditions, several locality-preserving cost metrics
+were compared. In the first case, a task's transfer cost was taken to be the change in the distance
+from the actual location of its data structures to its proposed new location. I.e., the transfer for
+task i was
+old (i))
+where dist is a function which gives the network distance between any two computers, and M old ,
+M cur and M new are the original task mapping, the current proposed task remapping and the new
+proposed task remapping, respectively. In short, the cost of a transfer is positive if it increases the
+distance between the proposed new location of a task and its old location, and the cost is negative
+if that distance decreases. This cost takes nothing into account regarding the location of a task's
+communicants. So, once a task has moved away from its neighbors, there is no encouragement
+for it to move back. Thus, one would expect this metric to retard locality degradation but not to
+prevent it.
+Another metric considered was that the cost be the change in a task's distance from its original
+location when the computation was first started.
+In this case, a task is encouraged to move back to where it began. If the locality was good to
+begin with, one would expect this metric to preserve that locality. One would not expect it to
+improve locality that was poor initially.
+The final cost metric used was based on the idea of a center of communication. In other
+words, for each task, the ideal computer at which to relocate it was determined by finding M center
+which minimized
+old (j))
+where V i;j is the cost of communication between tasks i and j. In a two-dimensional mesh,
+for example, one would calculate the weighted average of the row/column locations of a task's
+neighbors. The cost of moving a task is then the change in distance from its ideal location.
+center (i))
+Of course, a task's neighbors are moving at the same time, so the ideal location is changing somewhat
+during the selection process. In most cases, however, one would expect the ideal location
+of a task not to change greatly even if its neighbors move about somewhat. One would expect
+that this metric would improve poor locality as well as maintain existing locality.
+The three metrics described above were compared with the zero-cost metric in a synthetic
+computation similar to that described above. Once again, the computation was begun on a 16 by
+mesh of Paragon nodes with 10 tasks each. The tasks were connected in a three-dimensional
+grid, with each task having an average of two neighbors on the local computer and one neighbor
+on each of the four adjacent computers. Thus, the initial locality was high. After load balancing
+had brought the efficiency to 90 percent, the task loads were changed so that the efficiency
+was reduced to around 70 percent, and each task would calculate the average distance between
+itself and its neighbors. Figure 4 shows this average distance as a function of the number of
+load balancing steps. As one can see, locality decays rapidly if no attempt is made to maintain
+it. The first cost metric slows that decay but does not prevent it. The second and third metrics
+limit the increase in the average distance metric to factors of 2.1 and 2.6, respectively. A case is
+also presented in Figure 4 in which the locality was poor initially-tasks were assigned to random
+computers. The third metric was used to improve the locality, and ultimately reduced the
+average distance between communicating tasks by 79 percent. This is within 23 percent of the
+locality obtained when the problem was started with high locality. As these figures show, a cost
+metric can have a tremendous impact on the locality of an application. The metrics used were
+fairly simple; more complex metrics might yield even better results.
+6 Applications Experiments
+The load balancing algorithm presented in Section 4 was applied to two large-scale applications
+running under the Scalable Concurrent Programming Library, which was formerly called the
+2.06.010.00 200 400 600 800 1000
+Average
+distance
+Number of load balancing steps
+zero-cost
+dist-cur
+dist-orig
+Average
+distance
+Number of load balancing steps
+dist-center
+
+Figure
+
+4: Average distance between communicating tasks as a function of load balancing steps
+for various locality metrics (left) and the improvement of initially poor locality (right).
+Concurrent Graph Library [18]. This chapter gives a brief overview of that programming library
+as well as the applications, including their algorithms and the specific problems to which they
+were applied. It also provides performance numbers before and after load balancing, demonstrating
+the practical efficacy of the load balancing framework for one application and exposing
+an interesting problem in the second case.
+6.1 The Scalable Concurrent Programming Library
+The Scalable Concurrent Programming Library (SCPlib) provides basic programming technology
+to support irregular applications on scalable concurrent hardware. Under SCPlib, tasks communicate
+with one another over unidirectional channels. The mapping of tasks to computers is
+controlled by the library and is hidden from the user by these communication channels. Since the
+mapping of work to computers is not explicit, it is possible to dynamically change this mapping,
+so long as the user provides some mechanism for sending and receiving the context of a task
+(i.e., the task's state). SCPlib uses a general abstraction in which the user can reuse their existing
+checkpointing routines to read/write the data from/to a communication port (instead of a file
+port).
+
+Figure
+
+5 shows an example computational graph and its mapping to a set of computers,
+as well as a schematic representation of the software structure of an individual task.
+The above functionality is layered on top of system-specific message-passing, I/O, thread
+and synchronization routines. As a result of its small implementation interface, porting the li-
+Routines
+Routines
+Physics
+State
+USER
+Other
+Comm.
+
+Figure
+
+5: A computational graph of nine tasks (represented by shaded discs) mapped onto four
+The user portion is comprised of a task's state and routines that act upon it. The library portion
+is comprised of a communication list and auxiliary routines such as load balancing, granularity
+control and visualization functions.
+braries to a new architecture typically requires only a few days. In fact, the libraries have been
+used on a wide range of distributed-memory multicomputers, such as the Cray T3D and T3E, the
+Intel Paragon and the Avalon A12, shared-memory systems, such as the Silicon Graphics PowerChallenge
+and Origin 2000, and networked workstations and PC's, the latter running Windows
+NT.
+6.2 Plasma Reactor Simulations
+Direct Simulation Monte Carlo (DSMC) is a technique for the simulation of collisional plasmas
+and rarefied gases. The DSMC method solves the Boltzmann equation by simulating individual
+particles. Since it is impossible to simulate the actual number of particles in a realistic system, a
+small number of macroparticles are used, each representing a large number of real particles. The
+simulation of millions of these macroparticles is made practical by decoupling their interactions.
+First, the space through which the particles move is divided into a grid. Collisions are considered
+only for those particles within the same grid cell. Furthermore, collisions themselves are not
+detected by path intersections but rather are approximated by a stochastic model, for which the
+parameters are the relative velocities of the particles in question. Statistical methods are used to
+recover macroscopic quantities such as temperature and pressure. By limiting and simplifying
+dsmc compute(.)
+do
+move particles
+send away particles that exit current partition
+receive particles from neighboring partitions
+collide particles
+gather/scatter to obtain global statistics
+calculate termination condition based on global statistics
+while not converged
+
+Figure
+
+Concurrent DSMC Algorithm
+the interactions in this fashion, the order of the computation is drastically reduced.
+Hawk is a three-dimensional concurrent DSMC application which has been used to model
+neutral flow in plasma reactors used in VLSI manufacturing [14, 18]. The DSMC algorithm
+that executes at each partition of the problem is given in Figure 6. Each task in the concurrent
+graph represents a partition of physical space and executes this algorithm. The state of a task is
+the collection of grid cells and particles contained in a region. The physics routines incorporate
+associated collision, chemistry and surface models. The communication list is used to implement
+inter-partition transfers resulting from particle motion.
+The Gaseous Electronics Conference (GEC) reactor is a standard reactor design that is being
+studied extensively. In an early version of Hawk which used regular, hexahedral grids, a
+simulation of the GEC reactor was conducted on a 580,000-cell grid. Of these cells, 330,000
+cells represented regions of the reactor through which particles may move; the remaining "dead"
+(particle-less) cells comprise regions outside the reactor. Simulations of up to 2.8 million particles
+were conducted using this grid. As this description details, only 57 percent of the grid cells
+actually contained particles. Even for those cells that did contain particles, the density can varied
+by up to an order of magnitude. Consequently, one would expect that a standard spatial decomposition
+and mapping of the grid would result in a very inefficient computation. This was indeed
+the case. The GEC grid was divided into 2,560 partitions and mapped onto 256 processors of
+an Intel Paragon. Because of the wide variance in particle density for each partition, the overall
+efficiency of the computation was quite low, at approximately 11 percent. This efficiency was
+improved to 86 percent by load balancing, including the cost of load balancing. This resulted
+in an 87 percent reduction in the run time. Figure 7 shows the corresponding improvement in
+workload distribution.
+On a more recent version of the Hawk code, which uses irregular, tetrahedral grids, a simulation
+was conducted on a 124,000-cell grid of the GEC reactor. This problem was run on 128 processors
+of an Intel Paragon. Each processor had approximately five partitions mapped to it. Although
+the load changed rapidly during the early timesteps, as the number of particles increased
+from zero to 1.2 million, load balancing was able to maintain an efficiency of 82 percent, reducing
+the runtime by a factor of 2.6. Load balancing for this problem required, on average, 12
+seconds per attempt.
+Hawk has also been used in the simulation of proprietary reactor designs at the Intel Cor-
+poration. These simulations were conducted on networks of between 10 and 25 IBM RS6000
+workstations. Without load balancing, the efficiency of these computations was typically between
+percent. Load balancing was able to maintain an efficiency of over 80 percent,
+increasing throughput by as much a factor of two.
+Many of the load balancing techniques described in this paper have also been incorporated
+into another DSMC code, developed by researchers at the Russian Institute of Theoretical and
+Applied Mechanics [8]. In this case, however, the work transfer vectors were not satisfied by
+transferring entire partitions fromone computer to another, but rather by exchanging small groups
+of cells along the partition interfaces between adjacent computers. A feature of this approach is
+that locality is naturally maintained since all one is doing, in effect, is adjusting partition bound-
+aries. For a problem of space capsule reentry running on up to 256 processors of an Intel Paragon,
+percent of linear speedup was obtained with dynamic load balancing, versus 55 percent of
+ideal speedup for a random static mapping, and 10 percent of ideal speedup with no load bal-
+ancing. It is interesting to note that the random static mapping actually achieved fairly good
+load balance, but that the communication between the widely distributed cells was very costly,
+reducing scalability.
+6.3 Ion Thruster Simulations
+Particle-in-Cell (PIC) is a computational technique used for simulating highly rarefied particle
+flows in the presence of an electromagnetic field. The fundamental feature of PIC is the order-
+0Number
+of
+processors
+Percent utilization
+before
+after
+
+Figure
+
+7: Utilization distributions for 100 time steps of the DSMC code before and after load
+balancing.
+reducing method of calculating the interaction between particles and the field. A grid is super-imposed
+on the computational domain. The electromagnetic effect of each particle with respect
+to the vertices of the grid cell containing it is calculated. Then, the governing field equations are
+solved over grid points, typically using an iterative solver. Once the field solver has converged,
+the effects of the new field are propagated back to the particles by adjusting their trajectories ac-
+cordingly. This reciprocal interaction is calculated repeatedly throughout the computation until
+some termination criteria (such as particle concentration) is reached.
+The Scalable Concurrent Programming Laboratory, in collaboration with the Space Power
+and Propulsion Laboratory of the MIT Department of Aeronautics and Astronautics, developed
+a 3-D concurrent simulation capability called PlumePIC [15]. The PIC algorithm for a partition
+of the problem is presented in Figure 8. The state associated with a task is comprised of a portion
+of the grid and the particles contained within the corresponding physical space. The communication
+list associated with each task of the graph describes possible destinations for particles
+that move outside a partition and data dependencies required to implement the field solver. The
+physics routines used in Figure 8 describe the dynamics of particle movement and the solution
+of the field.
+The phenomenon of ion thruster backflow was studied in a simulation of the ESEX/Argos
+satellite configuration using parameters for a Hughes thruster. The grid used contained 9.4 million
+axially aligned hexahedra and was partitioned into 1,575 blocks, which were mapped onto
+pic compute(.)
+while time not exhausted do
+move particles
+send away particles that exit current partition
+receive particles from neighboring partitions
+update charge density based on new particle positions
+gather/scatter to obtain global norm
+calculate termination condition based on global norm
+while global norm ! termination condition do
+send boundary potentials to neighbors
+receive boundary potentials from neighbors
+compute single iteration of the field solver
+gather/scatter to obtain new global norm
+while
+while
+pic compute
+
+Figure
+
+8: Concurrent PIC Algorithm
+256-processor Cray T3D. During the course of the simulation, up to 34 million particles were
+moving through the domain. The distribution of those particles was highly irregular. Moreover,
+this distribution changed dramatically over time. As a result, any static mapping of grid partitions
+to computers would result in large inefficiencies at some point in the computation. This
+fact is illustrated in Figure 9, which shows that each computer spends a large percentage of its
+time idle. Even after load balancing, the idle time for each computer, while often better, was still
+very high. Certainly, the load balancing algorithm did not improve the work distribution to the
+same extent that it did with the DSMC code. Closer examination reveals that this shortcoming
+was due to the two-phase nature of the PIC code. The DSMC application is a single-phase com-
+putation, so load balancing it was fairly straight-forward. The PIC code has two phases, particle
+transport and field solution, each with very different load distribution characteristics. As a result,
+balancing the total load of these two phases on any given computer did not balance the individual
+phases of the computation. This fact is graphically illustrated in Figure 10. As one can see,
+while the load distribution for the total load at each computer was improved dramatically (at least
+in the sense that the variance is greatly reduced), the load distributions for the two component
+phases remained very poor. Consequently, the overall efficiency was low. To see this effect on
+a smaller scale, consider the case of two computers as shown in Figure 11: One has 50 units of
+number
+Time
+(sec)
+idle
+communication
+particle push
+field solve
+
+Figure
+
+9: Run time breakdowns for 100 time steps of the PIC code, starting at several different
+time steps. Each pair of adjacent bars show the average time components for each computer before
+and after load balancing, respectively. (The decrease in field solve time in the last time step
+is due to the fact that the field is reaching a steady state, and hence the iterative solver converges
+more quickly.)50150250
+Number
+of
+processors
+Percent utilization
+total
+field solve
+particle push50150250
+Number
+of
+processors
+Percent utilization
+total
+field solve
+particle push
+
+Figure
+
+10: Pre-load balancing (left) and post-load balancing (right) utilization distributions for
+computers based on total work, field solver work and particle push work.
+phase one work and 100 units of phase two work. The other computer has 100 phase one and
+50 phase two units. Obviously, both computers have the same total amount of work. However,
+because there is synchronization between the completion of phase one by both computers before
+phase two can begin, the computation is inefficient: The first computer must wait for the second
+before both can start phase two, and the second computer must wait for the first before the computation
+can complete. The above examples both suggest that what one needs is a load balancing
+strategy that jointly balances each phase of the computation. It is impractical alternate between
+two distributions, for example, because the phases may be finely interleaved, making the cost
+of frequent redistribution of work prohibitive. One way of doing this is to consider load to be
+a vector, instead of a scalar, where each vector component is the load of a phase of the compu-
+tation. If each component is balanced separately, then the problems encountered above would
+be circumvented: Each computer would have a roughly equal amount of work for each phase
+(implying that the total amount of work is also equal). Hence, little or no idle time would occur
+at synchronization points between phases. Notice that the characteristics of the PIC code also
+imply that, in general, one must assign multiple partitions to each computer. Some regions of
+the grid will have a high particle-to-cell ratio. A partition in such a region must be paired with
+a partition with a low particle-to-cell ratio to achieve effective load balancing of both phases.
+A similar situation is illustrated in Figure 12, which shows how a simple domain cannot be divided
+into two contiguous pieces that balance the loads of the two computers to which they are
+mapped.
+7 Related Work
+Presented here is a summary of work related to the methodology and techniques used in this
+paper.
+Gradient load balancing methods have been explored extensively in the literature [10, 11,
+22]. As pointed out in [11, 22], the basic gradient model may result in over- or undertransfers of
+work to lightly loaded processors. The authors of [11] present a workaround in which computers
+check that an underloaded processor is still underloaded before committing to the transfer, which
+is then conducted directly from the overloaded to underloaded processor. While the method does
+have the scalability of diffusive and GDE strategies, it has been shown to be inferior in its per-
+Computer 1 Computer 2
+Phase 2
+Phase 2
+Phase 1
+Computer 1 Computer 2
+Phase 1
+Add synchronization
+
+Figure
+
+11: Demonstration of low efficiency in a "balanced" system. In the above example, both
+computers have the same total amount of work (i.e., they are load balanced in some sense). How-
+ever, because of synchronization interposed between the unbalanced phases, idle time is introduced
+
+formance [22].
+Recursive bisection methods operate by partitioning the problem domain to achieve load balance
+and to reduce communication costs. Most presentations of these techniques appear in the
+context of static load balancing [1, 23], although formulations appropriate for dynamic domain
+repartitioning do exist [19, 20]. While many methods exist for repartitioning a computation,
+including various geometrically based techniques, the most interesting methods utilize the spectral
+properties of a matrix encapsulating the adjacency in the computation. Unfortunately, these
+methods have a fairly high computational cost. They also blur the distinct phases of load balancing
+presented in Section 1. The combination of these limitations makes such techniques unsuitable
+for use in a general purpose load balancing framework.
+Heuristics for load balancing particle simulations (relevant here because of the two applications
+targeted in Section are presented in [4, 9]. It is interesting to note that the authors of
+[4] observed the same phenomenon in applying their method to a PIC application as was seen in
+Section 6.3. Namely, their methods only worked well when the particle push phase substantially
+dominated over the field solve phase. This is due to the fact that any imbalance in the field phase
+was completely neglected by their inherently scalar approach. The authors suggested no remedy
+for the situation, however.
+Other task-based approaches to load balancing include a scalable task pool [6], a heuristic for
+Phase 2
+Imbalanced
+Balanced
+Phase 1
+Computer 1 Computer 2
+Phase 2
+Phase 1
+
+Figure
+
+12: The above bars represent a one-dimensional space in which phase one dominates at
+one end and phase two dominates at the other. This domain cannot be divided evenly between
+two computers by a single cut. A cut down the middle would balance the total load, but neither
+of the component phases would be balanced. A cut anywhere else might either balance the first
+or second phase but not both. The only way to achieve a balance is to assign multiple partitions
+to each computer.
+transferring tasks between computers based on probability vectors [3] and a scalable, iterative
+bidding model [17]. All of these techniques make assumptions, such as that of complete task
+independence or task load uniformity, that are not applicable in the context of our work.
+8 Conclusion and Future Work
+This paper describes a practical, comprehensive approach to load balancing that has been applied
+to non-trivial applications. Incorporated into the approach are a new diffusion algorithm, which
+offers a good trade-off between total work transfer and run time, and a task selection mechanism,
+which allows task size and communication costs to guide task movement. More work remains
+to be done, however. The following three areas of improvement could dramatically increase the
+effectiveness and utility of the strategy presented here:
+Consider load as a vector rather than a scalar quantity. The experiments with the PIC
+code in Section 6 clearly demonstrate the limitations of the scalar view of load. While
+the load balancing algorithm clearly achieved a good balance for the total load on each
+computer, it failed to balance the components of the load. As a result, the overall efficiency
+was low. Only by jointly balancing the phases comprising a computation can one hope
+to achieve good overall load balance; viewing load as a vector is one way to accomplish
+this [21].
+load balancing to the heterogeneous case. For the case of computers with heterogeneous
+processing capacity, the relative capabilities of the computers must be taken
+into account in work movement decisions. For the load diffusion algorithm, the situation is
+analogous to heat diffusion in heterogeneous media. Task selection must also be modified
+to account for the change in a task's runtime as it migrates from one computer to another.
+Use dynamic granularity control. Task-based load balancing strategies fail whenever
+the load of a single task exceeds the average load over all computers. No matter where
+such a task is moved, the computer to which it is mapped will be overloaded. By dividing
+that task into smaller subtasks, one can alleviate this problem by providing viable work
+movement options. In general, task division and conglomeration can be used to dynamically
+manage the granularity of a computation so as to maintain the best number of tasks-
+increasing or decreasing the available options as necessary.
+By incorporating the above changes, a load balancing framework could be applied in a greater
+variety of situations. In the meantime, the methods described here are useful for fine- and medium-
+grain, single-phase applications running on homogeneous computing resources.
+
+Acknowledgements
+
+Access to an Intel Paragon was provided by the California Institute of Technology Center for
+Advanced Computing Research. Access to a Cray T3D was provided by the National Aeronat-
+ics and Space Administration Jet Propulsion Laboratory and was facilitated by the California
+Institute of Technology.
+
+
+
+--R
+
+"A fast multilevel implementation of recursive spectral bisection for partitioning unstructured problems,"
+"Dynamic load balancing for distributed memory multiprocessors,"
+"Dynamic load balancing using task-transfer probabilities,"
+"Dynamic load balancing for a 2D concurrent plasma PIC code,"
+"A parabolic load balancing algorithm,"
+"A distributed implementation of a task pool,"
+"A multi-level diffusion method for dynamic load balancing,"
+"Parallel DSMC Strategies for 3D Com- putations,"
+"Dynamic load balancing for parallelized particle simulations on MIMD com- puters,"
+"The gradient model load balancing method,"
+"Parallel load-balancing: an extension to the gradient model,"
+Computational Complexity.
+Numerical Recipes in C.
+"Concurrent Simulation of Plasma Reac- tors,"
+"Three-dimensional plasma paricle-in-cell calculations of ion thruster backflow contamination,"
+MPI: The Complete Ref- erence
+"A partially asynchronous and iterative algorithm for distributed load balancing,"
+"The concurrent
+"An improved spectral bisection algorithm and its application to dynamic load balancing,"
+"Dynamic load-balancing for PDE solvers on adaptive unstructured meshes,"
+"A Load Balancing Technique for Multiphase Computa- tions,"
+"Strategies for dynamic load balancing on highly parallel computers,"
+"Performance of dynamic load balancing algorithms for unstructured mesh calculations."
+Load Balancing in Parallel Computers.
+--TR
+
+--CTR
+J. Ray, Optimization of distributed, object-oriented systems, Addendum to the 2000 proceedings of the conference on Object-oriented programming, systems, languages, and applications (Addendum), p.153-154, January 2000, Minneapolis, Minnesota, United States
+Javier Roca , J. Carlos Ortega , J. Antonio lvarez , Julia Mateo, Data neighboring in local load balancing operations, Proceedings of the 9th WSEAS International Conference on Computers, p.1-6, July 14-16, 2005, Athens, Greece
+K. Hering , J. Lser , J. Markwardt, dibSIM: a parallel functional logic simulator allowing dynamic load balancing, Proceedings of the conference on Design, automation and test in Europe, p.472-478, March 2001, Munich, Germany
+Bin Fu , Zahir Tari, A dynamic load distribution strategy for systems under high task variation and heavy traffic, Proceedings of the ACM symposium on Applied computing, March 09-12, 2003, Melbourne, Florida
+A. Corts , A. Ripoll , F. Ced , M. A. Senar , E. Luque, An asynchronous and iterative load balancing algorithm for discrete load model, Journal of Parallel and Distributed Computing, v.62 n.12, p.1729-1746, December 2002
+Marco Conti , Enrico Gregori , Fabio Panzieri, QoS-based Architectures for Geographically Replicated Web Servers, Cluster Computing, v.4 n.2, p.109-120, April 2001
+K. Antonis , J. Garofalakis , I. Mourtos , P. Spirakis, A hierarchical adaptive distributed algorithm for load balancing, Journal of Parallel and Distributed Computing, v.64 n.1, p.151-162, January 2004
+G. George Yin , Cheng-Zhong Xu , Le Yi Wang, Optimal Remapping in Dynamic Bulk Synchronous Computations via a Stochastic Control Approach, IEEE Transactions on Parallel and Distributed Systems, v.14 n.1, p.51-62, January
+Fong , Cheng-Zhong Xu , Le Yi Wang, Optimal periodic remapping of dynamic bulk synchronous computations, Journal of Parallel and Distributed Computing, v.63 n.11, p.1036-1049, November
+Hans-Heinrich Ngeli, Dynamic load balancing by diffusion in heterogeneous systems, Journal of Parallel and Distributed Computing, v.64 n.4, p.481-497, April 2004
+Lap-sun Cheung , Yu-kwok Kwok, On Load Balancing Approaches for Distributed Object Computing Systems, The Journal of Supercomputing, v.27 n.2, p.149-175, February 2004
+Alexander E. Kostin , Isik Aybay , Gurcu Oz, A Randomized Contention-Based Load-Balancing Protocol for a Distributed Multiserver Queuing System, IEEE Transactions on Parallel and Distributed Systems, v.11 n.12, p.1252-1273, December 2000
+Yu-Kwong Kwok , Lap-Sun Cheung, A new fuzzy-decision based load balancing system for distributed object computing, Journal of Parallel and Distributed Computing, v.64 n.2, p.238-253, February 2004
+Saeed Iqbal , Graham F. Carey, Performance analysis of dynamic load balancing algorithms with variable number of processors, Journal of Parallel and Distributed Computing, v.65 n.8, p.934-948, August 2005
+Arnaud Legrand , Hlne Renard , Yves Robert , Frdric Vivien, Mapping and Load-Balancing Iterative Computations, IEEE Transactions on Parallel and Distributed Systems, v.15 n.6, p.546-558, June 2004
+Changxun Wu , Randal Burns, Handling Heterogeneity in Shared-Disk File Systems, Proceedings of the ACM/IEEE conference on Supercomputing, p.7, November 15-21,
+Faouzi Kamoun, Toward best maintenance practices in communications network management, International Journal of Network Management, v.15 n.5, p.321-334, September 2005
+Kirk Schloegel , George Karypis , Vipin Kumar, Wavefront Diffusion and LMSR: Algorithms for Dynamic Repartitioning of Adaptive Meshes, IEEE Transactions on Parallel and Distributed Systems, v.12 n.5, p.451-466, May 2001
+Changxun Wu , Randal Burns, Tunable randomization for load management in shared-disk clusters, ACM Transactions on Storage (TOS), v.1 n.1, p.108-131, February 2005
+Jack Dongarra , Ian Foster , Geoffrey Fox , William Gropp , Ken Kennedy , Linda Torczon , Andy White, References, Sourcebook of parallel computing, Morgan Kaufmann Publishers Inc., San Francisco, CA,

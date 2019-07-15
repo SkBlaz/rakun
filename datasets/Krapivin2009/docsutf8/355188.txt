@@ -1,0 +1,679 @@
+--T
+Interpreting Stale Load Information.
+--A
+AbstractIn this paper, we examine the problem of balancing load in a large-scale distributed system when information about server loads may be stale. It is well-known that sending each request to the machine with the apparent lowest load can behave badly in such systems, yet this technique is common in practice. Other systems use round-robin or random selection algorithms that entirely ignore load information or that only use a small subset of the load information. Rather than risk extremely bad performance on one hand or ignore the chance to use load information to improve performance on the other, we develop strategies that interpret load information based on its age. Through simulation, we examine several simple algorithms that use such load interpretation strategies under a range of workloads. Our experiments suggest that by properly interpreting load information, systems can: 1) match the performance of the most aggressive algorithms when load information is fresh relative to the job arrival rate, 2) outperform the best of the other algorithms we examine by as much as percent when information is moderately old, significantly outperform random load distribution when information is older still, and 4) avoid pathological behavior even when information is extremely old.
+--B
+Introduction
+When balancing load in a distributed system, it is well known that the strategy of sending
+each request to the least-loaded machine can behave badly if load information is old [11,
+18, 21]. In such systems a "herd effect" often develops, and machines that appear to be
+underutilized quickly become overloaded because everyone sends their requests to those
+machines until new load information is propagated. To combat this problem, some systems
+This work was supported in part by an NSF CISE grant (CDA-9624082) and grants Novell and Sun.
+Dahlin was also supported by an NSF CAREER grant (9733842).
+adopt randomized strategies that ignore load information or that only use a small subset of
+load information, but these systems may give up the opportunity to avoid heavily loaded
+machines.
+Load balancing with stale information is becoming an increasingly important problem for
+distributed operating systems. Many recent experimental operating systems have included
+process migration facilities [2, 6, 9, 16, 17, 23, 24, 25, 26, 30] and it is now common for workstation
+clusters to include production load sharing programs such as LSF [31] or DQS [10].
+In addition, many network DNS servers, routers, and switches include the ability to multiplex
+incoming requests among equivalent servers [1, 5, 8], and several run-time systems
+for distributed parallel computing on clusters or metacomputers include modules to balance
+requests among nodes [12, 14]. Server load may also be combined with locality information
+for wide area network (WAN) information systems such as selecting an HTTP server or
+cache [13, 22, 28]. As such systems include larger numbers of nodes or the distance between
+nodes increases, it becomes more expensive to distribute up-to-date load information. Thus,
+it is important for such systems to make the best use of old information.
+This paper attempts to systematically develop algorithms for using old information. The
+core idea is to use not only each server's last reported load information (L i ), but also to use
+the age of that information (T ) and an estimate of the rate at which new jobs arrive to change
+that information (-). For example, under a periodic update model of load information [21]
+that updates server load information every T seconds, clients using our algorithm calculate
+the fraction of requests they should send to each server in order to equalize the load across
+servers by the end of the epoch. Then, for each new request during an epoch, clients randomly
+choose a server according to these probabilities.
+In this paper, we devise load interpretation (LI) algorithms by analyzing the relevant queuing
+systems. We then evaluate these algorithms via simulation under a range of load information
+models and workloads. For our LI algorithms, if load information is fresh (e.g., T or - or both
+are small), then the algorithms tend to send requests to machines that recently reported low
+load, and the algorithms match the performance of aggressive algorithms while exceeding
+the performance of algorithms that use random subsets of load information or pure random
+algorithms that use no load information at all. Conversely, if load information is stale,
+the LI algorithms tend to distribute jobs uniformly across servers and thus perform as well
+as randomized algorithms and dramatically better than algorithms that naively use load
+information. Finally, for load information of modest age, the LI algorithms outperform
+current alternatives by as much 60%.
+Other algorithms that attempt to cope with stale load information, such as those proposed
+by Mitzenmacher [21], have the added benefit that by restricting the amount of load information
+that clients may consider when dispatching jobs, they may reduce the amount of
+load information that must be sent across the network. We examine variations of the LI
+algorithms that base their decisions on similarly reduced information. We conclude that
+even with severely restricted information, the algorithms that use LI can outperform those
+that do not. Furthermore, modest amounts of load information allow the LI algorithms to
+achieve nearly their full performance. Thus, LI decouples the question of how much load
+information should be used from the question of how to interpret that information.
+The primary disadvantage of our approach is that it requires clients to estimate or be told
+the job arrival rate (-) and the age of load information (T ). If this information is not avail-
+able, or if clients misestimate these values, our algorithms can have poor performance. We
+note, however, that although other algorithms that make use of stale load information do
+not explicitly track these factors, those algorithm do implicitly assume that these parameters
+fall within the range of values for which load information can be considered "fresh;" if
+the parameters fall outside of this range, those algorithms can perform quite badly. Con-
+versely, because our algorithms explicitly include these parameters, they gracefully degrade
+as information becomes relatively more stale.
+The rest of this paper proceeds as follows. Section 2 describes related work with a particular
+emphasis on Mitzenmacher's recent study [21], on which we base much of our methodology
+and several of our system models. Section 3 introduces our models of old information
+and Section 4 describes the load interpretation algorithms we use. Section 5 contains our
+experimental evaluation of the algorithms, and Section 6 summarizes our conclusions.
+Related work
+Awerbuch et. al [3] examined load balancing with very limited information. However, their
+model differs considerably from ours. In particular, they focus on the task of selecting a
+good server for a job when other jobs are placed by an adversary. In our model, jobs are
+placed by entities that act in their own best interest but that do not seek to interfere with
+one another. This difference allows us to more aggressively use past information to predict
+the future.
+A number of theoretical studies [4, 7, 15, 20, 27] have suggested that load balancing algorithms
+can often be quite effective even if the amount of information examined is severely
+restricted. We explore how to combine this idea with LI in Section 5.6.
+Several studies have examined the behavior of load balancing with old or limited information
+in queuing studies. Eager et. al [11] found that simple strategies using limited information
+worked well. Mirchandaney et. al [18, 19] found that as delay increases, random assignment
+performs as well as strategies that use load information.
+Several system have used the heuristic of weighing recent information more heavily than
+old information. For example, the Smart Clients prototype [29] distributed network requests
+across a group of servers using such a heuristic. Additionally, a common technique in process
+migration facilities is to use an exponentially decaying average for to estimate load on a
+machine (e.g., Load new = Load old   k current   1). Unfortunately,
+the algorithms used by these systems are somewhat ad hoc and it is not clear under what
+circumstances to use these algorithms or how to set their constants. A goal of our study is
+to construct a systematic framework for using old load information.
+Our study most closely resembles Mitzenmacher's work [21]. Mitzenmacher examined a
+system in which arriving jobs are sent to one of several servers based on stale information
+about the servers' loads. The goal in such a system is to minimize average response time.
+He examined a family of algorithms that make each server choice from small random subsets
+of the servers to avoid the "herd effect" that can cause systems to exhibit poor behavior
+when clients chase the apparently least loaded server. Under Mitzenmacher's algorithm, if
+there are n servers, instead of sending a request to the least loaded of the n servers, a client
+randomly selects a subset of size k of the servers, and sends its request to the least loaded
+server from that subset. Note that when this algorithm is equivalent to uniform
+random selection without load information and that when it is equivalent to sending
+each request to the apparently least loaded server. In addition to the formulating these
+k-subset algorithms as a solution to this problem, Mitzenmacher uses a fluid limit approach
+to develop analytic models for these systems for the case when (n ! 1); however, the
+primary results in the study come from simulating the queuing systems, and we follow a
+similar simulation methodology here.
+Mitzenmacher concludes that the version of the algorithm is a good choice in most
+situations. He finds that it seldom performs significantly worse and generally performs
+significantly better than the more aggressive algorithms (e.g., or even the modestly
+aggressive outperforms the uniform random
+algorithm for a wide range of update frequencies.
+We believe, however, that this approach still has drawbacks. In particular, we note that as
+-the update frequency of load information-changes, the optimal value of k also changes.
+For example, under Mitzenmacher's periodic update model and one sample workload he
+examines, quickly
+becomes much better than larger values of T . Similarly, although
+outperforms for such a workload, the reverse is true for larger values of
+T . For example, when algorithm is a factor of 2 better than the
+variation.
+We also note that under Mitzenmacher's algorithms, the resulting arrival rate at a server
+depends only on the server's rank in the sorted list of server loads, not on the magnitude of
+difference in the queue lengths between servers. Furthermore, the least loaded servers
+receive no requests at all during a phase. More generally, if servers are ordered by load, with
+lowest load and s n\Gamma1 the highest, a given request will be sent to server s i if and
+only if (1) servers s 0 through s i\Gamma1 are not chosen as part of the random subset of k servers
+and (2) server s i is chosen as part of that subset. Because the probability that any server s j
+is chosen as part of the k-server subset is k
+, the probability that conditions (1) and (2) hold
+Fraction
+of
+Requests
+Server Rank
+
+Figure
+
+1: Distribution of requests to servers under the k-subset algorithm.
+(The numerator is the number of ways to choose place them in the
+slots from slot the denominator is the number of ways to choose
+k elements from n elements assuming that element s i is always chosen.)
+
+Figure
+
+1 illustrates the resulting distributions for a range of k's. These distributions have
+something of right flavor-more heavily loaded nodes get fewer requests than more lightly
+loaded nodes. However, it is not obvious that the slope of any one of the lines is, in general,
+right. The figure also illustrates why large values of k are inappropriate when T is large: a
+large fraction of requests are concentrated on a small number of servers for a long period of
+time.
+3 Models of old information
+There are several reasonable ways to model a delay from when load information is sampled to
+when a decision is made to when the job under consideration arrives at its server. Different
+models will be appropriate for different practical systems, and Mitzenmacher found significant
+differences in system behavior among models [21]. We therefore examine performance
+under three models so that we can understand our results under a wide range of situations
+and so that we can compare our results to directly to those in the literature. We take the
+first two models, periodic update and continuous update, from Mitzenmacher's study. 1 Our
+third model, update-on-access, abstracts some additional systems of practical interest. We
+describe these models in more detail below.
+3.1 Periodic and continuous update
+Mitzenmacher's periodic update and continuous update models can be visualized as variations
+of a bulletin board model. Under the periodic update model, we imagine that every T
+seconds a bulletin board that is visible to all arriving jobs is updated to reflect the current
+load of all servers. The period between bulletin board updates is termed a phase. Load
+information will thus be accurate at the beginning of a phase and may grow increasingly
+inaccurate as the phase progresses.
+Under the continuous update model, the bulletin board is constantly updated with load
+information, but on average the board state is T seconds behind the true system state. Each
+request thus bases its decisions on the state of the system on average T seconds earlier.
+Mitzenmacher finds that the probability distribution of T had a significant impact on the
+effectiveness of different algorithms. For a given average delay T , distributions with high
+variance in which some requests see newer information and others see older information
+outperform distributions with less variance where all jobs see data that are about T seconds
+old.
+Note that the real systems abstracted by these models would typically not include a centralized
+bulletin board. The periodic model could represent, for instance, a system that
+periodically gathers load information from all servers and then multicasts it to clients. The
+continuous update model could represent a system where an arriving job probes the servers
+for load information and then chooses a server but where there is a delay T due to network
+latency and transfer time from when the servers send their load information to when the
+client's job arrives at its destination server.
+3.2 Update-on-access
+The final model we examine was not examined by Mitzenmacher. In our update-on-access
+model, we explicitly model separate clients sending requests to the servers, and different
+clients may have different views of the system load. In particular, when a client sends a
+request to a server, we assume that the server replies with a message that contains the
+system's current load and that snapshot of system load may be used by the client's next
+request. In such a system, the average load update delay, T , is equal to a client's inter-request
+time. Thus, the update-on-access model assumes that jobs sent by active clients will
+have a fresher picture of load than jobs sent by inactive clients.
+Mitzenmacher found a third model, individual updates to have similar behavior to the periodic update
+model, so we omit analysis of this model for compactness.
+We consider this model because it may be applicable for problems such as the server selection
+problem on the Internet [13, 22] where it may be prohibitively expensive to maintain load
+information at clients that are not actively using a service, but where it may be possible
+for clients to maintain good pictures of server load while they are actively using a service.
+Furthermore, we hypothesize that if a system exhibits bursty access patterns, it may be able
+to perform good load balancing even though average node's load information is, on average,
+quite stale.
+A disadvantage to using the update-on-access model is that it is more complex than the
+previous models. For example, under this model, results depend not only on the aggregate
+request rate but also on the number of clients generating a given number of requests. If
+there are many clients generating a certain number of requests, their load information will
+be on average older than if there is one client generating the same number of requests.
+4 Algorithms for interpreting old information
+In this section we describe our algorithms for load balancing, which work by interpreting load
+information in the context of its age. We first describe the basic algorithm under the periodic
+update model and then describe a more aggressive algorithm under the same model. Finally,
+we describe minor variations of the algorithms to adapt them for the continuous update and
+update-on-access models.
+In general, our algorithms for interpreting load information follow two principles that distinguish
+them from previous algorithms. First, we consider the magnitude of imbalance between
+nodes, not just the nodes' ranks. Second, we modify our interpretation of information based
+on its age and the arrival rate of requests in the system to account for expected changes to
+system state over time.
+In the descriptions below, we use the following notation:
+Average age of the load information
+(The specific meaning of T depends on the update model.)
+n Number of servers
+- Average per-server arrival rate
+Reported load (queue length) on server i
+arrive T The number of requests expected to arrive during a phase
+The probability that an arriving request will be sent to server i
+4.1 Algorithms for periodic update model
+The during a phase of length T , arrive arrive in the system. The
+goal of the Basic Load Interpretation (Basic LI) algorithm is to determine what fraction of
+those requests should be sent to each server in order to balance load (represented as server
+queue length) so that the sum of the jobs at the servers at the start of the phase plus the
+jobs that arrive during the phase are equal across all servers. 2 So, if we begin with L tot jobs
+at the servers and L i jobs at server i, the probability P i that we should send an arriving job
+to server i is
+arrive T
+if 8i( L tot +arrive T
+see below otherwise
+(1)
+The first term in the numerator is the number of jobs that should end up at each server to
+evenly divide the incoming jobs plus the current jobs. The second term in the numerator is
+the jobs already at server i. So the numerator is the number of jobs that should be sent to
+server i during this phase. The denominator is the total number of jobs that are expected
+to arrive during the phase. Thus the Basic LI algorithm is to send each arriving request to
+server i with probability P i as calculated above for the current phase.
+Note that if L tot +arrive T
+i, then the phase is too short to completely equalize
+the load. In that case, we want to place the arrive T requests in the least loaded buckets
+to even things out as well as we can. We use the following simple procedure in that case:
+at the start of the phase, pretend to place arrive T requests greedily and sequentially in the
+least loaded buckets and keep track of the number of requests placed in each bucket (tmp i ).
+During the phase, send each arriving request to server i with probability
+arrive T
+4.1.1 More aggressive algorithm
+The above algorithm seems sub-optimal in the following sense: it tries to equalize the load
+across servers by the end of a phase. Thus, if the phase is long, the system may spend a long
+time with significantly unbalanced server load. A more aggressive algorithm might attempt
+to subdivide the phase and use the first part of the phase to bring all machines to an even
+state and then distribute requests uniformly across servers for the rest of the phase.
+Our aggressive algorithm works as follows: without loss of generality assume that the servers
+have been sorted by L i (with so that machine i is the ith least loaded server
+and set L sentinal value. Then, subdivide the phase into n intervals. During
+evenly distribute arrivals across machines to bring their
+2 Notice that we make the simplifying assumption that the departure rate is the same at all servers so
+that we can ignore the effect of departing jobs on the relative server queue lengths. This assumption will
+be correct if all servers are always busy, but it will be incorrect if some servers are idle at any time during
+the phase. This assumption can be justified because we are primarily concerned that our algorithms work
+well when the system is heavily loaded, and in that case, queues will seldom be empty. The impact of
+this simplification is that for lightly-loaded systems, we will overestimate the queue length at lightly-loaded
+machines and send too few requests to them. In such a case, our probability distribution will be somewhat
+more uniform across servers than would be ideal, and our algorithms will not be as aggressive as they could
+be. Our experiments suggest that this simplification has little performance impact.
+loads up to L j+1 . Thus, subinterval j is of length
+-n
+, and during subinterval j,
+the probability that an arriving request should be sent to machine i, is:
+(2)
+4.2 Algorithms for other update models
+Adapting the Basic LI algorithm to the continuous update or update-on-access model is
+simple. We use Equation 1 to calculate the probabilities P i for sending incoming requests
+to each server. The only difference is that for the periodic update model this calculation is
+based on the L i estimates that hold during the entire phase, but under the new models the
+may change with each request. P i can now be thought of as a current estimate
+of the instantaneous rate at which requests should be sent to each server.
+Adapting the Aggressive LI algorithm is more problematic. We use Equation 2 to calculate
+the values based on the current L i array. However, under the continuous update model,
+we are effectively always "at the end of a phase" in that the information is T seconds old.
+And, although the aggressive algorithm is more aggressive than the basic algorithm during
+the early subintervals of a phase (e.g., j near 0), it is less aggressive during later subintervals
+(e.g., j near n). Thus, the "aggressive" algorithm may actually be less aggressive than the
+basic algorithm under these update models when T is large.
+5 Evaluation
+In this section we evaluate the algorithms under a range of update models and workloads.
+Our primary methodology is to simulate the queuing systems. We model task arrivals as
+a Poisson stream of rate -n for a collection of n servers. When a task arrives, we send it
+to one of the server queues based on the algorithm under study. Server queues follow a
+first-in-first-out discipline. We select default system parameters to match those used
+in Mitzenmacher's study [21] to facilitate direct comparison of the algorithms. In particular,
+unless otherwise noted, and we assume that each server has a service
+rate of 1 and the service time for each task is exponentially distributed with a mean time of
+1.
+We initially examine the Basic LI and Aggressive LI algorithms under the periodic update,
+continuous update, and update-on-access models and compare their performance to the k-subset
+algorithms examined by Mitzenmacher. We then explore three key questions for the
+LI algorithms: (1) What is the impact of bursty arrival patterns? (2) What is the impact
+of misestimating the system arrival rate? (3) What is the impact of limiting the amount of
+load information available to the algorithms?
+Basic LI
+Aggressive LI
+
+Figure
+
+2: Service time v. update delay for periodic update model
+5.1 Periodic update model
+
+Figure
+
+shows system performance under the periodic update model for the default param-
+eters. The performance of the LI algorithms is good over a wide range of update intervals.
+When T is large, the LI algorithms do not suffer the poor performance that the k-subset algorithms
+encounter for any k ? 1. In fact, the LI algorithms maintain a measurable advantage
+over the oblivious random algorithm even for large values of T . For example, when
+outperforms the oblivious algorithm by 9% and Aggressive LI outperforms
+the oblivious algorithm by 22%. For more modest values of T , the advantages are larger.
+For example, at Aggressive LI is 60% faster than any of the k-subset algorithms and
+Basic LI is 41% faster than any of the k-subset algorithms.
+
+Figure
+
+3 details the performance of the algorithms for small values of T . Aggressive LI
+outperforms all other algorithms by at least a few percent down to the smallest value of T
+we examined Basic LI is generally better than and always at least as good as any
+k-subset algorithm over this range of T .
+
+Figure
+
+4 shows the performance of the system under a workload with a lighter load
+than our default. When load is lighter, the need for load balancing is less pronounced and
+the gains by any algorithm over random are more modest. When information is fresh, the
+algorithms can perform up to a factor of two better than the oblivious algorithm. When
+information is stale, the performance of the k-subset algorithms is not nearly as bad as it
+was for the heavier load, although they do exhibit poor behavior compared to the oblivious
+algorithm for large T . Over the entire range of staleness examined (0:1 - T - 200), the
+Basic LI and Aggressive LI algorithms perform as well as or better than the best k-subset
+or oblivious algorithm.
+Basic LI
+Aggressive LI
+
+Figure
+
+3: Detail: service time v. update delay for periodic update model
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI
+
+Figure
+
+4: Service time v. update delay for periodic update model
+Basic LI
+Aggressive LI
+
+Figure
+
+5: Service time v. update delay for periodic update model
+
+Figure
+
+5 shows the performance of the system with servers rather than the standard
+100. The results are qualitatively similar to the results for the standard
+5.2 Continuous update model
+
+Figure
+
+6 shows the performance of the algorithms under the continuous update model. Because
+system behavior depends on the distribution of the delay parameter, we show results
+for four distributions of delay, all with average value T . In order of increasing variation, they
+are: constant(T ), uniform( Tto 3T), uniform(0 to 2T ), and exponential(T ). As the earlier
+discussion suggests, the Aggressive LI algorithm is actually less aggressive than the Basic
+LI algorithm, and Basic generally outperforms aggressive for this model. We will therefore
+focus on the Basic LI algorithm.
+Mitzenmacher notes that for a given T , the k-subset algorithms' performance improves for
+distributions that contain a mix of more recent and older information. This relationship
+seems present but less pronounced for the LI algorithms. As a result, as the distribution's
+variability increases, the advantage of LI over the k-subset algorithms shrinks. Thus, Basic
+LI seems a clear choice for the constant and uniform T distributions: for any value of T ,
+its performance is as good as any of the k-subset algorithms and for any given k-subset
+algorithm there is some range of T where Basic LI's performance is significantly better.
+For the exponential distribution of T , however, the k-subset algorithms enjoy an advantage
+of up to 16% over Basic LI. Figure 7 tests the hypothesis that the relatively poor performance
+of Basic LI in this situation is because the algorithm calculates P i using the expected value of
+T whereas each individual request may see significantly different values of T . In this figure,
+still varies according to the specified distribution, but rather than knowing the average
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI
+(a) Constant T (b) Uniform Tto 3T01020
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI26100 50 100 150 200
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI
+(c) Uniform 0 to 2T (d) Exponential with mean T
+
+Figure
+
+update delay for continuous update model when clients only know
+T , the average delay. (a) - (d) show result for different distributions of delay around the
+(a) Uniform Tto 3T01020
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI26100 50 100 150 200
+Average
+Response
+Time
+Update Interval (T)
+Basic LI
+Aggressive LI
+(b) Uniform 0 to 2T (c) Exponential with mean T
+
+Figure
+
+7: Service time v. update delay for continuous update model when clients know the
+age of information actually encountered for each request. (a) - (c) show result for different
+
+Figure
+
+8: Service time v. update delay for update-on-access model.
+value of T , each request knows the value of T that holds for that request, and the algorithm
+calculates its P i vector using this more certain information. Compared to the performance
+in
+
+Figure
+
+6, this extra information improves performance for each distribution of T , and the
+improvement becomes more pronounced for distributions with more variation. From this we
+conclude that good estimates of the delay between when load information is gathered and
+when a request will arrive at a server are important for getting the best performance from
+the LI algorithms.
+5.3 Update-on-access model
+
+Figure
+
+8 shows performance for the update-on-access model. In this model, we simulate
+some number of clients, and each client uses the load information gathered after sending one
+request to decide where to send the next request. Thus, T equals the per-client inter-request
+time. To vary T for a fixed total arrival rate, we simply vary the number of clients from
+which the requests are issued.
+For this model, all of the algorithms perform reasonably well. It appears that the per-client
+updates desynchronize the clients enough to reduce the herd effect. The Basic LI algorithm
+outperforms all of the others and provides a modest speedup over a wide range of update
+intervals.
+
+Figure
+
+9: Service time v. update delay for update-on-access model under bursty workload
+5.4 Bursty arrivals
+
+Figure
+
+9 shows performance under a bursty-arrival version of the update-on-access model.
+As with the standard update-on-access model, each client uses the server loads discovered
+during one request to route the next one. To generate our bursty-arrivals workload, rather
+than assume that each client produces exponentially-distributed arrivals, we assume that
+a client whose average inter-request time is T produces a burst of b requests separated by
+seconds, with the bursts separated by exponential(T b) seconds. For Figure 9,
+The bursty workload significantly increases the performance of all of the algorithms that use
+server load compared to the oblivious algorithm. Although over time, a client's picture of
+server load is on average T seconds old, an average request sees a much fresher picture of
+the L i vector. This suggests that it may often be possible to significantly outperform the
+oblivious strategy even for challenging workloads such as internet server selection [13, 22]
+where information will likely be old on average, but where a client's requests to a service are
+bursty. Once again, the Basic LI algorithm is the best or tied for the best over the entire
+range of T examined (0:1 - T - 200).
+5.5 Impact of imprecise information
+The primary drawback to the LI algorithms is that they require good estimates of T and -.
+Subsection 5.2 examined the impact of uncertainty about T . In this subsection, we examine
+what happens when the estimate of - is incorrect. We believe that servers supporting the
+Average
+Response
+Time
+Update Interval (T)
+Basic LI (8*Load)
+Basic LI (4*Load)
+Basic LI (2*Load)
+Basic LI (1*Load)
+Basic LI (0.5*Load)
+Basic LI (0.25*Load)
+Basic LI (0.125*Load)
+
+Figure
+
+10: Service time v. update delay for periodic update model when clients mis-estimate
+the arrival rate.
+LI algorithms would be equipped to inform clients both of their current load and of the
+arrival rate of requests they anticipate. For example, a server might report the arrival rate
+it had seen over some recent period of time, or it might report the maximum request rate it
+anticipates encountering. However, it may be difficult for some systems to accurately predict
+future request patterns based on history.
+
+Figure
+
+shows performance under the periodic update model when the LI algorithm uses
+an incorrect estimate of -. Each line shows performance when the - used for calculating P i
+is multiplied by an error factor e between 1and 8. If we overestimate the load, the algorithm
+is more conservative than it should be and performance suffers a bit. If we underestimate
+the load, the algorithm sends too many requests to the apparently-least-loaded servers, and
+performance is very poor.
+From this, we conclude that systems should err on the side of caution when estimating -.
+From
+
+Figure
+
+note that if - estimated = 2- actual , performance is only marginally worse than
+actual . Also note that for these experiments, - actual = 0:9 and the the system
+would be unstable if - actual - 1:0. In other words, to overestimate - by a factor of two, one
+would have to predict a service rate 1.8 times larger than could ever be sustained by the
+system.
+We suggest the following strategy for estimating -: if the system's maximum achievable
+throughput is known, use that throughput as an estimate of - for purposes of the LI algo-
+rithms. When the system is heavily loaded, that estimate will be only a little bit higher than
+the actual arrival rate; when it is lightly loaded, the estimate will be far too high. But, as
+we have seen, the algorithm is relatively insensitive to overestimates of arrival rate. Further-
+more, overestimating the arrival rate does little harm when the system is lightly loaded. In
+Average
+Response
+Time
+Arrival Rate (lambda)
+Basic LI (actual lambda)
+Basic LI (assume lambda = 1.0)
+
+Figure
+
+11: Service time v. arrival rate (-) for periodic update model with 20. The
+graph compares the standard algorithms as well as a variation of the Basic LI algorithm that
+overestimates - as the maximum achievable system throughput
+that case, the conservative estimate of - tends to make the LI algorithm distribute requests
+uniformly across the servers, which is an acceptable strategy when load is low. Figure 11
+illustrates the effect of assuming - estimated = 1:0 as we vary - actual for a system with
+The two Basic LI lines-one with exact and the other with conservative estimates of -are
+almost indistinguishable. For all points, the difference between the two results is less than
+4.5%; when - 0:7, the difference is always less than 1.5%.
+5.6 Impact of reduced information
+The k-subset algorithms have an additional purpose beyond attempting to cope with stale
+load information: by restricting the amount of load information that clients may consider
+when dispatching jobs, they may reduce the amount of load information sent across the
+network. A number of theoretical [4, 7, 15, 20, 27] and empirical [11, 18] studies have
+suggested that load balancing algorithms can often be quite effective even if the amount of
+information they have is severely restricted.
+The Basic LI algorithm can also be adapted to use a subset of server load information rather
+than requiring a vector of all servers' loads. In the k-subset version of the Basic LI algorithm
+(Basic LI-k), we select a random subset of k servers and use the algorithm to determine how
+to bias requests among those k nodes. In particular, we modify Equation 1 to use P 0
+arrays of size k rather than n, to compute L 0
+tot from the smaller L 0
+i array, to replace n with
+k, and to calculate arrive 0
+k. Note that, as for the standard k-subset algorithms,
+we select a different subset for each incoming request.
+Average
+Response
+Time
+Update Interval (T)
+Basic LI (k=2)
+Basic LI (k=3)
+Basic LI (k=100)
+(a)26100 50 100 150 200
+Average
+Response
+Time
+Update Interval (T)
+Basic LI (k=2)
+Basic LI (k=3)
+Basic LI (k=10)
+Basic LI (k=100)
+(b)
+
+Figure
+
+12: Service time v. update delay for k-subset version of Basic LI algorithm for (a)
+update-on-access model and (b) continuous update with fixed delay model.
+
+Figure
+
+12 examines the impact of restricting the information available to the Basic LI al-
+gorithm. This experiment suggests that the Basic LI-k algorithm can achieve good perfor-
+mance. Under the update-on-access model, the original k-subset algorithms perform well,
+and the LI-2 algorithm's performance is similar to that of the standard
+algorithms. Unlike the standard k-subset algorithms, as the LI-k algorithm is given more
+information, its performance becomes better. The LI-3 algorithm outperforms the all of
+the standard k-subset algorithms by a noticeable amount, and the full Basic LI algorithm
+widens the margin.
+Under the continuous update with fixed delay model (Figure 12-b), the performance of the
+LI-k algorithms is also good. In this case, the original k-subset algorithms behave badly, but
+the LI-k versions behave nearly identically with the Basic LI system. In this experiment, the
+versions of the LI algorithm are slightly better than the
+version, with smaller k consistently giving slightly better performance. We do not have an
+explanation for the improving behavior with reduced information in this experiment.
+From these experiments, we conclude that LI can be an effective technique in environments
+where we wish to restrict how much load information is distributed through the system.
+Modest amounts of load information allow the LI algorithms to achieve nearly their full
+performance. Thus, LI decouples the question of how much load information should be used
+from the question of how to interpret that information.
+6 Conclusions
+The primary contribution of this paper is to present a simple strategy for interpreting stale
+load information. This approach resolves the paradox that under some algorithms, using
+additional information often results in worse performance than using less information or
+none at all. The Load Interpretation (LI) strategy we propose interprets load information
+based on its age so that a system is essentially always better off when it has and uses more
+information. When information is fresh, the algorithm aggressively addresses imbalances;
+when the information is stale, the algorithm is more conservative.
+We believe that this approach may open the door to safely using load information to attempt
+to outperform random request distribution in environments where it is difficult to
+maintain fresh information or where the system designer does not know the age of the information
+a priori. Our experiments suggest that by interpreting load information, systems
+can (1) match the performance of the most aggressive algorithms when load information is
+fresh, (2) outperform current algorithms by as much as 60% when information is moderately
+old, (3) significantly outperform random load distribution when information is older still,
+and (4) avoid pathological behavior even when information is extremely old.
+
+
+
+--R
+
+The Next Step in Server Load Balancing.
+Designing a Process Migration Facility: The Charlotte Experience.
+Making Commitments in the Face of Uncertainty: How to Pick a Winner Almost Every Time.
+Balanced Allocations.
+DNS Support for Load Balancing.
+Network Tasking in the Locus Distributed Unix System.
+Towards Developing Universal Dynamic Mapping Algorithms.
+Cisco Distributed Director.
+Transparent Process Migration: Design Alternatives and the Sprite Implementation.
+Research Toward a Heterogeneous Networked Computing Cluster: The Distributed Queuing System Version 3.0.
+Adaptive Load Sharing in Homogeneous Distributed Systems.
+
+Locating Nearby Copies of Replicated Internet Servers.
+
+
+
+Load distribution: Implementation for the Mach Microkernel.
+Analysis of the Effects of Delays on Load Sharing.
+Adaptive Load Sharing in Heterogeneous Distributed Systems.
+The Power of Two Choices in Randomized Load Balancing.
+How Useful is Old Information.
+Performance Characteristics of Mirror Servers on the Internet.
+Using Idle Workstations in a Shared Computing Environment.
+Process Migration in DEMOS/MP.
+Experiences with the Amoeba Distributed Operating System.
+
+Queuing Systems with Selection of the Shortest of Two Queues: an Asymptotic Approach.
+Squid Internet Object Cache.
+Using Smart Clients to Build Scalable Services.
+Attacking the Process Migration Bottleneck.
+A Load Sharing Facility for Large
+--TR
+
+--CTR
+Michael Rabinovich , Zhen Xiao , Amit Aggarwal, Computing on the edge: a platform for replicating internet applications, Web content caching and distribution: proceedings of the 8th international workshop, Kluwer Academic Publishers, Norwell, MA, 2004
+Mauro Andreolini , Michele Colajanni , Riccardo Lancellotti , Francesca Mazzoni, Fine grain performance evaluation of e-commerce sites, ACM SIGMETRICS Performance Evaluation Review, v.32 n.3, December 2004
+Simon Fischer , Berthold Vcking, Adaptive routing with stale information, Proceedings of the twenty-fourth annual ACM symposium on Principles of distributed computing, July 17-20, 2005, Las Vegas, NV, USA
+Request Redirection Algorithms for Distributed Web Systems, IEEE Transactions on Parallel and Distributed Systems, v.14 n.4, p.355-368, April
+Giovanni Aloisio , Massimo Cafaro , Euro Blasi , Italo Epicoco, The Grid Resource Broker, a ubiquitous grid computing framework, Scientific Programming, v.10 n.2, p.113-119, April 2002
+Mauro Andreolini , Michele Colajanni , Ruggero Morselli, Performance study of dispatching algorithms in multi-tier web architectures, ACM SIGMETRICS Performance Evaluation Review, v.30 n.2, September 2002
+Suman Nath , Phillip B. Gibbons , Srinivasan Seshan, Adaptive data placement for wide-area sensing services, Proceedings of the 4th conference on USENIX Conference on File and Storage Technologies, p.4-4, December 13-16, 2005, San Francisco, CA
+Bogumil Zieba , Marten van Sinderen , Maarten Wegdam, Quality-constrained routing in publish/subscribe systems, Proceedings of the 3rd international workshop on Middleware for pervasive and ad-hoc computing, p.1-8, November 28-December 02, 2005, Grenoble, France
+Mauro Andreolini , Sara Casolari, Load prediction models in web-based systems, Proceedings of the 1st international conference on Performance evaluation methodolgies and tools, October 11-13, 2006, Pisa, Italy
+Yu, The state of the art in locally distributed Web-server systems, ACM Computing Surveys (CSUR), v.34 n.2, p.263-311, June 2002

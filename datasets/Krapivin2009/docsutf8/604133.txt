@@ -1,0 +1,1173 @@
+--T
+Selective memoization.
+--A
+We present a framework for applying memoization selectively. The framework provides programmer control over equality, space usage, and identification of precise dependences so that memoization can be applied according to the needs of an application. Two key properties of the framework are that it is efficient and yields programs whose performance can be analyzed using standard techniques.We describe the framework in the context of a functional language and an implementation as an SML library. The language is based on a modal type system and allows the programmer to express programs that reveal their true data dependences when executed. The SML implementation cannot support this modal type system statically, but instead employs run-time checks to ensure correct usage of primitives.
+--B
+We describe the framework in the context of a functional language
+and an implementation as an SML library. The language is based
+on a modal type system and allows the programmer to express programs
+that reveal their true data dependences when executed. The
+SML implementation cannot support this modal type system stati-
+cally, but instead employs run-time checks to ensure correct usage
+of primitives.
+Categories and Subject Descriptors
+[Programming Languages]: General; F.2.0 [Analysis
+of Algorithms and Problem Complexity]: [General]; D.3.1
+[Programming Languages]: Formal De?nitions and Theory;
+D.3.3 [Programming Languages]: Language Constructs and Fea-
+tures?Control Structures
+General Terms
+Languages, Performance, Algorithms
+Keywords
+Memoization, selective, programmer controlled, performance
+This research was supported in part by NSF grants CCR-9706572,
+CCR-0085982, and CCR-0122581.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for pro?t or commercial advantage and that copies bear this notice and the full citation
+on the ?rst page. To copy otherwise, to republish, to post on servers or to redistribute
+to lists, requires prior speci?c permission and/or a fee.
+POPL'03, January 15?17, 2003, New Orleans, Louisiana, USA.
+ACM 1-58113-628-5/03/0001 .$5.00
+Memoization is a fundamental and powerful technique for result
+re-use. It dates back a half century [7, 21, 22] and has been used
+extensively in many areas such as dynamic programming [4, 9, 10,
+19], incremental computation [11, 34, 12, 36, 16, 1, 37, 20, 14, 2],
+and many others [8, 23, 17, 25, 26, 20]. In fact, lazy evaluation
+provides a limited form of memoization [18].
+Although memoization can dramatically improve performance and
+can require only small changes to the code, no language or library
+support for memoization has gained broad acceptance. Instead,
+many successful uses of memoization rely on application-speci?c
+support code. The underlying reason for this is one of control: since
+memoization is all about performance, the user must be able to control
+the performance of memoization. Many subtleties of memoiza-
+tion, including the cost of equality checking and the cache replacement
+policy for memo tables, can make the difference between exponential
+and linear running time.
+To be general and widely applicable a memoization framework
+must provide control over these three areas: (1) the kind and cost
+of equality tests; (2) the identi?cation of precise dependences between
+the input and the output of memoized code; and (3) space
+management. Control over equality tests is critical, because this
+is how re-usable results are identi?ed. Control over identi?cation
+of precise dependences is important to maximize result reuse. Being
+able to control when memo tables or individual their entries are
+purged is critical, because otherwise the user will not know whether
+or when results are re-used.
+In this paper, we propose a framework for memoization that provides
+control over equality and identi?cation of dependences, and
+some control over space management. We study the framework in
+the context of a small language called MFL and provide an implementation
+for it in the Standard ML language. We also prove the
+type safety and correctness of MFL?i.e., that the semantics are preserved
+with respect to a non-memoized version. As an example, we
+show how to analyze the performance of a memoized version of
+Quicksort within our framework.
+In the next section we describe background and related work. In
+Section 3 we introduce our framework via some examples. In Section
+4 we formalize the MFL language and discuss its safety, cor-
+rectness, and performance properties. In Section 5 we present a
+simple implementation of the framework as a Standard ML library.
+In Section 6 we discuss how the framework might be extended to
+allow for better control of space usage, and discuss the relationship
+of this work to our previous work on adaptive computation [2].
+Background and Related Work
+A typical memoization scheme maintains a memo table mapping
+argument values to previously computed results. This table is consulted
+before each function call to determine if the particular argument
+is in the table. If so, the call is skipped and the result is
+returned; otherwise the call is performed and its result is added to
+the table. The semantics and implementation of the memo lookup
+are critical to performance. Here we review some key issues in implementing
+memoization ef?ciently.
+Equality. Any memoization scheme needs to search a memo table
+for a match to the current arguments. Such a search will, at
+minimum, require a test for equality. Typically it will also require
+some form of hashing. In standard language implementations testing
+for equality on structures, for example, can require traversing
+the whole structure. The cost of such an equality test can negate
+the advantage of memoizing and may even change the asymptotic
+behavior of the function. A few approaches have been proposed to
+alleviate this problem. The ?rst is based on the fact that for memoization
+equality need not be exact?it can return unequal when two
+arguments are actually equal. The implementation could therefore
+decide to skip the test if the equality is too expensive, or could use a
+conservative equality test, such as ?location? equality. The problem
+with such approaches is that whether a match is found could depend
+on particulars of the implementation and will surely not be evident
+to the programmer.
+Another approach for reducing the cost of equality tests is to ensure
+that there is only one copy of every value, via a technique
+known as ?hash consing? [13, 5, 35]. If there is only one copy, then
+equality can be implemented by comparing locations. In fact, the
+location can also be used as a key to a hash table. In theory, the
+overhead of hash-consing is constant in the expected case (expecta-
+tion is over internal randomization of hash functions). The reality,
+however, is rather different because of large memory demands of
+hash-consing and its interaction with garbage collection. In fact,
+several researchers have argued that hash-consing is too expensive
+for practical purposes [32, 33, 6, 24]. As an alternative to hash con-
+sing, Pugh proposed lazy structure sharing [32]. In lazy structure
+sharing whenever two equal values are compared, they are made to
+point to the same copy to speed up subsequent comparisons. As
+Pugh points out, the disadvantage of this approach is that the performance
+depends on the order comparisons and thus it is dif?cult
+to analyze.
+We note that even with hash-consing, or any other method, it remains
+critical to de?ne equality on all types including reals and
+functions. Claiming that functions are never equivalent, for exam-
+ple, is not satisfactory because the result of a call involving some
+function as a parameter will never be re-used.
+Dependences. To maximize result re-use, the result of a
+function call must be stored with respect to its true dependences.
+This issue arises when the function examines only parts or an approximation
+of its parameter. To enable ?partial? equality checks,
+the unexamined parts of the parameter should be disregarded. To
+increase the likelihood of result re-use, one should be able to match
+on the approximation, rather than the parameter itself. As an exam-
+ple, consider the code
+The result of f depends on either (x,y) or (x,z). Also, it depends
+on an approximation of x?whether or not it is positive?rather than
+its exact value. Thus, the memo entry (7,11,20) should match
+or (4,11,50) since, when x is positive, the result depends
+only on y.
+Several researchers have remarked that partial matching can be very
+important in some applications [28, 27, 1, 14]. Abadi, Lampson,
+Le?vy [1], and Heydon, Levin, Yu [14] have suggested program analysis
+methods for tracking dependences for this purpose. Although
+their technique is likely effective in catching potential matches, it
+does not provide a programmer controlled mechanism for specifying
+what dependences should be tracked. Also, their program
+analysis technique can change the asymptotic performance of a pro-
+gram, making it dif?cult to asses the effects of memoization.
+Space management. Another problem with memoization is its
+space requirement. As a program executes, its memo tables can
+become large limiting the utility of memoization. To alleviate this
+problem, memo tables or individual entries should be disposed of
+under programmer control.
+In some application, such as in dynamic programming, most result
+re-use occurs among the recursive calls of some function. Thus, the
+memo table of such a function can be disposed of whenever it ter-
+minates. In other applications, where result re-use is less structured,
+individual memo table entries should be purged according to a replacement
+policy [15, 33]. The problem is to determine what exact
+replacement policy should be used and to analyze the performance
+effects of the chosen policy. One widely used approach is to replace
+the least recently used entry. Other, more sophisticated, policies
+have also been suggested [33]. In general the replacement policy
+must be application-speci?c, because, for any ?xed policy, there are
+programs whose performance is made worse by that choice [33].
+3 A Framework for Selective Memoization
+We present an overview of our framework via some examples. The
+framework extends a purely functional language with several constructs
+to support selective memoization. In this section, we use an
+extension to an ML-like language for the discussion. We formalize
+the core of this language and study its safety, soundness, and
+performance properties in Section 4.
+The framework enables the programmer to determine precisely the
+dependences between the input and the result of a function. The
+main idea is to deem the parameters of a function as resources and
+provide primitives to explore incrementally any value, including the
+underlying value of a resource. This incremental exploration process
+reveals the dependences between the parameter of the function
+and its result.
+The incremental exploration process is guided by types. If a
+value has the modal type !t, then the underlying value of type
+t can be bound to an ordinary, unrestricted variable by the let!
+construct; this will create a dependence between the underlying
+value and the result. If a value has a product type, then its two
+parts can be bound to two resources using the let* construct;
+this creates no dependences. If the value is a sum type, then it
+can be case analyzed using the mcase construct, which branches
+according to the outermost form of the value and assigns the inner
+value to a resource; mcase creates a dependence on the outer
+form of the value of the resource. The key aspect of the let*
+and mcase is that they bind resources rather than ordinary variables.
+Non-memoized Memoized
+fun fib (n:int)= mfun mfib (n':!int)=
+if (n < 2) then n if (n < 2) then n
+else
+y:int, y':!int,
+fy y return (fy y)
+else else
+fz z return (fz z)
+
+Figure
+
+1. Fibonacci and expressing partial dependences.
+Exploring the input to a function via let!, mcase, and let* builds
+a branch recording the dependences between the input and the result
+of the function. The let! adds to the branch the full value,
+the mcase adds the kind of the sum, and let* adds nothing. Con-
+sequently, a branch contains both data dependences (from let!'s)
+and control dependences (from mcase's). When a return is en-
+countered, the branch recording the revealed dependences is used
+to key the memo table. If the result is found in the memo table,
+then the stored value is returned, otherwise the body of the return
+is evaluated and the memo table is updated to map the branch to
+the result. The type system ensures that all dependences are made
+explicit by precluding the use of resources within return's body.
+As an example consider the Fibonacci function fib and its memoized
+counterpart mfib shown in Figure 1. The memoized version,
+mfib, exposes the underlying value of its parameter, a resource,
+before performing the two recursive calls as usual. Since the result
+depends on the full value of the parameter, it has a bang type.
+The memoized Fibonacci function runs in linear time as opposed to
+exponential time when not memoized.
+Partial dependences between the input and the result of a function
+can be captured by using the incremental exploration technique. As
+an example consider the function f shown in Figure 1. The function
+checks whether x is positive or not and returns fy(y) or fz(z).
+Thus the result of the function depends on an approximation of x
+(its sign) and on either y or z. The memoized version mf captures
+this by ?rst checking if x' is positive or not and then exposing the
+underlying value of y' or z' accordingly. Consequently, the result
+will depend on the sign of x' and on either y' or z'. Thus if mf is
+called with parameters (1;5;7) ?rst and then (2;5;3), the result will
+be found in the memo the second time, because when x' is positive
+the result depends only on y'. Note that mif construct used in this
+example is just a special case of the more general mcase construct.
+A critical issue for ef?cient memoization is the implementation of
+memo tables along with lookup and update operations on them.
+In our framework we support expected constant time memo table
+lookup and update operations by representing memo tables using
+hashing. To do this, we require that the underlying type t of a
+modal type !t be an indexable type. An indexable type is associated
+with an injective function, called an index function, that maps
+each value of that type to a unique integer; this integer is called
+the index of the value. The uniqueness property of the indices for
+a given type ensures that two values are equal if and only if their
+indices are equal. In our framework, equality is only de?ned for
+Non-memoized
+type irl=(int*real) list
+ks
+case l of
+if (c < w) then
+ks (c,t)
+else let
+in
+if (v1>v2) then v1
+else v2
+
+Figure
+
+2. Memo tables for
+carded at completion.
+Memoized
+type irl=(int*real) blist
+mfun mks (c':!int,l':!irl)
+case (unbox l) of
+| CONS((w,v),t) =>
+if (c < w) then
+else let
+in
+if (v1>v2) then v1
+else v2
+end)
+memoized Knapsack can be dis-
+indexable types. This enables us to implement memo tables as hash
+tables keyed by branches consisting of indices.
+We assume that each primitive type comes with an index function.
+For examples, for integers, the identity function can be chosen as
+the index function. Composite types such as lists or functions must
+be boxed to obtain an indexable type. A boxed value of type t has
+type tbox. When a box is created, it is assigned a unique locations
+(or tag), and this location is used as the unique index of that boxed
+value. For example, we can de?ne boxed lists as follows.
+datatype a
+| CONS of a * ((a blist') box)
+type a blist = (a blist') box
+Based on boxes we implement hash-consing as a form of memoiza-
+tion. For example, hash-consing for boxed lists can be implemented
+as follows.
+mfun hCons (h':!a), t':!(a
+return (box (CONS(h,t)))
+The function takes an item and a boxed list and returns the boxed
+list formed by consing them. Since the function is memoized, if it
+is ever called with two values that are already hash-consed, then the
+same result will be returned. The advantage of being able to de-
+?ne hash-consing as a memoized function is that it can be applied
+selectively.
+To control space usage of memo tables, our framework gives the
+programmer a way to dispose of memo tables by conventional scop-
+ing. In our framework, each memoized function is allocated its
+own memo table. Thus, when the function goes out of scope,
+its memo table can be garbage collected. For example, in many
+dynamic-programming algorithms result re-use occurs between recursive
+calls of the same function. In this case, the programmer can
+scope the memoized function inside an auxiliary function so that its
+memo table is discarded as soon as the auxiliary function returns.
+As an example, consider the standard algorithm for the Knapsack
+Problem ks and its memoized version mks Figure 2. Since result
+sharing mostly occurs among the recursive calls of mks, it can be
+scoped in some other function that calls mks; once mks returns its
+memo table will go out of scope and can be discarded.
+We note that this technique gives only partial control over space
+usage. In particular it does not give control over when individual
+Non-memoized Memoized 15 20
+fun fil (g:int->bool, fun mfil (g:int->bool,
+l:int
+case l of case (unbox l) of
+nil => nil NIL => empty
+| h::t => | CONS(h,t) =>
+let let
+in in
+case (g h) of case (g h) of
+true => h::tt true => hCons(h,tt)
+|false => tt |false => tt
+let
+in return (
+case l of case (unbox l) of
+nil => nil NIL => nil
+| cons(h,t) => | CONS(h,t) =>
+let let
+in in
+(qs s)@(h::(qs g)) (mqs s)@(h::(mqs g))
+
+Figure
+
+3. The Quicksort algorithm.
+memo table entries are purged. In Section 6, we discuss how the
+framework might be extended so that each memo table is managed
+according to a programmer speci?ed caching scheme. The basic
+idea is to require the programmer to supply a caching scheme as a
+parameter to the mfun and maintain the memo table according to
+the chosen caching scheme.
+Memoized Quicksort. As a more sophisticated example, we consider
+Quicksort. Figure 3 show an implementation of the Quicksort
+algorithm and its memoized counterpart. The algorithm ?rst divides
+its input into two lists containing the keys less than the pivot,
+and greater than the pivot by using the ?lter function fil. It then
+sorts the two sublists, and returns the concatenation of the results.
+The memoized ?lter function mfil uses hash-consing to ensure that
+there is only one copy of each result list. The memoized Quicksort
+algorithm mqs exposes the underlying value of its parameter and is
+otherwise similar to qs. Note that mqs does not build its result via
+hash-consing?it can output two copies of the same result. Since in
+this example the output of mqs is not consumed by any other func-
+tion, there is no need to do so. Even if the result were consumed
+by some other function, one can choose not to use hash-consing because
+operations such as insertions to and deletions from the input
+list will surely change the result of Quicksort.
+When the memoized Quicksort algorithm is called on ?similar? in-
+puts, one would expect that some of the results would be re-used.
+Indeed, we show that the memoized Quicksort algorithm computes
+its result in expected linear time when its input is obtained from a
+previous input by inserting a new key at the beginning. Here the
+expectation is over all permutations of the input list and also the
+internal randomization of the hash functions used to implement the
+memo tables. For the analysis, we assume, without loss of general-
+ity, that all keys in the list are unique.
+Theorem 1
+Let L be a list and let running memoized
+Quicksort on L and then on L0. The running time of Quicksort on
+the modi?ed list L0 is expected O(n) where n is the length of L0.
+3 26
+9
+
+Figure
+
+4. The recursion tree for Quicksort with inputs
+Proof: Consider the recursion tree of Quicksort with input L, denoted
+Q(L), and label each node with the pivot of the corresponding
+recursive call (see Figure 4 for an example). Consider any pivot
+(key) p from L and let Lp denote the keys that precede p in L. It is
+easy to see that a key k is in the subtree rooted at p if and only if
+the following two properties are satis?ed for any key k0 2 Lp.
+1. If k0 < p then k > k0, and
+2. if k0 > p then k < k0.
+Of the keys that are in the subtree of p, those that are less than p are
+in its left subtree and those greater than p are in its right subtree.
+Now consider the recursion tree Q(L0) for
+any pivot in Q(L0). Suppose p < a and let k be any key in the left
+subtree of p in Q(L). Since k < p, by the two properties k is in
+the left subtree of p in Q(L0). Similarly if p > a then any k in the
+right subtree of p in Q(L) is also in the right subtree of p in Q(L0).
+Since ?ltering preserves the respective order of keys in the input
+list, for any p, p < a, the input to the recursive call corresponding
+to its left child will be the same. Similarly, for p > a, the input to
+the recursive call corresponding to its right child will be the same.
+Thus, when sorting L0 these recursive calls will ?nd their results in
+the memo. Therefore only recursive calls corresponding to the root,
+to the children of the nodes in the rightmost spine of the left subtree
+of the root, and the children of the nodes in the leftmost spine of the
+right subtree of the root may be executed (the two spines are shown
+with thick lines in Figure 4). Furthermore, the results for the calls
+adjacent to the spines will be found in the memo.
+Consider the calls whose results are not found in the memo. In the
+worst case, these will be all the calls along the two spines. Consider
+the sizes of inputs for the nodes on a spine and de?ne the random
+variables X1 :::Xk such that Xi is the least number of recursive calls
+(nodes) performed for the input size to become n or less after3 (i1)
+it ?rst becomes 4 n or less. Since k dlog4=3 ne, the total
+and the expected number of operations along a spine are
+dlog4=3 ne 3i1
+dlog4=3 ne 3i1
+Since the probability that the pivot lies in the middle half of the list
+is 12 , E[Xi] 2 for i 1, and we have
+dlog4=3 ne i1E[C(n)] ? 2 n:i=1
+Thus, This bound holds for both spines; therefore
+the number of operations due to calls whose results are not found in
+the memo is O(n). Since each operation, including hash-consing,
+takes expected constant time, the total time of the calls whose
+results are not in the memo is O(n). Now, consider the calls whose
+results are found in the memo, each such call will be on a spine or
+adjacent to it, thus there are an expected O(logn) such calls. Since,
+the memo table lookup overhead is expected constant time the total
+cost for these is O(logn). We conclude that Quicksort will take
+expected O(n) time for sorting the modi?ed list L0.
+It is easy to extend the theorem to show that the O(n) bound holds
+for an insertion anywhere in the list. Although, this bound is better
+than a complete rerun, which would take O(nlogn), we would like
+to achieve O(logn). In Section 6 we discuss how a combination of
+memoization and adaptivity [2] may be used to reduce the expected
+cost of a random insertion to O(logn).
+In this section we study a small functional language, called MFL,
+that supports selective memoization. MFL distinguishes memoized
+from non-memoized code, and is equipped with a modality
+for tracking dependences on data structures within memoized code.
+This modality is central to our approach to selective memoization,
+and is the focus of our attention here. The main result is a soundness
+theorem stating that memoization does not affect the outcome of
+a computation compared to a standard, non-memoizing semantics.
+We also show that the memoization mechanism of MFL causes a
+constant factor slowdown compared to a standard, non-memoizing
+semantics.
+4.1
+
+Abstract
+
+The abstract syntax of MFL is given in Figure 5. The meta-variables
+x and y range over a countable set of variables. The meta-variables
+a and b range overf a countable set of resources. (The distinction
+will be made clear below.) The meta-variable l ranges over a countable
+set of locations. We assume that variables, resources, and locations
+are mutually disjoint. The binding and scope conventions
+for variables and resources are as would be expected from the syntactic
+forms. As usual we identify pieces of syntax that differ only
+in their choice of bound variable or resource names. A term or expression
+is resource-free if and only if it contains no free resources,
+and is variable-free if and only if it contains no free variables. A
+closed term or expression is both resource-free and variable-free;
+otherwise it is open.
+The types of MFL include 1 (unit), int, products and sums, recursive
+data types ?u:t, memoized function types, and bang types !h.
+MFL distinguishes indexable types, denoted h, as those that accept
+an injective function, called an index function, whose co-domain
+is integers. The underlying type of a bang type !h is restricted
+to be an indexable type. For int type, identity serves as an index
+constant function can be chosen as the
+index function. For non-primitive types an index can be supplied
+by boxing values of these types. Boxed values would be allocated
+Ix. Types
+Types
+mcase
+mfun f (a:t1):t2 iseend j
+
+Figure
+
+5. The abstract syntax of MFL.
+in a store and the unique location of a box would serve as an index
+for the underlying value. With this extension the indexable types
+would be de?ned as Although supporting
+boxed types is critical for practical purposes, we do not formalize
+this here to focus on the main ideas.
+The syntax is structured into terms and expressions, in the terminology
+of Pfenning and Davies [30]. Roughly speaking, terms evaluate
+independently of their context, as in ordinary functional program-
+ming, whereas expressions are evaluated relative to a memo table.
+Thus, the body of a memoized function is an expression, whereas
+the function itself is a term. Note, however, that the application of
+a function is a term, not an expression; this corresponds to the encapsulation
+of memoization with the function, so that updating the
+memo table is benign. In a more complete language we would include
+case analysis and projection forms among the terms, but for
+the sake of simplicity we include these only as expressions. We
+would also include a plain function for which the body is a term.
+Note that every term is trivially an expression; the return expression
+is the inclusion.
+4.2 Static Semantics
+The type structure of MFL extends the framework of Pfenning and
+Davies [30] with a ?necessitation? modality, !h, which is used to
+track data dependences for selective memoization. This modality
+does not correspond to a monadic interpretation of memoization
+effects (t in the notation of Pfenning and Davies), though one
+could imagine adding such a modality to the language. The introductory
+and eliminatory forms for necessity are standard, namely
+!t for introduction, and let!x:hbet ineend for elimination.
+Our modality demands that we distinguish variables from re-
+sources. Variables in MFL correspond to the ?validity?, or ?unre-
+stricted?, context in modal logic, whereas resources in MFL correspond
+to the ?truth?, or ?restricted? context. An analogy may also
+be made to the judgmental presentation of linear logic [29, 31]:
+variables correspond to the intuitionistic context, resources to the
+linear context.1
+1Note, however, that we impose no linearity constraints in our
+type system!
+Res
+Pairs
+G;
+Fun
+G;
+FunVal
+Apply
+Bang
+Inl, Inr
+(Un)Roll
+
+Figure
+
+6. Typing judgments for terms.
+The inclusion, return(t), of terms into expressions has no analogue
+in pure modal logic, but is speci?c to our interpretation
+of memoization as a computational effect. The typing rule for
+return(t) requires that t be resource-free to ensure that any dependence
+on the argument to a memoized function is made explicit
+in the code before computing the return value of the function. In the
+?rst instance, resources arise as parameters to memoized functions,
+with further resources introduced by their incremental decomposition
+using let and mcase. These additional resources track the
+usage of as-yet-unexplored parts of a data structure. Ultimately,
+the complete value of a resource may be accessed using the let!
+construct, which binds its value to a variable, which may be used
+without restriction. In practice this means that those parts of an
+argument to a memoized function on whose value the function depends
+will be given modal type. However, it is not essential that all
+resources have modal type, nor that the computation depend upon
+every resource that does have modal type.
+The static semantics of MFL consists of a set of rules for deriving
+typing judgments of the form G;D
+for expressions. In these judgments G is a variable type assignment,
+a ?nite function assigning types to variables, and D is a resource
+type assignment, a ?nite function assigning types to resources. The
+rules for deriving these judgments are given in Figures 6 and 7.
+Return
+Let
+Case
+
+Figure
+
+7. Typing judgments for expressions.
+4.3 Dynamic Semantics
+The dynamic semantics of MFL formalizes selective memoization.
+Evaluation is parameterized by a store containing memo tables that
+track the behavior of functions in the program. Evaluation of a
+function expression causes an empty memo table to be allocated and
+associated with that function. Application of a memoized function
+is affected by, and may affect, its associated memo table. Should the
+function value become inaccessible, so also is its associated memo
+table, and hence the storage required for both can be reclaimed.
+Unlike conventional memoization, however, the memo table is
+keyed by control ?ow information rather than by the values of arguments
+to memoized functions. This is the key to supporting selective
+memoization. Expression evaluation is essentially an exploration
+of the available resources culminating in a resource-free term
+that determines its value. Since the exploration is data-sensitive,
+only certain aspects of the resources may be relevant to a particular
+outcome. For example, a memoized function may take a pair of
+integers as argument, with the outcome determined independently
+of the second component in the case that the ?rst is positive. By
+recording control-?ow information during evaluation, we may use
+it to provide selective memoization.
+For example, in the situation just described, all pairs of the form
+should map to the same result value, irrespective of the value
+v. In conventional memoization the memo table would be keyed by
+the pair, with the result that redundant computation is performed in
+the case that the function has not previously been called with v, even
+though the value of v is irrelevant to the result! In our framework
+we instead key the memo table by a ?branch? that records suf?cient
+control ?ow information to capture the general case. Whenever we
+encounter a return statement, we query the memo table with the
+current branch to determine whether this result has been computed
+before. If so, we return the stored value; if not, we evaluate the
+return statement, and associate that value with that branch in the
+memo table for future use. It is crucial that the returned term not
+contain any resources so that we are assured that its value does not
+change across calls to the function.
+The dynamic semantics of MFL is given by a set of rules for deriving
+judgments of the form s;t +t v;s0 (for terms) and s;l:b;e +e v;s0
+(for expressions). The rules for deriving these judgments are given
+in
+
+Figures
+
+8 and 9. These rules make use of branches, memo tables,
+and stores, whose precise de?nitions are as follows.
+A simple branch is a list of simple events corresponding to ?choice
+points? in the evaluation of an expression.
+Simple Event
+Simple Branch eb
+We write bbe to stand for the extension of b with the event e at the
+end.
+A memo table, q, is a ?nite function mapping simple branches to
+values. We write q[b ! v], where b 2= dom(q), to stand for the
+7 extension of q with the given binding for b. We write q(b) " to
+mean that b 2= dom(q).
+A store, s, is a ?nite function mapping locations, l, to memo tables.
+We write s[l ! q], where l 2= dom(s), to stand for the extension of
+7 s with the given binding for l. When l 2 dom(s), we write s[l q]
+for the store s that maps l to q and l to s(l0).Term evaluation is largely standard, except for the evaluation of
+(memoizing) functions and applications of these to arguments.
+Evaluation of a memoizing function term allocates a fresh memo ta-
+ble, which is then associated with the function's value. Expression
+evaluation is initiated by an application of a memoizing function to
+an argument. The function value determines the memo table to be
+used for that call. Evaluation of the body is performed relative to
+that table, initiating with the null branch.
+Expression evaluation is performed relative to a ?current? memo
+table and branch. When a return statement is encountered, the
+current memo table is consulted to determine whether or not that
+branch has previously been taken. If so, the stored value is re-
+turned; otherwise, the argument term is evaluated, stored in the
+current memo table at that branch, and the value is returned. The
+let! and mcase expressions extend the current branch to re?ect
+control ?ow. Since let! signals dependence on a complete value,
+that value is added to the branch. Case analysis, however, merely
+extends the branch with an indication of which case was taken. The
+let construct does not extend the branch, because no additional
+information is gleaned by splitting a pair.
+4.4 Soundness of MFL
+We will prove the soundness of MFL relative to a non-memoizing
+semantics for the language. It is straightforward to give a purely
+functional semantics to the pure fragment of MFL by an inductive
+de?nition of the relations t +t v and e +e v. Here t, e, and v are
+?pure? in the sense that they may not involve subscripted function
+values. The underlying term, t, of an MFL term, t, is obtained by
+erasing all location subscripts on function values occurring within t.
+The soundness of MFL consists of showing that evaluation with
+memoization yields the same outcome as evaluation without memoization
+
+Theorem 2 (Soundness)
+If 0/;t +t v;s, where 0/;0/
+The full proof is given in [3]. The statement of the theorem must
+be strengthened considerably to account for both terms and expres-
+sions, and to take account of non-empty memoization contexts. The
+proof then proceeds by induction on evaluation.
+It is easy to show that the non-memoizing semantics of MFL is type
+safe, using completely conventional techniques. It follows that the
+Unit s;? +t ?;s
+Number s;n +t n;s
+.
+.
+.
+sn1;tn +t vn;sn
+Pair
+(l 2 dom(s);
+s;e +t v;s0
+FunVal
+Apply
+Bang
+s;!t +t !v;s0
+Inject
+s;inlt1+t2t +t inlt1+t2 v;s0
+s;inrt1+t2t +t inrt1+t2 v;s0
+(Un)Roll
+
+Figure
+
+8. Evaluation of terms.
+memoizing semantics is also type-safe, for if not, there would be a
+closed value of a type t that is not canonical for that type. How-
+ever, erasure preserves and re?ects canonical forms, hence, by the
+Soundness Theorem, MFL must also be type safe.
+4.5 Performance
+We show that memoization slows down an MFL program by a constant
+factor (expected) with respect to a standard, non-memoizing
+semantics even when no results are re-used. The result relies on
+representing a branch as a sequence of integers and using this sequence
+to key memo tables, which are implemented as hash tables.
+To represent branches as integer sequences we use the property of
+MFL that the underlying type h of a bang type, !h, is an indexable
+Ret (Not Found)
+s0;l:b;[v1=a1;v2=a2]e +e v;s00
+Let
+s;l:b;leta1a2 bet ineend +t v;s00
+Case
+
+Figure
+
+9. Evaluation of expressions.
+type. Since any value of an indexable type has an integer index,
+we can represent a branch of dependencies as sequence of integers
+corresponding to the indices of let!'ed values, and zero or one for
+inl and inr.
+Consider a non-memoizing semantics, where the return rule always
+evaluates its body and neither looks up nor updates memo
+tables (stores). Consider an MFL program and let T denote the time
+it takes (the number of evaluation steps) to evaluate the program
+with respect to this non-memoizing semantics. Let T0 denote the
+time it takes to evaluate the same program with respect to the mem-
+oizing semantics. In the worst case, no results are re-used, thus
+the difference between T and T0 is due to memo-table lookups and
+updates done by the memoizing semantics. To bound the time for
+these, consider a memo table lookup or update with a branch b and
+let jbj be the length of the branch. Since a branch is a sequence of
+integers, a lookup or update can be performed in expected O(jbj)
+time using nested hash tables to represent memo tables. Now note
+that the non-memoizing semantics takes jbj time to build the branch
+thus, the cost of a lookup or update can be charged to the evaluations
+that build the branch b, i.e., evaluations of let! and mcase.
+Furthermore, each evaluation of let! and mcase can be charged
+by exactly one return. Thus, we conclude that in the
+expected case.
+5 Implementation
+We describe an implementation of our framework as a Standard
+ML library. The aspects of the MFL language that relies on the
+syntactic distinction between resources and variables cannot be
+enforced statically in Standard ML. Therefore, we use a separate
+type for resources and employ run-time checks to detect violations
+of correct usage.
+signature
+sig
+(* Expressions *)
+type 'a expr
+val return: (unit -> 'a) -> 'a expr
+(* Resources *)
+type 'a res
+val expose: 'a res -> 'a
+(* Bangs *)
+type 'a bang
+val bang : ('a -> int) -> 'a -> 'a bang
+val letBang: ('a bang) -> ('a -> 'b expr) -> 'b expr
+(* Products *)
+type ('a,'b) prod
+val pair: 'a -> 'b -> ('a,'b) prod
+val letx: ('a,'b) prod ->
+(('a res * 'b res) -> 'c expr) -> 'c expr
+val split: ('a,'b) prod -> (('a * 'b) -> 'c) -> 'c
+(* Sums *)
+type ('a,'b) sum
+val inl: 'a -> ('a,'b) sum
+val inr: 'b -> ('a,'b) sum
+val mcase: ('a,'b) sum -> ('a res -> 'c expr) ->
+('b res -> 'c expr) -> 'c expr
+val choose: ('a,'b) sum -> ('a -> 'c) ->
+('b -> 'c) -> 'c
+(* Memoized arrow *)
+type ('a,'b) marrow
+val mfun: ('a res -> 'b expr) -> ('a,'b) marrow
+val mfun rec: (('a, 'b) marrow ->
+'a res -> 'b expr) -> ('a,'b) marrow
+val mapply: ('a,'b) marrow -> 'a -> 'b
+signature
+type 'a box
+val init: unit->unit
+val box: 'a->'a box
+val unbox: 'a box->'a
+val getKey: 'a box->int
+
+Figure
+
+10. The signatures for the memo library and boxes.
+The interface for the library (shown in Figure 10) provides types for
+expressions, resources, bangs, products, sums, memoized functions
+along with their introduction and elimination forms. All expressions
+have type 'a expr, which is a monad with return as the
+inclusion and various forms of ?bind? induced by the elimination
+forms letBang, letx, and mcase. A resource has type 'a res
+and expose is its elimination form. Resources are only created
+by the library, thus no introduction form for resources is available
+to the user. The introduction and elimination form for bang types
+are bang and letBang. The introduction and elimination form for
+product types are pair, and letx and split respectively. The
+letx is a form of ?bind? for the monad expr; split is the elimination
+form for the term context. The treatment of sums is similar
+to product types. The introduction forms are inl and inr, and the
+elimination forms are mcase and choose; mcase is a form of bind
+for the expr monad and choose is the elimination for the term
+context.
+Memoized functions are introduced by mfun and mfun rec; mfun
+takes a function of type 'a res -> 'b expr and returns the
+memoized function of type ('a,'b) marrow; mfun rec is similar
+to mfun but it also takes as a parameter its memoized version. Note
+that the result type does not contain the ?effect? expr?we encapsulate
+memoization effects, which are benign, within the function.
+The elimination form for the marrow is the memoized apply function
+mapply.
+functor BuildMemo (structure Box: BOX
+structure
+struct
+type 'a list * (unit -> 'a)
+type 'a res = 'a
+res
+expose
+val
+val
+in
+((h v)::branch, susp)
+type
+val
+in
+f (res x1, res x2)
+datatype ('a,'b) sum = INL of 'a | INR of 'b
+mcase s f
+val
+case s of
+| INR v => (1,g (res v))
+in
+(lr::branch,susp)
+choose s f case s of INL v => f v
+| INR v => g v
+type
+fun mfun rec
+val
+val
+val
+case Memopad.extend mpad branch of
+val
+in
+| (SOME v,NONE) => v (* Found *)
+in
+result
+in
+Similar to mfun rec *)
+mapply f
+
+Figure
+
+11. The implementation of the memoization library.
+
+Figure
+
+11 shows an implementation of the library without the
+run-time checks for correct usage. To incorporate the run-time
+checks, one needs a more sophisticated de?nition of resources in
+order to detect when a resource is exposed out of its context (i.e.,
+function instance). In addition, the interface must be updated so
+that the ?rst parameter of letBang, letx, and mcase, occurs in
+suspended form. This allows us to update the state consisting of
+certain ?ags before forcing a term.
+structure
+struct
+type 'a
+(* Some utilities *)
+fun iBang
+(* Fibonacci *)
+letBang (expose n') (fn n => return (fn()=>
+else
+mapply f (iBang(n-1))+
+mapply f (iBang(n-2))))
+mapply (mfun rec mfib') n
+(* Boxed lists *)
+datatype 'a
+| CONS of ('a * (('a blist') box))
+type 'a blist = ('a blist') box
+(* Hash Cons *)
+letx (expose x') (fn (h',t') =>
+letBang (expose h') (fn h =>
+letBang (expose t') (fn t =>
+return (fn()=> box (CONS(h,t))))))
+val hCons = mfun hCons'
+(* Knapsack *)
+letx (expose arg) (fn (c',l') =>
+letBang (expose c') (fn c =>
+letBang (expose l') (fn l => return (fn () =>
+case (unbox l) of
+| CONS((w,v),t) =>
+if (c < w) then
+mapply mks (pair (iBang c) (bBang t))
+else
+let
+val (iBang c) (bBang t)
+val mapply mks arg1
+val (iBang (c-w)) (bBang t)
+val mapply mks arg2
+in
+if (v1 > v2) then v1
+else v2
+fun mks mapply (mfun rec mks') x
+(* Quicksort *)
+val
+val hCons = mfun hCons'
+case (unbox l) of
+| CONS(h,t) =>
+if (f h) then
+mapply hCons (pair (iBang h) (bBang (fil f t)))
+else
+letBang (expose l') (fn l => return (fn () =>
+case (unbox l) of
+| CONS(h,t) =>
+let
+val
+val
+val mapply qs (bBang ll)
+val mapply qs (bBang gg)
+in
+in
+mfun rec qs'
+
+Figure
+
+12. Examples from Section 3 in the SML library.
+The implementation extends the operational semantics of the MFL
+language (Section 4.3) with boxes. The bang primitive takes a
+value and an injective function, called the index function, that maps
+the value to an integer, called the index. The index of a value is used
+to key memo tables. The restriction that the indices be unique, enables
+us to implement memo tables as a nested hash tables, which
+support update and lookup operations in expected constant time.
+The primitive letBang takes a value b of bang type and a body.
+It applies the body to the underlying value of b, and extends the
+branch with the index of b. The function letx takes a pair p and a
+body. It binds the parts of the pair to two resources and and applies
+the body to the resources; as with the operational semantics, letx
+does not extend the branch. The function mcase takes value s of
+sum type and a body. It branches on the outer form of s and binds
+its inner value to a resource. It then applies the body to the resource
+and extends the branch with 0 or 1 depending on the outer form of
+s. The elimination forms of sums and products for the term context,
+split and choose are standard.
+The return primitive ?nalizes the branch and returns its body as a
+suspension. The branch is used by mfun rec or mfun, to key the
+memo table; if the result is found in the memo table, then the suspension
+is disregarded and the result is re-used; otherwise the suspension
+is forces and the result is stored in the memo table keyed by
+the branch. The mfun rec primitive takes a recursive function f as
+a parameter and ?memoizes? f by associating it with a memo pad.
+A subtle issue is that f must calls its memoized version recursively.
+Therefore f must take its memoized version as a parameter. Note
+also that the memoized function internally converts its parameter to
+a resource before applying f to it.
+The interface of the library provides no introduction form for re-
+sources. Indeed, all resources are created by the library inside the
+letx, mcase, mfun rec, and mfun. The function expose is the
+elimination form for resources. If, for example, one would like
+to apply letBang to a resource, then he must ?rst expose the re-
+source, which ?exposes? the underlying value.
+
+Figure
+
+12 show the examples from Section 3 written in the SML
+library. Note that the memoized Fibonacci function mfib creates a
+memo table every time it is called. When mfib ?nishes, this table
+can be garbage collected (the same applies to mks). For Quicksort,
+we provide a function mqs that returns an instance of memoized
+Quicksort when applied. Each such instance has its own memo
+table. Note also that mqs creates a local instance of the hash-cons
+function so that each instance of memoized Quicksort has its own
+memo table for hash-consing.
+In the examples, we do not use the sum types provided by the
+library to represent boxed lists, because we do not need to. In
+general, one will use the provided sum types instead of their ML
+counterparts (for example if an mcase is needed). The examples
+in
+
+Figure
+
+12 can be implemented using the following de?nition of
+boxed lists.
+datatype 'a
+ROLL of (unit, (('a, 'a boxlist' box) prod)) sum
+type 'a boxlist = ('a boxlist') box
+Changing the code in Figure 12 to work with this de?nition of
+boxed lists requires several straightforward modi?cations.
+6 Discussion
+Space and Cache Management. Our framework associates a separate
+memo table with each memoized function. This allows the
+programmer to control the life-span of memo tables by conventional
+scoping. This somewhat coarse degree of control is suf?cient
+in certain applications such as in dynamic programming, but ?ner
+level of control may be desirable for applications where result re-use
+is less regular. Such an application can bene?t from specifying
+a caching scheme for individual memo tables so as to determine the
+size of the memo table and the replacement policy. We discuss how
+the framework can be extended to associate a cache scheme with
+each memo table and maintain the memo table accordingly.
+The caching scheme should be speci?ed in the form of a parameter
+to the mfun construct. When evaluated, this construct will
+bind the caching scheme to the memo table and the memo table
+will be maintained accordingly. Changes to the operational
+semantics to accommodate this extension is small. The store s
+will now map a label to a pair consisting of a memo table and
+its caching scheme. The handling of the return will be changed
+so that the stores do not merely expand but are updated according
+to the caching scheme before adding a new entry. The following
+shows the updated return rule. Here S denotes a caching
+scheme and q denotes a memo table. The update function denotes
+a function that updates the memo table to accommodate a
+new entry by possibly purging an existing entry. The programmer
+must ensure that the caching scheme does not violate the
+integrity of the memo table by tampering with stored values.
+(Not Found)
+For example, we can specify that the memo table for the Fibonacci
+function, shown in Figure 1, can contain at most two entries and
+be managed using the least-recently-used replacement policy. This
+is suf?cient to ensure that the memoized Fibonacci runs in linear
+time. This extension can also be incorporated into the type system
+described in Section 4. This would require that we associate types
+with memo stores and also require that we develop a type system
+for ?safe? update functions if we are to enforce that the caching
+schemes are safe.
+Local vs. Non-local Dependences. Our dependence tracking
+mechanism only captures ?local? dependences between the input
+and the result of a function. A local dependence of a function
+f is one that is created inside the static scope of f. A non-local
+dependence of f is created when f passes its input to some other
+function g, which examines f's input indirectly. In previous work,
+Abadi et. al. [1] and Heydon et. al. [14] showed a program analysis
+technique for tracking non-local dependences by propagating
+dependences of a function to its caller. They do not, however, make
+clear the performance implications of their technique.
+Our framework can be extended to track non-local dependences by
+introducing an application form for memoized functions in the expression
+context. This extension would, for example, allow for dependences
+of non-constant length. We chose not to support non-local
+dependences because it is not clear if its utility exceeds its
+performance effects.
+Memoization and Adaptivity. The work we present in this paper
+was motivated by our previous work on adaptive computation [2].
+We brie?y discuss the relationship between memoization and adaptivity
+and how they can be combined to obtain ef?cient dynamic or
+incremental algorithms. [5]
+[6]
+An adaptive computation maintains a dynamic dependence graph
+representing data and control dependences. When the input is
+modi?ed, a change propagation algorithm updates the output and
+the dependence graph. The adaptivity mechanism handles ?deep? [7]
+changes ef?ciently. We say that a change is deep if it affects calls
+that occur at leaves of the call tree for the computation. In contrast, [8]
+a change is shallow if it affects by a calls that occur at the roots of
+the call tree.
+As an example consider the Quicksort algorithm that picks the ?rst
+key of its input as pivot. Inserting a new key at the end of the input
+list is a deep change because this change will affect the last [10]
+recursive calls of some ?lter functions and will become pivot only
+at the end of some sequence of recursive calls to Quicksort. In
+contrast, inserting a new key at the beginning of the list is a shallow
+change for Quicksort, because the new key will be selected as
+a pivot immediately by the ?rst call to Quicksort. The adaptivity
+mechanism based on dynamic dependence graphs handles an insertion
+at the end of the input, a deep change, in expected O(logn) [12]
+time [2], whereas the insertion at the beginning of the list, a shallow
+change, will cause a complete rerun, which takes O(nlogn) time.
+Using memoization, however, an insertion at the beginning of the
+list can be handled in O(n) time as showed in Section 3.
+[13]
+Any change can be thought of a combination of shallow and deep
+changes. Since memoization and adaptivity complement each other
+in their handling of deep and shallow changes, we would expect
+that a combination of these two techniques would handle general [14]
+changes ef?ciently. For example, in Quicksort, we expect that an
+insertion in a random position in the list would be handled in expected
+time by a combination of these two techniques.
+[15]
+7 Conclusion [16]
+We presented a framework for selective memoization under programmer
+control. The framework makes explicit the performance
+effects of memoization and yields programs whose running times
+can be analyzed using standard techniques. A key aspect of the [17]
+framework is that it can capture both control and data dependences
+between input and the result of a memoized function. The main
+contributions of the paper are the particular set of primitives we [18]
+suggest and the semantics along with the proofs that it is sound.
+We gave a simple implementation of the framework in the Standard
+[19]
+ML language. We expect that this framework can be implemented
+in any purely-functional language.
+
+
+--R
+
+Analysis and caching of dependencies.
+Adaptive functional programming.
+Selective memo- [23] ization
+
+The Design and
+Analysis of Computer Algorithms.
+Anatomy of LISP.
+
+
+
+Dynamic Programming.
+Tabulation techniques for recursive programs.
+ACM Computing Surveys
+Eliminating redundant recursive calls.
+ACM Transactions on Programming Languages and Systems
+
+to Algorithms.
+Incremental evaluation
+of attribute grammars with application to syntax directed
+In Conference Record of the 8th Annual ACM Symposium
+pages 105?
+Incremental reduction in the
+
+pages 307?
+Hashing lemmas on time complexities
+with applications to formula manipulation.
+
+
+Caching function calls using
+ACM SIGPLAN Notices
+Elimination of recursive calls using a small table of
+randomly selected function values.
+Alphonse: incremental computation as a programming
+
+
+
+Lazy memo-functions
+Conference on
+The Implementation of
+
+Dynamic programming via static
+
+Static caching
+for incremental computation.
+Languages and Systems
+
+
+and Formal Systems
+'memo' functions and machine learning.
+Automating program speedup by
+deciding what to cache.
+The wizard of TILT: Ef- ?cient(?)
+Techniques for automatic memoization with applications to context-free parsing
+
+Generating Incremental Attribute Evaluators.
+Using cached functions and constructors for incremental attribute evalua- tion
+Structural cut elimination.
+A judgmental reconstruction of modal logic.
+Natural deduction for intuitionistic non-commutative linear logic
+Incremental computation via function caching.
+An improved replacement strategy for function caching.
+Incremental computation via function caching.
+An example of hierarchical design and proof.
+Incremental compilation via partial evaluation.
+Automating derivation of incremental programs.
+--TR
+Eliminating Redundant Recursive Calls.
+Lazy memo-functions
+An improved replacement strategy for function caching
+Incremental computation via function caching
+Specification and transformation of programs: a formal approach to software development
+Introduction to algorithms
+Incremental reduction in the lambda calculus
+Alphonse
+Analysis and caching of dependencies
+Automating derivation of incremental programs
+Static caching for incremental computation
+Caching function calls using precise dependencies
+Tabulation Techniques for Recursive Programs
+An example of hierarchical design and proof
+Adaptive functional programming
+Anatomy of LISP
+Incremental evaluation for attribute grammars with application to syntax-directed editors
+The Design and Analysis of Computer Algorithms
+Dynamic Programming via Static Incrementalization
+Natural Deduction for Intuitionistic Non-communicative Linear Logic
+Using Cached Functions and Constructors for Incremental Attribute Evaluation
+Structural Cut Elimination
+Hashing LEMMAs on time complexities with applications to formula manipulation
+Dynamic Programming
+
+--CTR
+Kedar Swadi , Walid Taha , Oleg Kiselyov , Emir Pasalic, A monadic approach for avoiding code duplication when staging memoized functions, Proceedings of the 2006 ACM SIGPLAN symposium on Partial evaluation and semantics-based program manipulation, January 09-10, 2006, Charleston, South Carolina
+Haiying Xu , Christopher J. F. Pickett , Clark Verbrugge, Dynamic purity analysis for java programs, Proceedings of the 7th ACM SIGPLAN-SIGSOFT workshop on Program analysis for software tools and engineering, p.75-82, June 13-14, 2007, San Diego, California, USA
+Kevin Walsh , Emin Gn Sirer, Staged simulation: A general technique for improving simulation scale and performance, ACM Transactions on Modeling and Computer Simulation (TOMACS), v.14 n.2, p.170-195, April 2004
+Geoffrey Washburn , Stephanie Weirich, Boxes go bananas: encoding higher-order abstract syntax with parametric polymorphism, ACM SIGPLAN Notices, v.38 n.9, p.249-262, September
+Darko Marinov , Robert O'Callahan, Object equality profiling, ACM SIGPLAN Notices, v.38 n.11, November
+Neil D. Jones, Transformation by interpreter specialisation, Science of Computer Programming, v.52 n.1-3, p.307-339, August 2004
+Wei-Ngan Chin , Siau-Cheng Khoo , Neil Jones, Redundant Call Elimination via Tupling, Fundamenta Informaticae, v.69 n.1-2, p.1-37, January 2006
+Umut A. Acar , Guy E. Blelloch , Robert Harper, Adaptive functional programming, ACM Transactions on Programming Languages and Systems (TOPLAS), v.28 n.6, p.990-1034, November 2006
+Umut A. Acar , Guy E. Blelloch , Matthias Blume , Kanat Tangwongsan, An experimental analysis of self-adjusting computation, ACM SIGPLAN Notices, v.41 n.6, June 2006
+K. V. Seshu Kumar, Value reuse optimization: reuse of evaluated math library function calls through compiler generated cache, ACM SIGPLAN Notices, v.38 n.8, August

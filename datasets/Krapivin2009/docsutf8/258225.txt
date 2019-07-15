@@ -1,0 +1,883 @@
+--T
+An Unsymmetric-Pattern Multifrontal Method for Sparse LU Factorization.
+--A
+Sparse matrix factorization algorithms for general problems are typically characterized by irregular memory access patterns that limit their performance on parallel-vector supercomputers. For symmetric problems, methods such as the multifrontal method avoid indirect addressing in the innermost loops by using dense matrix kernels. However, no efficient LU factorization algorithm based primarily on dense matrix kernels exists for matrices whose pattern is very unsymmetric. We address this deficiency and present a new unsymmetric-pattern multifrontal method based on dense matrix kernels. As in the classical multifrontal method, advantage is taken of repetitive structure in the matrix by factorizing more than one pivot in each frontal matrix, thus enabling the use of Level 2 and Level 3 BLAS. The performance is compared with the classical multifrontal method and other unsymmetric solvers on a CRAY C-98.
+--B
+Introduction
+.Conventional sparse matrix factorization algorithms for
+general problems rely heavily on indirect addressing. This gives them an irregular
+memory access pattern that limits their performance on typical parallel-vector
+supercomputers and on cache-based RISC architectures. In contrast, the multifrontal
+method of Duff and Reid [9, 10, 14, 15] is designed with regular memory access in
+the innermost loops and has been modified by Amestoy and Duff to use standard
+kernels [1]. This multifrontal method assumes structural symmetry and bases the
+factorization on an assembly tree generated from the original matrix and an ordering
+such as minimumdegree. The computational kernel, executed at each node of the tree,
+is one or more steps of LU factorization within a square, dense frontal matrix defined
+by the nonzero pattern of a pivot row and column. These steps of LU factorization
+compute a contribution block (a Schur complement) that is later assembled (added)
+into the frontal matrix of its parent in the assembly tree. Henceforth we will call this
+approach the classical multifrontal method.
+Although structural asymmetry can be accommodated in the classical multifrontal
+method by holding the pattern of A+A T and storing explicit zeros, this can have poor
+performance on matrices whose patterns are very unsymmetric. If we assume from the
+outset that the matrix may be structurally asymmetric, the situation becomes more
+complicated. For example, the frontal matrices are rectangular instead of square, and
+some contribution blocks must be assembled into more than one subsequent frontal
+matrix. As a consequence, it is no longer possible to represent the factorization by
+Computer and Information Sciences Department, University of Florida, Gainesville, Florida,
+USA. phone: (904) 392-1481, email: davis@cis.ufl.edu. Support for this project was provided by
+the National Science Foundation (ASC-9111263 and DMS-9223088), and by Cray Research, Inc. and
+Florida State University through the allocation of supercomputer resources. Portions of this work
+were supported by a post-doctoral grant from CERFACS.
+y Rutherford Appleton Laboratory, Chilton, Didcot, Oxon. 0X11 0QX England, and European
+Center for Research and Advanced Training in Scientific Computation (CERFACS), Toulouse,
+France.
+T. A. DAVIS AND I. S. DUFF
+an assembly tree and the more general structure of an assembly dag (directed acyclic
+[5] similar to that of Gilbert and Liu [22] and Eisenstat and Liu [17, 18] is
+required. In the current work we do not explicitly use this structure.
+We have developed a new unsymmetric-pattern multifrontal approach [4, 5]. As
+in the symmetric multifrontal case, advantage is taken of repetitive structure in the
+matrix by factorizing more than one pivot in each frontal matrix. Thus the algorithm
+can use higher level dense matrix kernels in its innermost loops (Level 3 BLAS [6]).
+We refer to the unsymmetric-pattern multifrontal method described in this paper
+as UMFPACK version 1.0 [4]. It is is available in Netlib [7]. A parallel factorize-
+only version of UMFPACK, based on the assembly dag, is discussed in Hadfield's
+dissertation [24, 26, 27, 25]. The multifrontal method for symmetric positive definite
+matrices is reviewed in [29].
+Section 2 presents an overview of the basic approach, and a brief outline of the
+algorithm. We introduce our data structures in the context of a small sparse matrix in
+Section 3 where we describe the factorization of the first frontal matrix. In Section 4
+we develop the algorithm further by discussing how subsequent frontal matrices are
+factorized. We have split the discussion of the algorithm into these two sections so
+that we can define important terms in the earlier section while considering a less
+complicated situation. Section 5 presents a full outline of the algorithm, using the
+notation introduced in previous sections. In Section 6, we compare the performance of
+our algorithm with two algorithms based on the classical multifrontal method: MUPS
+[1, 2] and SSGETRF [3], and two algorithms based on conventional (compressed sparse
+vector) data structures: Gilbert and Peierls' partial-pivoting code (GPLU [23]) and
+MA48 [16] (a successor to MA28 [13]). GPLU does not use dense matrix kernels.
+MA48 uses dense matrix kernels only after switching to a dense factorization code
+towards the end of factorization when the active submatrix is fairly dense.
+2. The basic approach. Our goal with the UMFPACK algorithm is to achieve
+high performance in a general unsymmetric sparse factorization code by using the
+Level 3 BLAS. We accomplish this by developing a multifrontal technique that uses
+rectangular frontal matrices and chooses several pivots within each frontal matrix.
+High performance is also achieved through an approximate degree update algorithm
+that is much faster (asymptotically and in practice) than computing the true degrees.
+A general sparse code must select pivots based on both numerical and symbolic
+(fill-reducing) criteria. We therefore combine the analysis phase (pivot selection
+and symbolic factorization) with the numerical factorization. We construct our
+rectangular frontal matrices dynamically, since we do not know their structure prior
+to factorization. Although based on an assembly dag that can be constructed during
+this analyze-factorize phase, we do not use it here although Hadfield and Davis
+[24, 26, 27, 25] develop it further and use it in a factorize-only algorithm.
+At a particular stage, the frontal matrix is initialized through choosing a pivot
+from all the active matrix (called a global pivot search) using a Zlatev-style pivot
+search [32], except that we keep track of upper bounds on the degrees of rows and
+columns in the active submatrix, rather than the true degrees (the degree of a row or
+column is simply the number of entries in the row or column). We call this first pivot
+the seed pivot. Storage for the frontal matrix is allocated to contain the entries in the
+pivot row and column plus some room for further expansion determined by an input
+parameter. We define the current frontal matrix by F and the submatrix comprising
+the rows and columns not already pivotal by C, calling C the contribution block.
+Subsequent pivots within this frontal matrix are found within the contribution
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 3
+Fig. 2.1. A rectangular frontal matrix within a larger working array.
+empty
+U"
+L"
+U'
+block, C, as shown in Figure 2.1. The frontal matrix grows as more pivots are chosen,
+as denoted by the arrows in the figure. We assemble contribution blocks from earlier
+frontal matrices into this frontal matrix as needed. The selection of pivots within this
+frontal matrix stops when our next choice for pivot would cause the frontal matrix to
+become larger than the allocated working array. We then complete the factorization of
+the frontal matrix using Level 3 BLAS, store the LU factors, and place the contribution
+block, C, onto a heap. The contribution block is deallocated when it is assembled into
+a subsequent frontal matrix. We then continue the factorization by choosing another
+seed pivot and generating and factorizing a new frontal matrix.
+It is too expensive to compute the actual degrees of the rows and columns of the
+active submatrix. To do so would require at least as much work as the numerical
+factorization itself. This would defeat the performance gained from using the dense
+matrix kernels. Instead, we compute upper bounds for these degrees at a much lower
+complexity than the true degrees, since they are obtained from the frontal matrix
+data structures instead of conventional sparse vectors. We avoid forming the union of
+sparse rows or columns which would have been needed were we to compute the filled
+patterns of rows and columns in the active submatrix.
+The performance we achieve in the UMFPACK algorithm thus depends equally
+on two crucial factors: this approximate degree update algorithm and the numerical
+factorization within dense, rectangular frontal matrices. An outline of the UMFPACK
+algorithm is shown in Algorithm 1. If A is permuted to block upper triangular form
+[12], the algorithm is applied to each block on the diagonal. We will use the matrix
+a
+a 21 a 22 a 23 0 a
+a 31 a
+a
+a 52 a 53 0 a 55 a 56 0
+a 71 a 72 0 0 a
+to illustrate our algorithm in Sections 3 and 4.
+Algorithm 1 consists of initializations followed by three steps, as follows:
+Algorithm 1 (Outline of the unsymmetric-pattern multifrontal algorithm)
+0: initializations
+while (factorizing do
+1: global pivot search for seed pivot
+4 T. A. DAVIS AND I. S. DUFF
+form frontal matrix F
+while (pivots found within frontal matrix) do
+2: assemble prior contribution blocks and original rows into F
+compute the degrees of rows and columns in C (the contribution block of F)
+numerically update part of C (Level 2 and Level 3 BLAS)
+local pivot search within C
+endwhile
+3: complete the factorization of F using Level 3 BLAS
+endwhile
+The initialization phase of the algorithm (step 0) converts the original matrix
+into two compressed sparse vector forms (row-oriented and column-oriented [10]) with
+numerical values, A, and symbolic pattern, A. Rows and columns are used and deleted
+from A and A during factorization when they are assembled into frontal matrices.
+At any given step, k say, we use A k and A k to refer to entries in the original matrix
+that are not yet deleted. An entry is defined by a value in the matrix that is actually
+stored. Thus all nonzeros are entries but some entries may have the value zero. We
+use both to denote the absolute value of a scalar and to signify the number of
+entries in a set, sequence, or matrix. The meaning should always be quite clear from
+the context.
+The true degrees, d r (i) and d c (j), are the number of entries in row i and column j
+of the active submatrix, A 0 , respectively, but we do not store these. Because the cost of
+updating these would be prohibitive, we instead use upper bounds d r (i) (d r (i) - d r (i))
+and d c (j) (d c (j) - d c (j)). However, when a true degree is computed, as in the
+initialization phase or during the search for a seed pivot, its corresponding upper
+bound is set equal to the true degree.
+3. The first frontal matrix. We will label the frontal matrix generated at
+stage e by the index e. We now describe the factorization of the first frontal matrix
+1). This discussion is, however, also applicable for subsequent frontal matrices
+are discussed in full in Section 4 where differences from the case
+are detailed.
+3.1. Step 1: Perform global pivot search and form frontal matrix. The
+algorithm performs pivoting both to maintain numerical stability and to reduce fill-in.
+The first pivot in each frontal matrix is chosen using a global Zlatev-style search [32].
+A few candidate columns with the lowest upper bound degrees are searched. The
+number searched is controlled by an input parameter (which we denote by nsrch and
+whose default value is four). Among those nsrch columns, we select as pivot the entry
+a 0
+rc with the smallest approximate Markowitz cost [30], (d r (r) \Gamma 1)(d c (c) \Gamma 1), such
+that a 0
+rc also satisfies a threshold partial pivoting condition [10]
+ic
+Note that we have the true column degree since the column entries were generated
+explicitly to enable the threshold test in Equation (3.1). When the pivot is chosen
+its row and column structure define the frontal matrix. denotes the row
+indices of entries in a column, or column indices of entries in a row, we define L and U
+by
+r   ), the row and column indices, respectively,
+of the current jLj-by-jU j frontal matrix F. We partition the sets L and U into pivotal
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 5
+row and column indices (L 0 and U 0 ) and non-pivotal row and column indices (L 00 and
+U 00 ).
+We then assemble the pivot row
+r   ) and column
+\Lambdac ) from the original matrix
+into F and delete them from A k (which also deletes them from A k , since A k is defined
+as
+We then try to find further pivot rows and columns with identical pattern in the
+same frontal matrix. This process is called amalgamation. Relaxed amalgamation
+does the same with pivots of similar but non-identical pattern. To permit relaxed
+amalgamation, F is placed in the upper left corner of a larger, newly allocated, s-
+by-t work array. Relaxed amalgamation is controlled by choosing values for s and t
+through the input parameter, g, where - 1. The default
+value of this parameter in UMFPACK is 2.
+We now use Example (2.1) to illustrate our discussion. Permutations would
+needlessly obscure the example, so we assume the pivots in the example matrix are on
+the diagonal, in order. (Note that this assumption would not be true if we performed
+a global pivot search as in Step 1 since in our example the pivots do not have the
+lowest possible Markowitz cost.) The first pivot is a 0
+11 . We have
+5g. Let g be
+1:25, then the 5-by-3 frontal matrix would be stored in a 6-by-3 array.
+3.2. Step 2: Choose further pivots, perform assemblies, and partial
+factorization. We continue our pivot search within the contribution block, C, of the
+current frontal matrix, F, and repeat this for as long as there is sufficient space in the
+working array.
+We use the term assembly for the addition of contribution terms or original
+entries via the extend-add (" l
+operator [29]. This operator aligns the row and
+column index sets of its two matrix or vector operands and then adds together values
+referenced by the same indices. An implicit assembly is one that is mathematically
+represented by the data structures, but computationally postponed. An explicit
+assembly is one that is actually computed. An entry in the active submatrix, A 0 ,
+is explicitly assembled if all its contribution terms have been added to it, but this is
+usually not done and such entries are normally only held implicitly. Pivotal rows and
+columns are always explicitly assembled.
+We scan A k
+\Lambdaj for each column j in U 00 . The scan of A k
+\Lambdaj is stopped as soon as a
+row
+2 L is found. If the scan completes without such a row being found, then all
+row indices in A k
+\Lambdaj are also in L, and we delete A k
+\Lambdaj and assemble it into F. If this
+assembly is done, the true degree of column j is d c j. If the scan
+stops early, we compute the upper bound degree of column j as
+(the size of A 0 )
+worst case fill-in)
+oe
+where k is the current step of Gaussian elimination, and ff j is the number of entries
+scanned in A k
+\Lambdaj before stopping. For each row i in L 00 , we scan A k
+in an analogous manner.
+In the example, A k
+\Lambda4 is assembled into C and entry a 44 is deleted. The uncomputed
+true degrees and the degree bounds are shown in Table 3.1. The values of ff j used in
+constructing the upper bounds were obtained on the assumption that A k is stored in
+ascending order for each row and column. We have
+6 T. A. DAVIS AND I. S. DUFF
+
+Table
+True degrees and degree bounds in example matrix.
+- a 0
+r
+\Lambdac C
+a 0
+14 a 0a 0
+a 0
+a 0
+a 0
+71
+We divide the pivot column A 0
+\Lambdac by the pivot a 0
+rc to obtain the kth column of L,
+the n-by-n lower triangular factor. The pivot row is the kth row of U, the n-by-n
+upper triangular factor. Step k of Gaussian elimination is complete, except for the
+updates from the kth pivot. The counter k is now incremented for the next step
+of Gaussian elimination. The frontal matrix F is partitioned into four submatrices,
+according to the partition of L and U . We have
+l
+l
+l 41 a 44 0
+l 71
+The updates to C from the jU 0 j pivots in F are not applied one at a time. Instead,
+they are delayed until there are updates pending from b pivots to allow the efficient
+use of Level 3 BLAS [6]. On a CRAY YMP, a good value for the parameter b is 16.
+L and b
+U denote the portions of L 00 and U 00 , respectively, whose updates have
+yet to be fully applied to C. If jU then the pending updates are applied
+U). If b were 16, no updates would be applied in our example since
+We now search for the next pivot within the current frontal matrix. We search
+the columns in U 00 to find a candidate pivot column, c, that has minimumd c (c) among
+the columns of U 00 . We then apply any pending updates to this candidate column
+U \Lambdac ), and compute the candidate column A 0
+\Lambdac , its pattern
+and its true degree d c (c). We select the candidate pivot row r in L 00 with the lowest
+d r (r) such that a 0
+rc also satisfies the threshold pivoting criterion (Equation (3.1)). We
+compute the pattern
+r   ) of the candidate pivot row and its true degree d r (r).
+If d c (c) ? the current work array is too small to
+accommodate the candidate pivot and we stop the pivot search. Also, if the candidate
+column has entries outside the current frontal matrix, the threshold pivoting criterion
+might prevent us from finding an acceptable candidate pivot in L 00 . In this case also
+we stop the factorization of the current frontal matrix F. If the candidate pivot
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 7
+a 0
+rc is acceptable, then we let
+r   ). We
+repartition L and U into pivotal row and column indices (L 0 and U 0 ) and non-pivotal
+row and column indices (L 00 and U 00 ) and apply any pending updates to the pivot row
+U).
+In the example, the candidate column (column can fit in the 6-by-3 work array
+(that is, d c
+44 does not meet the threshold
+criterion, and row 7 is selected as the candidate row. The candidate row is, however,
+rejected when its true degree is computed (the work array is too small to accommodate
+row 7, since d r
+3.3. Step 3: Complete the factorization of F. After the last pivot has been
+selected within the current frontal matrix F, we apply any pending updates to the
+contribution block
+U). The pivot rows and columns in F are then placed
+in storage allocated for the LU factors.
+The contribution block C and its pattern L 00 and U 00 form what we call an element.
+An element is the contribution block of a factorized frontal matrix that has yet to be
+assembled into subsequent frontal matrices (both its numerical values and symbolic
+pattern). In particular, let C e denote the contribution block of element e, and let the
+pattern of C e be L e and U e (note that L
+Initially, all row and column indices in L e and U e are unmarked. When a row
+(or column) of C e is assembled into a subsequent frontal matrix, the corresponding
+index is marked in L e (or U e ). Element e (which consists of the terms C e , L e , and
+refer to unmarked portions only. Element e is deleted when all of its entries
+are assembled into subsequent frontal matrices. For our example, we have
+c 44 c 45
+We associate with each row and column in the active submatrix an element list,
+which is a list of the elements that hold pending updates to the row or column,
+respectively. We denote the list of elements containing row i as R i , and the list of
+elements containing column j as C j . The element lists contain a local index which
+identifies which row or column in the element matrix is equivalent to the row or
+column of the active matrix. This facilitates the numerical assembly of individual
+rows and columns. For each row i in L e , we place an element/local-index pair, (e; m),
+in the element list R i , where row i is the mth entry of L e . Similarly, for each column
+in U e , we place (e; m) in the element list C j , where column j is the mth entry of U e .
+Let
+denote a summation using the l
+operator. The (n
+active submatrix A 0 is represented by an implicit assembly of A k and the elements
+in the set E ,
+l
+is the set of elements that remain after step
+elimination. All l
+operations in Equation (3.2) are not explicitly performed and
+are postponed, unless stated otherwise. As defined earlier, the notation A k refers to
+8 T. A. DAVIS AND I. S. DUFF
+original entries in non-pivotal rows and columns of the original matrix, that have not
+yet been assembled into any frontal matrices.
+The element lists allow Equation (3.2) to be evaluated one row or column at a
+time, as needed. Column j of A 0 is
+with pattern
+Similarly, row i of A 0 is
+with pattern
+There is an interesting correspondence between our data structures and George
+and Liu's quotient graph representation of the factorization of a symmetric positive
+definite matrix [19]. Suppose we factorize a symmetric positive definite matrix using
+our algorithm and restrict the pivots to the diagonal. Then A k
+U e , and Adj Gk
+is an uneliminated node in the quotient graph
+G k . The uneliminated node x i corresponds to a row i and column i in A 0 . That is, the
+sets R i and A k
+i  are the eliminated supernodes and uneliminated nodes, respectively,
+that are adjacent to the uneliminated node x i . In our terminology, the eliminated
+supernode x e corresponds to element e. The set L e contains the uneliminated nodes
+that are adjacent to the eliminated supernode x e . That is, Adj Gk
+After the first frontal matrix on Example (2.1),
+c 44 c 45
+l
+a 22 a 23 a
+a
+a 52 a 53 a 55 a 56 0
+a 72 0 a
+Note that column four was deleted from A k (refer to Section 3.2). It also no
+longer appears in A k . The element lists are given in Table 3.2. Applying
+Equations (3.5) and (3.6) to obtain row 2, for example, we obtain
+
+l
+a 22 a 23 a 25
+
+
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 9
+
+Table
+Element lists for example matrix, after first frontal matrix.
+4. Subsequent frontal matrices. We now describe how later steps differ when
+the element lists are not empty, by continuing the example with the second frontal
+matrix.
+4.1. Step 1: Perform global pivot search and form frontal matrix. We
+compute the nsrch candidate pivot columns using Equations (3.3) and (3.4). In the
+example, the next pivot is a 0
+22 , with
+5g. The 4-by-4 frontal matrix is stored in a
+5-by-5 array
+4.2. Step 2: Choose further pivots, perform assemblies, and partial
+factorization. In the example, a second pivot (a 0
+found in the second frontal
+matrix and so we will repeat this step twice.
+As we discussed earlier, computing the true degree, d c
+\Lambdaj )j, with
+Equation (3.4) would be very time consuming. A loose upper bound on d c (j) can be
+derived if we assume no overlap between L and each L e viz.
+d c (j) - min
+To compute this bound for all rows and columns in C would take time
+to scan A k , and time
+to scan R and C. For a single column j, the total time is \Theta(ff j +jC j j), or O(jA k
+since ff j - jA k
+\Lambdaj j. Similarly, the time to compute this loose degree bound for a row i
+is
+However, a much tighter bound can be obtained in the same asymptotic time.
+The set L e can be split into two disjoint subsets: the external subset L e n L and the
+internal subset and "n" is the standard set
+difference operator. Define jL e n Lj as the external column degree of element e with
+respect to F. Similarly, define jU e n U j as the external row degree of element e with
+T. A. DAVIS AND I. S. DUFF
+respect to F. We use the bound
+which is tighter than before since jL e n j. The equation for
+d r (i) is analogous.
+An efficient way of computing the external row and column degrees is given in
+Algorithm 2. The cost of doing this can be amortized over all subsequent degree
+updates on the current front. We use the term "amortized time" to define how much
+of this total work is ascribed to the computation of a single degree bound, d c (j) or
+d r (i). Note that in computing these amortized time estimates we actually include
+the cost of computing the external row degrees within the estimate for the column
+degree bounds although it is actually the external column degrees that are used in
+computing this bound. We can amortize the time in this way because we compute
+the external row and column degrees, and the row and column degree bounds, for all
+rows and columns in the current frontal matrix.
+Relating our approximate degree algorithm to George and Liu's quotient graph,
+our algorithm takes an amortized time of O(jA k
+to compute
+d c (j). This correspondence holds only if A is symmetric and pivots are selected from
+the diagonal. This is much less than
+time take to compute the
+true degree. The true degree d c
+is the degree of
+node x j in the implicitly represented elimination graph, G k [19]. If indistinguishable
+uneliminated nodes are present in the quotient graph (as used in [28], for example),
+both of these time complexity bounds are reduced, but computing the true degree
+still takes much more time than computing our approximate degree.
+We now describe how we compute our degree bound, d c (j), in an amortized time
+of O(jA k
+We compute the external column degrees by scanning each e in R i
+for each "new" row i in L, as shown in Algorithm 2. A row or column is new if it did
+not appear in L or U prior to the current pivot. Since e 2 R i implies
+must be internal (that is,
+Algorithm 2 (Computation of external column degrees)
+assume
+for each new row i 2 L do
+for each element e in the element list R i of row i do
+end for
+end for
+If Algorithm 2 scans element e, the term w(e) is initialized to jL e j and then
+decremented once for each internal row In this case, at the end of
+Algorithm 2 three equivalent conditions hold:
+1. e appears in the lists R i for the rows i in L,
+2. the internal subset L e " L is not empty,
+3.
+If Algorithm 2 did not scan element e in any R i , then the three following equivalent
+conditions hold:
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 11
+1. e does not appear in R i for any row i in L,
+2. the internal subset L e " L is empty,
+3.
+Combining these two cases, we obtain
+ae w(e) if w(e) - 0
+oe
+To compute the external row degrees of all elements, we scan the element list C j
+for each new column j in U in an analogous manner (with a separate work array).
+The total time to compute both the external column degrees (Algorithm 2) and the
+external row degrees is \Theta(
+We compute d c (j) and assemble elements by scanning the element list C j for each
+evaluating d c (j) using Equations (4.1) and (4.2). If the external row
+and column degrees of element e are both zero, then we delete (e; m) from C j and
+assemble C e into F. Element e no longer exists. This is identical to the assembly
+from a child (element e) into a parent (the current frontal matrix F) in the assembly
+tree of the classical multifrontal method. It is also referred to as element absorption
+[14]. It is too costly at this point to delete all references to the deleted element. If a
+reference to a deleted element is found later on, it is then discarded. If the external
+column degree of element e is zero but its external row degree is not zero, then (e; m)
+is deleted from C j , column j is assembled from C e into F, and column j is deleted
+from element e. Finally, we scan the original entries
+\Lambdaj ) in column j as discussed in
+Section 3.2. If all remaining entries can be assembled into the current frontal matrix,
+then we perform the assembly and delete column j of A k . Thus, the amortized time
+to compute d c (j) is O(jA k
+does not include the time
+to perform the numerical assembly.
+The scan of rows i 2 L 00 is analogous. The amortized time to compute d r (i) is
+O(jA k
+For pivot a 0
+22 in the example, we only have one previous element, element 1. The
+element lists are shown in Table 3.2. The external column degree of element 1 is one,
+since appears in the element lists of three rows in L. The external
+row degree of element 1 is zero, since jU 1 appears in the element
+lists of two columns in U . We have
+5g. Rows 2, 3, and 7 (but not are assembled
+from C 1 into F and deleted. Row 2 and columns 2 and 3 of A k are also assembled
+into F. No columns are assembled from C 1 into F during the column scan, since the
+external column degree of element 1 is not zero.
+We have,
+c 44 c 45
+a
+a 55 a 56 0
+0 a 66 a 67
+a
+12 T. A. DAVIS AND I. S. DUFF
+and
+- a 0
+r
+\Lambdac C
+a 0
+22 a 0
+a 0
+52 a 53 0 0
+a 0
+where we have marked already assembled parts of element C 1 by \Gamma. It would be
+possible to recover this space during the computation but we have chosen not to do so
+in the interest of avoiding the expense of updating the associated element lists. Note
+then that these lists refer to positions within the original element.
+The assembly and deletion of a row in an element does not affect the external
+column degree of the element, which is why only new rows are scanned in Algorithm 2.
+Similarly, the assembly and deletion of a column in an element does not affect the
+external row degree of the element.
+The local pivot search within F evaluates the candidate column c and row r using
+Equations (3.3), (3.4), and (3.6). In the example, the second pivot a 0
+33 is found in the
+local pivot search. The set L remains unchanged, but the set U is augmented with
+the new column 7. Rows 3 and 7 are assembled from A k into F in the subsequent
+execution of step 2 for this pivot. No further assembly from C 1 is made.
+Step 2 is substantially reduced if there are no new rows or columns in F. No
+assemblies from A k or C e can be done since all possible assemblies would have been
+done for a previous pivot. It is only necessary to decrement d c (j) for all j 2 L 00 and
+d r (i) for all i 2 U 00 .
+4.3. Step 3: Complete the factorization of F. The work array, w, must be
+reset for the next frontal matrix. Rather than rescanning the elements and resetting
+the counters, we use the following modification to Algorithm 2. The counter w 0
+and the counters are equal to zero and -1, respectively, at the start of
+factorization.
+Algorithm 2, modified (Computation of external column degrees)
+assume
+for each new row i 2 L do
+for each element e in the element list R i of row i do
+end for
+end for
+Then the external column degrees are
+ae
+oe
+To enable reuse of w for the degree computation for the next pivot step, we increment
+would overflow, we reinitialize w 0 and w to zero and -1, respectively.
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 13
+In the example, the final factorized frontal matrix is
+l
+l 52 l 53 c 54 c 55 c 57
+l 72 l 73 c 74 c 75 c 777 7 5
+Note that u due to the relaxed amalgamation of two pivot rows with non-identical
+patterns. Relaxed amalgamation can result in higher performance since
+more of the Level 3 BLAS can be used. In the small example, the active submatrix
+is represented by the implicit assembly
+c 44 c 45
+l
+l
+4 a 45 a 46 0
+a 55 a 56 0
+0 a 66 a 675
+a 0
+44 a 0
+a 0
+54 a 0
+56 a 00 0 a 0
+74 a 00 a
+The element lists are shown in Table 4.1.
+
+Table
+Element lists for example matrix, after second frontal matrix.
+5. Algorithm. Algorithm 3 is a full outline of the UMFPACK (version 1.0)
+algorithm.
+6. Performance results. In this section, we compare the performance of
+UMFPACK version 1.0 with MUPS [1], MA48 [16], GPLU [23], and SSGETRF [3]
+on a single processor of a CRAY YMP (although MUPS and SSGETRF are parallel
+codes). Each method has a set of input parameters that control its behavior. We used
+the recommended defaults for most of these, with a few exceptions that we indicate
+below. All methods can factorize general unsymmetric matrices.
+MA48 [16] supersedes the MA28 code [13]. It first performs an ordering phase
+that also computes most of the factors but discards them. It then performs the
+14 T. A. DAVIS AND I. S. DUFF
+Algorithm 3 (Unsymmetric-pattern multifrontal algorithm)
+0: initializations
+while do
+global search for kth pivot: a 0
+rc
+r   )
+form rectangular frontal matrix F in an s-by-t work array
+while (more pivots can be found) do
+2: assemble kth pivot row and column into F
+scan element lists and compute external degrees
+assemble from A k and contribution blocks into F
+compute degree bounds
+compute entries of L
+U
+if (jU 00
+find candidate column c 2 U 00
+U \Lambdac
+if (d c (c) 6= jL 00 assemble column c and compute d c (c)
+find candidate row r 2 L 00
+if (r not found) goto step 3
+row r and compute d r (r)
+r   )
+U
+endwhile
+3: save L 0 , L 00 , L, U 0 , U 00 , and U
+U
+delete F
+add e to element lists
+endwhile
+numerical factorization to compute the entire LU factors. When the matrix becomes
+dense enough near the end of factorization (default of 50% dense), MA48 switches to
+a dense factorization code. MA48 can preorder a matrix to block upper triangular
+form (always preceded by finding a maximum transversal [8]), and then factorize each
+block on the diagonal [12]. Off-diagonal blocks do not suffer fill-in. MA48 can restrict
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 15
+
+Table
+Input parameters for each method.
+method
+option UMFPACK MA48 MUPS SSGETRF GPLU
+scaling of A yes/no yes/no yes/no yes/no yes/no
+block upper triangular form yes/no yes/no no no yes/no
+maximum transversal yes/no yes
+preserve symmetry yes/no yes/no yes yes no
+total number of tests per matrix 8 8 4 2 4
+its pivot search to the diagonal, thus preserving symmetry if it exists.
+MUPS performs a minimum degree ordering and symbolic factorization on the
+nonzero pattern of A constructs an assembly tree for the numerical
+factorization phase [1]. During numerical factorization, candidate pivot entries must
+pass a threshold partial pivoting test similar to Equation (3.1), except that the test
+is by rows instead of by columns. Since all the other methods we are comparing
+perform this test by columns, we factorize A T with MUPS and then use the factors
+of A T to solve the original system optionally preorders a matrix
+to maximize the modulus of the smallest entry on the diagonal (using a maximum
+transversal algorithm [8]). MUPS always attempts to preserve symmetry. It does not
+permute the matrix to block upper triangular form.
+SSGETRF is a classical multifrontal method in the Cray Research, Inc., library
+(version 1.1) installed on the CRAY YMP. It uses Liu's multiple minimum degree
+(MMD) algorithm [28] on the pattern of A It includes a threshold partial
+pivoting test. It is not specified in the documentation, but from our results we
+conclude that SSGETRF always uses a maximum transversal algorithm. We base
+this conclusion on the observation that MUPS and SSGETRF obtain similar fill-in
+for highly unsymmetric matrices (matrices for which MUPS performs very poorly
+if a maximum transversal algorithm is not used). Like MUPS, it always preserves
+symmetry, and does not permute the matrix to block upper triangular form.
+The GPLU code of Gilbert and Peierls [23] does not include a pre-ordering phase.
+It factorizes A using threshold partial pivoting with row interchanges only. We first
+explicitly form A T A, find a fill-reducing ordering via Liu's multiple minimum degree
+algorithm [20, 28], and use that permutation as the column order for A (as suggested
+in [21]). The time we report includes this analysis phase. We also tested GPLU on
+the block upper triangular form of A (as found by MA48), by applying GPLU and
+our preordering to each block on the diagonal. GPLU does not have an option for
+preserving symmetry.
+UMFPACK has similar input parameters as MA48. It does not explicitly include a
+switch to dense factorization code (each frontal matrix is dense, however). UMFPACK
+has a symmetry-preserving option similar to that of MA48, except that the input
+parameter only sets a preference for diagonal pivots and the preference is not strict.
+We tested all methods with both scaled and unscaled matrices. The scale factors
+were computed by the Harwell Subroutine Library routine MC19A. Each row of the
+matrix scaled by MC19A was then subsequently divided by the maximum absolute
+value in the row (or column). We selected the threshold partial pivoting factor (u) to
+be 0.1 for all five methods. Table 6.1 summarizes the different options used for each
+method and indicates the number of runs performed in the experiments. The number
+in each case is determined by the number of options available in the particular code.
+The methods were tested on a single processor of a CRAY YMP C-98-512Mw-
+T. A. DAVIS AND I. S. DUFF
+
+Table
+Test matrices.
+name n jAj sym. discipline comments
+bcsstk08 1074 12960 1.000 structural eng.
+bcsstk28 4410 219024 1.000 solid element model
+bcsstk16 4884 290378 1.000 Corps. of Eng. dam
+plat1919 1919 32399 1.000 oceanography Atlantic and Indian oceans
+eng. 21x21x5 irregular grid
+sherman4 1104 3786 1.000 16x23x3 grid, fully implicit
+pores 2 1224 9613 0.612
+full grid
+shale
+sherman3 5005 20033 1.000 16x23x3 grid
+lns 3937 3937 25407 0.850 fluid flow linearized Navier-Stokes
+shyy41 4720 20042 0.723 viscous fully-coupled Navier-Stokes
+ex11mat 16614 1096948 1.000 3D cylinder and plate heat exch.
+shyy161 76480 329762 0.726 viscous fully-coupled Navier-Stokes
+mcfe 765 24382 0.699 astrophysics radiative transfer
+pollution
+eris1176 1176 18552 1.000 electric power
+linear programming basis
+migration
+mahindas 1258 7682 0.017 economics Victoria, Australia
+finan512 74752 596992 1.000 portfolio optimization
+radfr1 1048 13299 0.054 chemical eng. non-reactive separation
+light hydrocarbon recovery
+section
+reactive distillation
+extr1 2837 11407 0.004 dynamic simulation
+reactive distillation
+lhr04 4101 82682 0.015 light hydrocarbon recovery
+reactive distillation
+hydr1 5308 23752 0.004 dynamic simulation
+light hydrocarbon recovery
+gre 1107 1107 5664 0.000 discrete simul. computer system
+8, with 512 Megawords of memory (8-byte words). Version 6.0.3.22 of the Fortran
+compiler (CFT77) was used. Each method was given 95Mw of memory to factorize 34
+test matrices, listed in Table 6.2. The table lists the name, order, number of entries
+(jAj), symmetry, the discipline from which the matrix came, and additional comments.
+The symmetry is the number of matched off-diagonal entries over the total number of
+off-diagonal entries. An entry, a ij (j 6= i), is matched if a ji is also an entry. The table is
+subdivided by discipline, and disciplines are in order of decreasing average symmetry
+of the matrices in that discipline. Matrices within a discipline are ordered by size
+(n). All matrices are available via anonymous ftp. They include matrices from the
+Harwell/Boeing collection [11] (at orion.cerfacs.fr or numerical.cc.rl.ac.uk)
+and Saad's SPARSKIT2 collection (at ftp.cs.umn.edu). All other test matrices
+in the table are available from ftp.cis.ufl.edu:pub/umfpack/matrices. All
+petroleum engineering problems listed are from oil reservoir simulations.
+The best time from runs listed in Table 6.1 for each method is shown in Table 6.3.
+The best set of options tends to be dependent on the discipline, rather than the
+particular matrix. The optimal parameters (preservation of symmetry, scaling, or
+permutation to block triangular form) can usually be determined a priori. The time is
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 17
+
+Table
+Run time in seconds on a single processor of a CRAY YMP C-98-512Mw-8.
+method
+matrix discipline UMFPACK MA48 MUPS SSGETRF GPLU
+bcsstk08 structural eng. 0.342 0.416 0.708 0.588 21.044
+bcsstk28 1.564 6.771 1.204 2.896 312.059
+plat1919 oceanography 0.595 1.816 0.415 failed 21.716
+eng. 0.196 0.317 0.209 0.193 5.297
+sherman4
+pores 2 0.252 0.284 0.316 0.297 4.652
+sherman3 0.741 1.732 1.043 1.084 36.087
+lns 3937 fluid flow 1.869 5.437 1.899 1.746 38.213
+ex11mat 91.571 413.496 17.781 21.072 failed
+shyy161 14.541 140.211 failed 8.843 failed
+mcfe astrophysics 0.343 0.426 0.324 0.399 7.065
+eris1176 electric power 0.121 0.134 0.140 0.264 6.356
+failed
+mahindas economics 0.164 0.085 0.663 0.892 1.793
+finan512 30.787 184.727 46.691 146.275 failed
+chemical eng. 0.206 0.254 0.214 0.316 3.480
+lhr04 2.595 4.118 9.812 10.541 86.020
+failed 174.761 failed
+gre 1107 discrete simul. 0.307 0.329 0.378 0.380 7.161
+in seconds, and includes both the analysis and factorization times. It does not include
+the time to compute the scale factors, since we used the same scaling algorithm for
+all methods. The fastest time for each matrix is shown in bold.
+MUPS failed on the lhr71 and shyy161 matrices because of insufficient memory.
+These are very ill-conditioned problems that cause MUPS to be unable, on numerical
+grounds, to choose pivots selected by the analysis. This leads to an increase in fill-in
+and subsequent failure. SSGETRF failed for plat1919 because it was unable to
+determine a numerically acceptable pivot order (SSGETRF erroneously declared the
+plat1919 matrix as "singular"). GPLU exceeded the time limit (which was one hour)
+for five matrices.
+UMFPACK is faster than the other four methods for 16 out of 34 matrices. It is
+usually no more than about twice as slow as the fastest method, with the exception
+of the ex11mat matrix (a large matrix with symmetric nonzero pattern).
+However, UMFPACK normally requires more storage than the four other
+methods, as shown in Table 6.4. This table lists the memory used for the runs
+whose times are listed in Table 6.3. The smallest memory usage is shown in bold.
+UMFPACK uses from 1.0 to 3.6 times the memory required by the method needing the
+T. A. DAVIS AND I. S. DUFF
+
+Table
+Memory usage in megawords on a single processor of a CRAY YMP C-98-512Mw-8.
+method
+matrix discipline UMFPACK MA48 MUPS SSGETRF GPLU
+bcsstk08 structural eng. 0.229 0.295 0.187 0.170 0.524
+bcsstk28 2.162 3.043 1.674 1.236 2.023
+plat1919 oceanography 0.669 0.890 0.363 failed 0.371
+sherman4
+pores 2 0.163 0.179 0.236 0.164 0.115
+sherman3 0.764 0.938 0.567 0.430 0.867
+lns 3937 fluid flow 1.044 1.908 1.121 1.193 0.738
+ex11mat 56.743 53.552 22.941 15.981 failed
+shyy161 12.162 25.692 failed 7.570 failed
+eris1176 electric power 0.135 0.161 0.102 0.085 0.136
+failed
+mahindas economics 0.085 0.074 0.208 0.143 0.073
+finan512 22.938 54.545 31.524 21.951 failed
+chemical eng. 0.136 0.142 0.108 0.096 0.107
+lhr04 1.166 1.259 2.160 1.655 0.614
+failed 35.268 failed
+gre 1107 0.228 0.205 0.352 0.280 0.252
+least memory (usually GPLU for unsymmetric matrices, or SSGETRF for symmetric
+matrices). The median between these two values is 1.51. This is significant but
+not high enough to limit the usefulness of UMFPACK on the larger matrices (the
+shyy161, psmigr 1, finan512, and lhr71 matrices, for example). Part of the reason
+why UMFPACK uses so much memory is that is stores the original matrix (both
+pattern and numerical values) in both row and column form. The double storage of
+the matrix slightly facilitates the scanning and assembly of entries from A and A (see
+Section 3.2) but we plan to remove the double storage of reals from the next release
+of UMFPACK.
+The Level 3 BLAS matrix-matrix multiply (SGEMM) routine attains a
+performance of 901.5 Mflops for a 1024-by-1024 matrix multiply (stored in a 1025-by-
+1025 array) on one processor of a CRAY YMP C-98-512Mw-8. It reaches this peak
+performance quite quickly (810.5 Mflops for 64-by-64 matrices, and 887.7 Mflops for
+128-by-128 matrices). UMFPACK achieved a peak of 665.6 Mflops, for the ex11mat
+matrix. MUPS and SSGETRF obtained 441.5 and 327.0 Mflops, respectively, for
+the same matrix but both performed much less work than UMFPACK. The highest
+performance obtained by UMFPACK on a matrix for which it was the fastest was the
+UNSYMMETRIC-PATTERN MULTIFRONTAL METHOD 19
+finan512 matrix (359.0 Mflops). The peak performance of MA48 was 375.1 Mflops, for
+the psmigr 1 matrix. The peak performance of GPLU was 1.9 Mflops (for the bcsstk08
+primarily because its inner-most loops do not readily vectorize (even with
+the appropriate compiler directives). This is not a fundamental limitation of GPLU,
+however. Ng [31] reports that GPLU attains a much higher relative performance on
+an IBM RS/6000. For example, GPLU is faster than UMFPACK on the RS/6000 for
+the lns 3937 matrix, although the fastest BLAS were not used in his comparisons.
+Scaling the matrix had little effect on the factorization time and solution quality
+(as measured by the relative residual) for half the matrices in our test set. Scaling
+improved the results for the bcsstk08 and psmigr 1 matrices, and for the hydr1, radfr1,
+and rdist matrices for all codes except MUPS and SSGETRF.
+Permuting the matrix to block upper triangular form (BTF) usually reduces
+execution time and fill-in when the BTF is nontrivial. GPLU is always improved
+however trivial the BTF is.
+Symmetry is usually worth preserving if the pattern is symmetric, or moderately
+so. One class of matrices for which this is not so are those with zeros on the diagonal.
+We note that none of these methods use 2-by-2 pivots [10] and so are unable to preserve
+symmetry if there are zeros on the diagonal that are not filled by earlier pivot steps.
+If MA48 is unable to find stable diagonal pivots when the diagonal pivoting option is
+requested, it immediately switches to full code. This early switch may cause a large
+increase in storage required. It prevented us performing diagonal pivoting with MA48
+on the lns 3937 matrix. For the same matrix, UMFPACK selects off-diagonal pivot
+entries when the symmetry-preserving option is enabled.
+These performance statistics include both analysis and numerical factorization
+times. All of the five codes listed have factorize-only options that are usually much
+faster than the combined analysis+factorization phase(s), and indeed the design
+criterion for some codes (for example MA48) was to minimize factorize time even
+if this caused an increase in the initial analyse time. The factorize-only option in
+version 1.0 is not as fast as it could be since most of our library-code
+development effort has gone towards the combined analysis-factorize phase. The
+parallel factorize-only code [24, 26, 27] is not included in UMFPACK version 1.0.
+these results show that the unsymmetric-pattern multifrontal method is
+a competitive algorithm when compared with both the classical multifrontal approach
+(MUPS and SSGETRF) and algorithms based on more conventional sparse matrix
+data structures (MA48 and GPLU).
+
+Acknowledgments
+
+. We thank Patrick Amestoy, Mario Arioli, Michel Dayd'e,
+Theodore Johnson, and Steve Zitney for many helpful discussions, Joseph Liu for
+providing us a copy of the MMD ordering code, and John Gilbert for providing
+us a copy of the GPLU factorization code. Many researchers provided us with
+large unsymmetric matrices, a class of matrices that is weak in Release 1 of the
+Harwell/Boeing collection. These matrices are available via anonymous ftp to
+ftp.cis.ufl.edu in the pub/umfpack/matrices directory.
+
+
+
+--R
+
+Vectorization of a multiprocessor multifrontal code
+MUPS: a parallel package for solving sparse unsymmetric sets of linear equations
+Cray Research
+Users' guide to the unsymmetric-pattern multifrontal package (UMFPACK)
+
+
+Distribution of mathematical software via electronic mail
+On algorithms for obtaining a maximum transversal
+
+Direct Methods for Sparse Matrices
+Users' guide for the Harwell-Boeing sparse matrix collection (Release 1)
+An implementation of Tarjan's algorithm for the block triangularization of a matrix
+
+
+
+
+Exploiting structural symmetry in unsymmetric sparse symbolic factorization
+
+Computer Solution of Large Sparse Positive Definite Systems
+
+An implementation of Gaussian elimination with partial pivoting for sparse systems
+Elimination structures for unsymmetric sparse LU factors
+Sparse partial pivoting in time proportional to arithmetic operations
+On the LU Factorization of Sequences of Identically Structured Sparse Matrices within a Distributed Memory Environment
+Lost pivot recovery for an unsymmetric-pattern multifrontal method
+
+
+Modification of the minimum-degree algorithm by multiple elimination
+
+The elimination form of the inverse and its application to linear programming
+A comparison of some direct methods for solving sparse nonsymmetric linear systems
+On some pivotal strategies in Gaussian elimination by sparse technique
+--TR
+
+--CTR
+Cong Fu , Xiangmin Jiao , Tao Yang, Efficient Sparse LU Factorization with Partial Pivoting on Distributed Memory Architectures, IEEE Transactions on Parallel and Distributed Systems, v.9 n.2, p.109-125, February 1998
+Olaf Schenk , Klaus Grtner, Two-level dynamic scheduling in PARDISO: improved scalability on shared memory multiprocessing systems, Parallel Computing, v.28 n.2, p.187-197, February 2002
+Olaf Schenk , Klaus Grtner, Solving unsymmetric sparse systems of linear equations with PARDISO, Future Generation Computer Systems, v.20 n.3, p.475-487, April 2004
+Timothy A. Davis , John R. Gilbert , Stefan I. Larimore , Esmond G. Ng, A column approximate minimum degree ordering algorithm, ACM Transactions on Mathematical Software (TOMS), v.30 n.3, p.353-376, September 2004
+Timothy A. Davis , Iain S. Duff, A combined unifrontal/multifrontal method for unsymmetric sparse matrices, ACM Transactions on Mathematical Software (TOMS), v.25 n.1, p.1-20, March 1999
+Anshul Gupta, Recent advances in direct methods for solving unsymmetric sparse systems of linear equations, ACM Transactions on Mathematical Software (TOMS), v.28 n.3, p.301-324, September 2002
+Timothy A. Davis, A column pre-ordering strategy for the unsymmetric-pattern multifrontal method, ACM Transactions on Mathematical Software (TOMS), v.30 n.2, p.165-195, June 2004
+Xiang An , Zhi-Qing L, A fast algorithm based on partial basic solution vectors domain decomposition method for scattering analysis of electrically large cylinders, Journal of Computational Physics, v.219 n.2, p.930-942, December, 2006

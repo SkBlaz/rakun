@@ -1,0 +1,811 @@
+--T
+Parallel two level block ILU Preconditioning techniques for solving large sparse linear systems.
+--A
+We discuss issues related to domain decomposition and multilevel preconditioning techniques which are often employed for solving large sparse linear systems in parallel computations. We implement a parallel preconditioner for solving general sparse linear systems based on a two level block ILU factorization strategy. We give some new data structures and strategies to construct a local coefficient matrix and a local Schur complement matrix on each processor. The preconditioner constructed is fast and robust for solving certain large sparse matrices. Numerical experiments show that our domain based two level block ILU preconditioners are more robust and more efficient than some published ILU preconditioners based on Schur complement techniques for parallel sparse matrix solutions.
+--B
+Introduction
+High performance computing techniques, including parallel and distributing computa-
+tions, have undergone a gradual maturation process in the past two decades and are now
+moving from experimental laboratory studies into many engineering and scientific appli-
+cations. Although shared memory parallel computers are relatively easy to program, the
+most commonly used architecture in parallel computing practices is that of distributed
+Technical Report No. 305-00, Department of Computer Science, University of Kentucky, Lexington,
+KY, 2000. This research was supported in part by the U.S. National Science Foundation under grants CCR-
+9902022 and CCR-9988165, in part by the University of Kentucky Center for Computational Sciences and
+the University of Kentucky College of Engineering.
+y E-mail: cshen@cs.uky.edu.
+z E-mail: jzhang@cs.uky.edu. URL: http://www.cs.uky.edu/-jzhang.
+memory computers, using MPI or PVM for message passing [17, 20]. Even on shared
+memory parallel computers, the use of MPI for code portability has made distributed
+programming style prevalent. As a result, developing efficient numerical linear algebra
+algorithms specifically aiming at high performance computers becomes a challenging issue
+[9, 10].
+In many numerical simulation and modeling problems, the most CPU consuming part
+of the computations is to solve some large sparse linear systems. It is now accepted that,
+for solving very large sparse linear systems, iterative methods are becoming the method
+of choice, due to their more favorable memory and computational costs, comparing to the
+direct solution methods based on Gaussian elimination. One drawback of many iterative
+methods is their lack of robustness, i.e., an iterative method may not yield an acceptable
+solution for a given problem. A common strategy to enhance the robustness of iterative
+methods is to exploit preconditioning techniques. However, most robust preconditioners
+are derived from certain type of incomplete LU factorizations of the coefficient matrix and
+their efficient implementations on parallel computers are a nontrivial challenge.
+A recent trend in parallel preconditioning techniques for general sparse linear systems
+is to use ideas from domain decomposition concepts in which a processor is assigned
+a certain number of rows of the linear system to be solved. For discussions related to this
+point of view and comparisons of different domain decomposition strategies, see [3, 19, 34]
+and the references therein. A simple parallel preconditioner can be derived using some
+simple parallel iterative methods. Commonly used parallel preconditioners in engineering
+computations are point or block Jacobi preconditioners [4, 36]. These preconditioners are
+easy to implement, but are not very efficient, in the sense that the number of preconditioned
+iterations required to solve realistic problems is still large [35]. A more sophisticated
+approach to parallel preconditioning is to use domain decomposition and Schur complement
+strategies for constructing parallel preconditioners [34]. Preconditioners constructed
+from this approach may be scalable, i.e., the number of preconditioned iterations does
+not increase rapidly as the number of processors increases. Some techniques in this class
+include various distributed Schur complement methods for solving general sparse linear
+systems developed in [2, 5, 28, 27].
+For sparse matrices arising from (finite difference) discretized partial differential equations
+(PDEs), a level set technique can usually be employed to extract inherent parallelism
+from the discretization schemes. If an ILU(0) factorization is performed, then the forward
+and backward triangular solves associated with the preconditioning can be parallelized
+within each level set. This approach seems most suitable for implementations on shared
+memory machines with a small number of processors [11]. For many realistic problems with
+unstructured meshes, the parallelism extracted from the level set strategy is inadequent.
+Furthermore, ILU(0) preconditioner may not be accurate enough and the subsequent preconditioned
+iterations may converge slowly or may not converge at all. Thus, higher
+accuracy preconditioners have been advocated by a few authors for increased robustness
+[8, 21, 37, 45, 24, 30]. However, higher accuracy preconditioners usually means that more
+fill-in entries are kept in the preconditioners and the couplings among the nodes are increased
+as well [24]. The increased couplings reduce inherent parallelism and new ordering
+techniques must be employed to extract parallelism from higher accuracy preconditioners.
+In addition to standard domain decomposition concepts, preconditioning techniques
+designed specifically to target parallel computers include sparse approximate inverse and
+multilevel treatments [1, 7, 14, 39, 40]. Although claimed as inherently parallel precon-
+ditioners, efficient sparse approximate inverse techniques that can be run respectfully on
+distributed parallel computers are scarce [9]. Recently, a class of high accuracy preconditioners
+that combine the inherent parallelism of domain decomposition, the robustness of
+ILU factorization, and the scalability potential of multigrid method have been developed
+[30, 31]. The multilevel block ILU preconditioners (BILUM and BILUTM) have been
+tested to show promising convergence rate and scalability for solving certain problems.
+The construction of these preconditioners are based on block independent set ordering
+and recursive block ILU factorization with Schur complements. Although this class of
+preconditioners contain obvious parallelism within each level, their parallel implementations
+have not yet been reported.
+In this study, we mainly address the issue of implementing the multilevel block ILU
+preconditioners in a distributed environment using distributed sparse matrix template [26].
+The BILUTM preconditioner of Saad and Zhang [31] is modified to be implemented as a
+two level block ILU preconditioner on distributed memory parallel architectures (PBILU2).
+We used Saad's PSPARSLIB library 1 with MPI as basic communication routines. Our
+PBILU2 preconditioner is compared with one of the most favorable Schur complement
+based preconditioners of [27] in a few numerical experiments.
+This article is organized as follows. In Section 2 some background on block independent
+set ordering and the BILUTM preconditioner is given. In Section 3, we outline
+the distributed representations of general sparse linear systems. In Section 4, we discuss
+the construction of a preconditioner (PBILU2) based on two level block ILU factorization.
+Numerical experiments with a comparison of two Schur complement based preconditioners
+for solving various distributed linear systems are presented in Section 5 to demonstrate
+the merits of our two level block ILU preconditioner. Concluding remarks and comments
+on future work are given in Section 6.
+Independent Set and BILUTM
+Most distributed sparse matrix solvers rely on classical domain decomposition concept to
+partition the adjacency graph of the coefficient matrix. There are a few graph partitioning
+1 The PSPARSLIB library is available online from http://www.cs.umn.edu/Research/arpa/p sparslib/psp-abs.html.
+algorithms and software packages available [16, 18, 22]. Techniques to extract parallelism
+from incomplete LU factorizations, such as BILUM and BILUTM, usually relay on the
+fact that many rows of a sparse matrix can be eliminated simultaneously at a given stage
+of Gaussian elimination. A set consisting of such rows is called an independent set [13].
+For large scale matrix computations, the degree of parallelism extracted from traditional
+(point) independent set ordering is inadequent and the concept of block independent set
+is proposed [30]. Thus a block independent set is a set of groups (blocks) of unknowns
+such that there is no coupling between unknowns of any two different groups (blocks) [30].
+Various heuristic strategies for finding point independent sets may be extended to find a
+block independent set with different properties [30]. A simple and usually efficient strategy
+is the so-called greedy algorithm, which groups the nearest nodes together. Considering a
+general sparse linear system of the form
+where A is an unstructured real-valued matrix of order n. The greedy algorithm (or other
+graph partitioners) is used to find a block independent set from the adjacency graph of
+the matrix A. Initially, the candidate nodes for a block include all nodes corresponding
+to each row of the matrix A. Given a block size k, the greedy algorithm starts from the
+first node, groups the nearest k neighboring nodes, and drops the other nodes which are
+linked to any of the grouped k nodes into the vertex cover set. Here the vertex cover set is
+a set of nodes that have at least one link to at least one node of at least one block of the
+block independent set. The process can be repeated for a few times until all the candidate
+nodes have gone either into one of the independent blocks or into the vertex cover set. (If
+the number of remaining candidate nodes is less than k, all of them are put in the vertex
+cover set, and the meaning of the vertex cover set is then generalized to cover this case.)
+For detailed algorithm descriptions, see [30]. We remark that it is not necessary that all
+independent blocks have the same number of nodes [33]. They are chosen to have the
+same cardinality for the sake of load balance in parallel computations and for the sake of
+easy programming.
+In parallel implementations, a graph partitioner, similar to the greedy algorithm just
+described, is first invoked to partition the adjacency graph of A. Based on the resulting
+partitioning, the matrix A and the corresponding right hand side and the unknown vectors
+b and x are distributed to the individual processors.
+Suppose a block independent set with a uniform block size k has been found and the
+matrix A is symmetrically permuted into a two by two block matrix of the form
+where P is a permutation matrix. diagonal matrix of
+dimension ks, where s is the number of uniform blocks of size k. The blocks
+are usually dense if k is small. But they are sparse if k is large. In the implementation
+of BILUM, an exact inverse technique is used to compute B \Gamma1 by inverting each small
+independently. As it is noted in [33], such direct inversion strategy
+usually produces dense inverse matrices even if the original blocks are highly sparse
+with large size. There have been several sparsification strategies proposed to maintain
+the sparsity of B \Gamma1 [33]. In addition, sparse approximate inverse based multilevel block
+ILU preconditioners have been proposed in [43]. In this article, we employ an ILU factorization
+strategy to compute a sparse incomplete LU factorization of B. The approach is
+similar to the one used for BILUTM [31]. The construction of BILUTM preconditioner
+is based on a restricted ILU factorization of (2) with a dual dropping strategy (ILUT)
+[31]. This multilevel block ILU preconditioner (BILUTM) not only retains the robustness
+and flexibility of ILUT, but also is more powerful than ILUT for solving some difficult
+problems and offers inherent parallelism that can be exploited on parallel or distributed
+architectures.
+3 Distributed Sparse Linear System and SLU Preconditioner
+A distributed sparse linear system is a collection of sets of equations that assigned to
+different processors. The parallel solution of a sparse linear system begins with partitioning
+the adjacency graph of the coefficient matrix A. Based on the resulting partitioning, the
+data is distributed to processors such that pairs of equations-unknowns are assigned to
+the same processor. A type of distributed matrix data structure based on subdomain
+decomposition concepts has been proposed in [29, 26], also see [28]. Based on these
+concepts, after the matrix A is assigned to each processor, the unknowns in each processor
+are divided into three types: (1) interior unknowns that are coupled only with local
+equations; (2) local interface unknowns that are coupled with both nonlocal (external)
+and local equations; and (3) external interface unknowns that belong to other subdomains
+and are coupled with local equations. The submatrix assigned to a certain processor, say,
+processor i, is split into two parts: the local matrix A i , which acts on the local variables,
+and an interface matrix X i , which acts on the external variables. Accordingly, the local
+equations in a given processor can be written as
+The local matrix is reordered in such a way that the interface points are listed last after
+the interior points. Then we have a local system written in a block format
+!/
+where N i is the indices of subdomains that are neighbors to the reference subdomain i.
+It is exactly the set of processors that the reference processor needs to communicate with
+to receive information. The a part of the product X i y i;ext which reflects the
+contribution to the local equation from the neighboring subdomain j. The sum of these
+contributions is the result of multiplying X i by the external interface unknowns, i.e.,
+The preconditioners which are built upon this distributed data structure for the original
+matrix will not form an approximation to the global Schur complement explicitly. Some of
+such domain decomposition based preconditioners are exploited in [27]. The simplest one
+is the additive Schwarz procedure, which is a form of block Jacobi (BJ) iteration, where
+the blocks refer to submatrices associated with each subdomains, i.e.,
+Even though it can be constructed easily, block Jacobi preconditioning is not robust and
+is inefficient, comparing to other Schur complement type preconditioners. One of the best
+among these Schur complement based preconditioners is SLU which is the distributed
+approximate Schur LU preconditioner [27]. The preconditioning to the global matrix A is
+defined in terms of a block LU factorization which involves a solve with the global Schur
+complement system at each preconditioning step. Incomplete LU factorization is used in
+SLU to approximate the local Schur complements. Numerical results reported in [27] show
+that this Schur (I)LU preconditioner demonstrates superior scalability performance over
+block Jacobi preconditioner and is more efficient than the latter in terms of parallel run
+time.
+4 A Class of Two Level Block Preconditioning Techniques
+PBILU2 is a two level block ILU preconditioner based on the BILUTM techniques described
+in [31]. As we noted before, BILUTM offers a good parallelism and robustness
+due to its large size of block independent set. The graph partitioner in BILUTM is the
+greedy algorithm for finding a block independent set [30, 31].
+4.1 Distributed matrix based on block independent set
+In our implementation, the block size of the block independent set must be given before
+the search algorithm starts. The choice of the block size k is based on the problem size
+and the density of the coefficient matrix A. The choice of k may also depend upon the
+number of available processors. Assume that a block independent set with a uniform block
+size k has been found, and the coefficient matrix A is permuted into a block form as in
+The "small" independent blocks are then divided into several groups according to the
+number of available processors. For the sake of load balance on each processor, each group
+holds approximate the same number of independent blocks. (The numbers of independent
+blocks in different groups may differ at most by 1.) At the same time, the global vector
+of unknowns x is split into two subvectors . The right hand side vector b is also
+conformally split into subvectors f and g. Such a reordering leads to a block systemB
+Bm Fm
+um
+where m is the number of processors used in the computation. Each block diagonal
+contains several independent blocks. Note that the submatrix
+F i has the same row numbers with the block submatrix B i . The submatrices E and C
+are also divided into m parts according to the load balance criterion in order to have
+approximately the same amount of loads in each processor. E i and C i also have the same
+row numbers. Those submatrices are assigned to the same processor i. u i
+and y i are the local part of the unknown vector, and f i and g i are the local part of the
+right hand side vectors. They are partitioned and assigned to a certain processor i at
+the same time when the matrix is distributed. When this processor-data assignment is
+done, each processor holds several rows of the equations. The local system of equations
+in processor i can be written as:
+where u is some part of the unknown subvector: which acts on sub-matrices
+another part of the unknown subvector:
+acts on F i and C i . (Only B i acts on the completely local vector u i .) We take u i and y i
+as the local unknowns, but they are not completely interior vectors. So preconditioners
+based on this type of block independent set ordering domain decomposition is different
+from the straightforward domain decomposition based on a rowwise strip partitioning as
+(3) used in [27]. An obvious difference between the partitionings (3) and (5) is that in (5),
+the action of F i is not completely local, while it is local in (3). However, since the nature
+of the submatrices different in the two decomposition strategies, it is
+not easy to say which one is better at this stage.
+4.2 Derivation of Schur complement techniques
+A key idea in domain decomposition techniques is to develop preconditioners for the
+global system (1) by exploiting methods that approximately solve the Schur complement
+system in parallel. A parallel construction of the PBILU2 preconditioner based on block
+independent set domain decomposition for computing an approximation to the global
+Schur complement will be described. For deriving the global Schur complement, another
+parts of the coefficient matrix A need to be partitioned and sent to a certain processor.
+We rewrite the reordered coefficient matrix in the system (2)
+Bm Fm
+Thus there are two ways to partition the submatrix E: one is to partition E by rows and
+the other is by columns. That is
+Those submatrices which will also be assigned to the processor i, have
+the same number of columns as the block diagonal submatrix and the
+same number of rows as the submatrix C.
+Remark 4.1 Here we clear a potential confusion for the two representations of the sub-matrix
+E. The row partitioning of E in (4) is used for representing the "local" matrix
+A i in the form of (5), which is different from the local matrix A i in (3) and will be kept
+throughout the computational process. The column partitioning of E in (6) is just for the
+convenience of computing the Schur complement matrix in parallel. The column partitioning
+of E is not kept after the construction of the Schur complement matrix. In most cases,
+the submatrix E is small and highly sparse, if B is large.
+Consider a block LU factorization of (2) in the form of
+I 0
+!/
+where S is the global Schur complement:
+Now, suppose we can invert B by some means, we can rewrite Equation (8) as:
+FmC A
+Each processor can compute one component of the sum
+independently,
+then partitions the rows of the submatrix M
+each part of the
+rows must be conformal to each submatrix C m. They are then scattered
+to other processors. (There is a global communication needed for scattering.) Finally,
+the local part of the Schur complement matrix can be constructed independently in each
+processor. The simplest implementation for this approach to constructing the distributed
+Schur complement matrix in an incomplete LU factorization is to use a parallel block
+restricted IKJ version of Gaussian elimination, similar to the sequential algorithm used
+in BILUTM [31]. This method can decrease communications among processors and offers
+flexibility in controlling the amount of fill-in during the ILU factorization.
+4.3 Parallel restricted Gaussian elimination
+BILUTM is a high accuracy preconditioner based on incomplete LU factorization. It utilizes
+a dual dropping strategy of ILUT to control the computational and storage (memory)
+costs [24]. Its implementation is based on the restricted IKJ version of Gaussian elimi-
+nation, discussed in detail in [31]. In the remaining part of this subsection, we outline a
+parallel implementation of the restricted IKJ version of Gaussian elimination, using the
+distributed data structure discussed in the previous subsection.
+On the ith processor, a local submatrix is formed based on those submatrices assigned
+to this processor and an ILU factorization on this local matrix will be performed. 2 This
+local matrix in processor i looks like
+In PBILU2, the "local" matrix A i
+means it is stored in the local processor i. It does not necessarily
+mean that A i
+acts only on interior unknowns.
+Note that the submatrix -
+C i has the same size as the submatrix C in the Equation (7). In
+the submatrix -
+only the elements corresponding to the nonzero entries of the submatrix
+may not be zero, the others are zero elements. Recalling the permuted matrix in (2)
+and in the left hand side of (7), if we let the submatrices C the
+submatrix -
+C i is then obtained.
+We perform a restricted Gaussian elimination on the local matrix (10). This is a
+slightly different elimination procedure. First we perform an (I)LU factorization (Gaussian
+elimination) to the upper part of the local matrix, i.e., to the submatrix (B i F i ). We then
+continue the Gaussian elimination to the lower part (M i -
+but the elimination is only
+performed with respect to nonzero (and the accepted fill-in) entries of the submatrix M i .
+The entries in -
+are modified accordingly. When performing these operations on the
+lower part, the upper part of the matrix is only accessed, but not modified, see Figure 1.
+F
+Not processed, not accessed
+Processed, not accessed
+Accessed, not modified
+Not accessed,
+not modified
+Accessed, not modified
+
+Figure
+
+1: Illustration of the restricted IKJ version of Gaussian elimination. Here the
+submatrices
+respectively, as
+in Equation (10).
+After this is done, three kinds of submatrices are formed, which will be used in later
+iterations:
+1. The upper part of the matrix after the upper part Gaussian elimination is (UB i
+so we have L \Gamma1
+2. The upper part of the matrix has also been performed an (I)LU factorization for the
+block diagonal submatrix B i so that B i - LB i
+. Thus we have
+We can extract the submatrices LB i
+and UB i
+from the upper part of the factored
+local matrix for later use.
+3. In the restricted factorization of the lower part of A i , we obtain a new reduced
+submatrix, which is represented by ~
+C i and will form a piece of the global Schur
+complement matrix.
+In fact, this submatrix ~
+~
+Note that B \Gamma1
+F i and the factor matrix L \Gamma1
+F i is already available after
+the factorization of the upper part of A i . So
+can be computed in processor
+i by first solving for an auxiliary matrix Q i in UB i
+followed by a matrix-matrix
+multiplication of M i Q i . However, this part of the computation is done implicitly
+in the restricted IKJ Gaussian elimination process, in the sense that all computations in
+constructing a piece of the Schur complement matrix S, ~
+processor i, is done by a
+restricted ILU factorization on the lower part of the local matrix. In other words, ~
+C i is
+formed without explicit linear system solve or matrix-matrix multiplication. For detailed
+computational procedure, see [31].
+Considering Equation (9) for Schur complement computation, it can be rewritten in
+the form of:
+This computation can be done in parallel, thanks to the block diagonal structure of B. If
+the Gaussian elimination is an exact factorization, the global Schur complement matrix
+can be formed by summing all these submatrices ~
+together. That is
+Each submatrix ~
+parts (use the same partitionings as
+the original submatrix C), and corresponding parts are scattered to relevant processors.
+After receiving and summing all of those parts of submatrices which have been scattered
+from different processors, the "local" Schur complement matrix ~
+S i is formed. Here the
+"local" means some rows of the global Schur complement that are held in a given processor.
+Note that ~
+Remark 4.2 The restricted IKJ Gaussian elimination yields a block (I)LU factorization
+of the local matrix (10) in the form of
+I i
+!/
+However, the submatrices L \Gamma1
+are no longer needed in later computations
+and are discarded. This strategy saves considerable storage space and is different from the
+current implementation of SLU in the PSPARSLIB library [25, 29, 27].
+4.4 Induced global preconditioner
+It is possible to develop preconditioners for the global system (1) by exploiting methods
+that approximately solve the reduced system (8). These techniques are based on reordering
+the global system into a two by two block form (2). Consider the block LU factorization
+in the Equation (7), This block factored matrix can be preconditioned by an approximate
+LU factorization such as
+I 0
+where ~
+S is an approximation to the global Schur complement matrix S, formed in (12).
+Therefore, a global preconditioning operation induced by a Schur complement solve is
+equivalent to solving
+LU
+y
+f
+by a forward solve with L and a backward substitution with U . The computational
+procedure would consist of the following three steps (with ~ g being used as an auxiliary
+1. Compute the Schur complement right hand side ~
+2. Approximately solve the reduced system ~
+3. Back substitution for the u variables, i.e., solve
+Each of these steps can be computed in parallel in each processor with some communications
+and boundary information exchange among the processors.
+As our matrix partitioning approach is different from the one used in [27], it needs
+some communications among processors while computing the global Schur complement
+right hand side ~
+g in each processor. It is easy to see that
+~
+~
+mC A =B @
+mC A \GammaB @
+So each of the local Schur complement right hand side can be computed in this way:
+~
+We rewrite the approximate reduced (Schur complement) system ~
+~
+~
+where the submatrix X ij is a boundary matrix which acts on external variables y
+There are numerous ways to solve this reduced system. One option considered in [27]
+starts by replacing
+~
+by an approximate system of the form
+in which -
+S i is the local approximation to the local Schur complement matrix ~
+This
+formulation can be viewed as a block Jacobi preconditioned version of the Schur complement
+system (13). The above system is then solved by an iterative accelerator such as
+GMRES which requires a solve with -
+S i at each step. In our current implementation, an
+ILUT factorization of ~
+S i is performed for the purpose of block Jacobi preconditioning.
+The third step in the Schur complement preconditioning can be performed without
+any problem. Since B is block diagonal, the solution of can be computed
+in parallel at each iteration step. In each processor i, we have y, and we
+actually solve LB i
+y, as the factors LB i
+are available. Here we need
+to exchange boundary information among the processors, since not all components of y
+required by F i is in processor i.
+5 Numerical Experiments
+In numerical experiments, we compared the performance of the previously described
+PBILU2 preconditioner and the distributed Schur complement LU (SLU) preconditioner of
+[27] for solving a few sparse matrices from discretized two dimensional convection diffusion
+problems, and from application problems in computational fluid dynamics.
+The computations were carried out on a 32 processor (200 MHz) subcomplex of a (64
+processor) HP Exemplar 2200 (X-Class) supercomputer at the University of Kentucky. It
+has 8 super nodes interconnected by a high speed and low latency network. Each super
+node has 8 processors attached to it. This supercomputer has a total of 16 GB shared
+memory and a theoretical operation speed at 51 GFlops. We used the MPI library for
+interprocessor communications. The other (major) parts of the code are mainly written in
+Fortran 77 programming language, with a few C routines for handling dynamic allocations
+of memory. Many of the communication subroutines and the SLU preconditioner code were
+taken from the PSPARSLIB library [25].
+In all tables containing numerical results, "n" denotes the dimension of the matrix;
+"nnz" represents the number of nonzeros in the sparse matrix; "np" is the number of
+processors used; "iter" is the number of preconditioned FGMRES iterations (outer it-
+erations); "F-time" is the CPU time in seconds for the preconditioned solution process
+with FGMRES; "P-time" is the total CPU time in seconds for solving the given sparse
+matrix, starting from the initial distribution of matrix data to each processor from the
+master processor (processor 0). P-time does not include the graph partitioning time and
+initial permutation time associated with the partitioning, which were done sequentially in
+processor 0. Thus, P-time includes matrix distribution, local reordering, preconditioner
+construction, and iteration process time (F-time). "S-ratio" stands for the sparsity ratio,
+which is the ratio between the number of nonzeros in the preconditioner and the number
+of nonzeros in the original matrix A. k is the block size used in PBILU2, "p" is the number
+of nonzeros allowed in each of the L and U factors of the ILU factorizations, - is the drop
+tolerance. p and - have the same meaning as those used in Saad's ILUT [24].
+Both preconditioners use a flexible variant of restarted GMRES (FGMRES) [23] to
+solve the original linear system since this accelerator permits a change in the preconditioning
+operation at each step, which is our current case, since we used an iterative process
+for approximately solving the Schur complement matrix in each outer FGMRES iteration.
+The size of the Krylov subspace was set to be 50. The linear systems were formed by assuming
+that the exact solution is a vector of unit. Initial guess was some random vectors
+with components in (0; 1). The convergence was achieved when the 2-norm residual of
+the approximate solution was reduced by 6 orders of magnitude. We used an inner-outer
+iteration process. The maximum number of outer preconditioned FGMRES iterations was
+500. The inner iteration to solve the Schur complement system used GMRES(5) (without
+restart) with a block Jacobi type preconditioner. The inner iteration was stopped when
+the 2-norm residual of the inner iteration was reduced by 100, or the number of the inner
+iterations was greater than 5.
+5.1 5-POINT and 9-POINT matrices
+We first compared the parallel performance of different preconditioners for solving some
+5-POINT and 9-POINT matrices. The 5-POINT and 9-POINT matrices were generated
+by discretizing the following convection diffusion equation
+on a two dimensional unit square. Here Re is the so-called Reynolds number. The convection
+coefficients were chosen as p(x; exp(\Gammaxy). The right
+hand side function was not used since we generated artificial right hand sides for the sparse
+linear systems as stated above. The 5-POINT matrices were generated using the standard
+central difference discretization scheme. The 9-POINT matrices were generated using a
+fourth order compact difference scheme [15]. These two types of matrices have been used
+to test BILUM and other ILU type preconditioners in [30, 31, 41].
+Most comparison results for parallel iterative solvers report CPU timing results and
+iteration numbers. However, in general, it is difficult to make a fair comparison for two
+different preconditioning algorithms without listing the resource costs to achieve the given
+results. Since the accuracy of the preconditioners is usually influenced by the fill-in entries
+kept, the memory (storage) cost of a preconditioner is an important indicator of the
+efficiency of a preconditioner. Preconditioners that use more memory space are, in general,
+faster than those that use less memory space. A good preconditioner should not use too
+much memory space and still achieve fast convergence. To this end, we report in this paper
+the number of preconditioned iterations, the parallel CPU time for the preconditioned
+solution process, the parallel CPU time for the entire computational process, and the
+sparsity ratio.
+We first chose Re = 0 and for the 5-POINT matrix. The block size was
+chosen as 200, and the dropping parameters were chosen as . For
+SLU, we used one level overlapping among the subdomains, as suggested in [27]. The test
+results are listed in Table 1. We found that our PBILU2 preconditioner is faster than the
+SLU preconditioner of [27] for solving this problem. PBILU2 takes a smaller number of
+iterations to converge than SLU did. The convergence rates of both PBILU2 and SLU
+are not strongly affected by the number of processors employed, which indicates a good
+scalability with respect to the parallel system for these two preconditioners. Moreover,
+PBILU2 took much less parallel CPU time than SLU and needed only about a half of the
+memory space consumed by SLU to solve this matrix. (See Remark 4.2 for an explanation
+on the difference in storage space for PBILU2 and SLU. 3 )
+We also tested the same matrix with a smaller value of In this case, we
+report two test cases with SLU: one level overlapping of subdomains and nonoverlapping
+of subdomains. The test results are listed in Table 2. In our experiments, we found
+3 The sparsity ratios for PBILU2 and SLU were measured for all storage spaces used for
+storing the preconditioner. It may be the case that some of these storage spaces for SLU
+could be released. However, the sparsity ratios for SLU reported in this article were based
+on the SLU code distributed in the PSPARSLIB library version 3.0 and was downloaded from
+http://www.cs.umn.edu/Research/arpa/p sparslib/psp-abs.html in November 1999.
+
+Table
+
+1: 5-POINT matrix:
+One level overlapping for SLU.
+Preconditioner np iter F-time P-time S-ratio
+PBILU2
+SLU 34 34.22 54.37 12.02
+PBILU2
+
+Table
+
+2: 5-POINT matrix:
+One level overlapping (nonoverlapping for results in brackets) for SLU.
+Preconditioner np iter F-time P-time S-ratio
+SLU 44 (50) 31.47 51.59 9.15 (9.25)
+that overlapping or nonoverlapping of subdomains do not make much difference in terms
+of parallel run time. (Only parallel CPU timings for the overlapping cases are reported
+in
+
+Table
+
+2.) This observation is in agreement with that made in [27]. However, the
+overlapping version of SLU converged faster than the nonoverlapping version. Ironically,
+the nonoverlapping version has a slightly larger sparsity ratio. This is because the storage
+space for the preconditioner is primarily determined by the dual dropping parameters p
+and - . The overlapping makes the local submatrix look larger, thus reduces the sparsity
+ratio which is relative to the number of nonzeros of the coefficient matrix. We remark
+that PBILU2 is again seen to converge faster and to take less parallel run time than SLU,
+overlapped or nonoverlapped, to solve this 5-POINT matrix using the given parameters.
+Since the costs and performance of overlapping and nonoverlapping SLU are very
+close, we only report results with overlapping version of SLU in the remaining numerical
+tests.
+Comparing the results of Tables 1 and 2, we see that a higher accuracy PBILU2
+preconditioner (using larger p) performed better than a lower accuracy PBILU2 in terms
+of iteration counts and parallel run time. The higher accuracy one, of course, takes more
+memory space to store.
+The SLU preconditioner with overlapping has been tested in [27]. It was compared
+with some other preconditioners such as BJ (block Jacobi), SI ("pure" Schur complement
+iteration) and SAPINV (distributed approximate block LU factorization with sparse approximate
+etc. The numerical experiments in [27] showed that SLU retains its
+superior performance over BJ and SI preconditioners and can be comparable with Schur
+complement preconditioning (with local Schur complements inverted by SAPINV). How-
+ever, our parallel PBILU2 preconditioner is shown to be more efficient than SLU.
+Here we explain the communication cost of PBILU2 with some experimental data
+corresponding to the numerical results in Table 2. For example, for the total
+parallel computation time (P-time) is 18:03 seconds for PBILU2, the communication time
+for constructing the Schur complement matrix is only 1:45 seconds. So the communication
+for constructing PBILU2 in this case only costs about 8:04% of the total parallel computation
+time. For 4, the total parallel computation time (P-time) is 114:25 seconds, the
+communication time is 0:72 second. The communication time for constructing PBILU2 is
+only about 0:63% of the total parallel computation time. So the cost for communication
+in constructing the PBILU2 preconditioner is not high.
+We also used larger n and varied Re to generate some larger 5-POINT and 9-POINT
+matrices. The comparison results are given in Tables 3 and 4. These results are comparable
+with the results listed in Tables 1 and 2. However, the parallel run time (P-time) for SLU in
+
+Tables
+
+3 and 4 increased dramatically (more than tripled) when the number of processors
+increased from 24 to 32.
+The results for a 5-POINT matrix of is given in Table 5. Once again, we
+see that PBILU2 performed much better than SLU. Furthermore, the scalability of SLU is
+degenerating for this test problem. The number of iterations is 13 when 4 processors were
+used. It increased to 22 when processors were used. For our PBILU2 preconditioner,
+the number of iterations is almost constant 12 when the number of processors increased
+from 4 to 32. The very large P-time results for SLU, especially for
+that the distribution of a large amount of data on this given parallel computer using the
+partitioning strategy in SLU may present some problems.
+Another set of tests were run for solving the 9-POINT matrix with
+. The parallel iteration times (F-time) with respect to different number of
+processors for both PBILU2 and SLU are plotted in Figure 2. Once again, PBILU2 solved
+this 9-POINT matrix faster than SLU did. In Figure 3, the numbers of preconditioned
+FGMRES iterations of PBILU2 and SLU are compared with respect to the number of
+
+Table
+
+3: 9-POINT matrix:
+\Gamma4 . One level overlapping for SLU.
+Preconditioner np iter F-time P-time S-ratio
+SLU 19 16.76 46.66 4.50
+PBILU2
+SLU 19 24.31 151.24 4.51
+
+Table
+
+4: 5-POINT matrix:
+\Gamma4 . One level overlapping for SLU
+Preconditioner np iter F-time P-time S-ratio
+
+Table
+
+5: 5-POINT matrix: One
+level overlapping for SLU.
+Preconditioner np iter S-time P-time S-ratio k
+SLU 19 41.80 101.68 7.11
+SLU 22 35.22 1630.28 7.10
+time
+number of processors
+dash line - SLU iteration
+solid line - PBILU2 iteration
+
+Figure
+
+2: Comparison of parallel iteration time (F-time) for the PBILU2 and SLU preconditioners
+for solving a 9-POINT matrix with Parameters used
+are
+processors employed, to solve the same 9-POINT matrix. Figure 3 indicates that the
+convergence rate of PBILU2 improved as the number of processor increased, but the
+convergence rate of SLU deteriorated as the number of processors increased.
+We summarize the comparison results in this subsection with the 5-POINT and
+9-POINT matrices from the finite difference discretized convection diffusion problems.
+From the above tests, it can be seen that PBILU2 needs less than half of the storage space
+required for SLU, when the parameters are chosen comparably. With more storage space
+consumed by SLU, PBILU2 still outperformed SLU with a faster convergence rate and
+less parallel run time. Meanwhile, we can see that as the number of processors increases,
+the parallel CPU time decreases, the number of iterations is not affected significantly for
+PBILU2.
+5.2 FIDAP matrices
+This set of test matrices were extracted from the test problems provided in the FIDAP
+package [12]. 4 As many of these matrices have small or zero diagonals, they are difficult
+to solve with standard ILU preconditioners [42]. We tested more than 31 FIDAP matrices
+for both preconditioners. We found that PBILU2 can solve more than twice as many
+FIDAP matrices as SLU does. In out tests, PBILU2 solved 20 FIDAP matrices and SLU
+solved 9. These tests show that our parallel two level block ILU preconditioner is more
+4 These matrices are available online from the MatrixMarket of the National Institute of Standards and
+Technology at http://math.nist.gov/MatrixMarket.
+number
+number of processors
+dash line - SLU iteration
+solid line - PBILU2 iteration
+
+Figure
+
+3: Comparison of the numbers of preconditioned FGMRES iterations for the
+PBILU2 and SLU preconditioners for solving a 9-POINT matrix with
+Parameters used are
+robust than the SLU preconditioner. Our approach has also shown its merits in terms of
+its smaller construction and parallel solution costs, smaller memory cost, smaller number
+of iterations, compared with SLU preconditioner. For the sake of brevity, we only listed
+results for three representative large test matrices in Tables 6 and 7, and in Figure 4.
+Note that "-" in Table 6 means that the preconditioned iterative method did not
+converge or the number of iterations is greater than 500. We varied the parameters of
+fill-in (p) and drop tolerance (-) in Table 6 for both preconditioners and adjusted the size
+of block independent set for the PBILU2 approach. PBILU2 is clearly shown to be more
+robust than SLU to solve this FIDAP matrix.
+FIDAP035 is a matrix larger than FIDAPM29. In this test, we have also adjusted
+the fill-in and drop tolerance parameters (p; -) from (50;
+SLU and PBILU2. The test results for PBILU2 with convergence are reported in Table 7.
+Note that very small - values are required for the ILU factorizations. It seems difficult for
+SLU to converge for this test problem for the parameter pairs listed in Table 7 and other
+parameter pairs tested. So no SLU results are listed in Table 7.
+
+Figure
+
+4 shows the parallel iteration time (F-time) with respect to the number of
+processors for PBILU2 to solve the FIDAP019 matrix. We see that the parallel iteration
+time decreased as the number of processors increased, which demonstrates a good
+speedup for solving an unstructured general sparse matrix.
+Even for some of the FIDAP matrices that both PBILU2 and SLU converge, PBILU2
+usually shows superior performance over SLU in terms of the number of iterations and the
+
+Table
+
+Preconditioner np p - iter F-time P-time S-ratio
+
+Table
+
+7: FIDAP035 matrix,
+Preconditioner np p - k iter F-time P-time S-ratio
+28 1.69 4.13 3.96
+iteration
+time
+number of processors
+solid line: PBILU2 iteration
+
+Figure
+
+4: Parallel iteration time (F-time) of PBILU2 for the FIDAP019 matrix with
+Parameters used for PBILU2 were
+900. The sparsity ratio was approximately 3:45.
+
+Table
+
+8: Flat10a matrix,
+Preconditioner np k iter F-time P-time S-ratio
+
+Table
+
+9: Flat30a matrix,
+Preconditioner np k iter S-ratio
+sparsity ratio.
+5.3 Flat matrices
+The Flat matrices are from fully coupled mixed finite element discretization of three dimensional
+Navier-Stokes equations [4, 44] 5 . Flat10a means that the matrix is from the
+first Newton step of the nonlinear iterations, with 10 elements in each of the x and y
+coordinate directions, and 1 element in the z coordinate direction. There is only one element
+in the z coordinate direction because of the limitation on the computer memory
+used to generate these matrices. The same explanation holds for the Flat30a matrix,
+which uses 30 elements in each of the x and y coordinate directions. These matrices were
+generated to keep the variable structural couplings in the Navier-Stokes equations, so they
+may have "nonzero" entries that actually have a "numerical" zero value. Note that these
+two matrices are actually symmetric, since they are from the first Newton step where the
+velocity vector is set to be zero. However, this symmetry information is not utilized in
+our computation.
+We see from Tables 8 and 9 that PBILU2 was able to solve these two CFD matrices
+with small - values. These two matrices were difficult for SLU to converge. The small
+sparsity ratios reflect our previous remark that the two Flat matrices have many numerical
+zero entries, which are ignored in the thresholding based ILU factorization, but are counted
+towards the sparsity ratio calculations.
+Matrices from fully coupled mixed finite element discretizations of Navier-Stokes
+equations are notoriously difficult to solve with preconditioned iterative methods [6, 44].
+Standard ILU type preconditioners tend to fail or produce unstable factorizations, unless
+5 The Flat matrices are available from the second author.
+the variables are orders properly [44]. The suitable orderings are not difficult to implement
+in sequential environments [6, 44]. It seems, however, a nontrivial task to perform
+analogous orderings in a parallel environment.
+6 Concluding Remarks and Future Work
+We have implemented a parallel two level block ILU preconditioner based on a Schur
+complement preconditioning. We discussed the details on the distribution of "small" independent
+blocks to form a subdomain in each processor. We gave a computational procedure
+for constructing a distributed Schur complement matrix in parallel. We compared our parallel
+preconditioner, PBILU2, with a scalable parallel two level Schur LU preconditioner
+published recently. Numerical experiments show that PBILU2 demonstrates good
+scalability in solving large sparse linear systems on parallel computers. We also found that
+PBILU2 is faster and computationally more efficient than SLU in most of our test cases.
+PBILU2 is also efficient in terms of memory consumption, since it uses less memory space
+than SLU to achieve better convergence rate.
+The FIDAP and Flat matrices tested in Sections 5.2 and 5.3 have small or zero
+main diagonal entries. The poor convergence performance of both PBILU2 and SLU is
+mainly due to the instability associated with ILU factorizations of these matrices. Diagonal
+thresholding strategies [32, 38] can be employed in PBILU2 to exclude the rows with small
+diagonals from the submatrix B, so that its ILU factorization will be stable. The parallel
+implementation of diagonally thresholded PBILU2 will be investigated in our future study.
+We plan to extend our parallel two level block ILU preconditioner to truly parallel
+multilevel block ILU preconditioners in our future research. We also plan to test our
+parallel preconditioners on other emerging high performance computing platforms, such
+as on the PC clusters.
+
+
+
+--R
+
+An MPI implementation of the SPAI preconditioner on the T3E.
+A parallel non-overlapping domain- decomposition algorithm for compressible fluid flow problems on triangulated do- mains
+A comparison of some domain decomposition and ILU preconditioned iterative methods for nonsymmetric elliptic problems.
+Parallel finite element solution of three-dimensional Rayleigh- ' Benard-Marangoni flows
+ParPre: a parallel preconditioners package reference manual for version 2.0.
+Preconditioned conjugate gradient methods for the incompressible Navier-Stokes equations
+A priori sparsity patterns for parallel sparse approximate inverse precondi- tioners
+Towards a cost effective ILU preconditioner with high level fill.
+Numerical Linear Algebra for High-Performance Computers
+Developments and trends in the parallel solution of linear systems.
+Parallelization of the ILU(0) preconditioner for CFD problems on shared-memory computers
+FIDAP: Examples Manual
+Computer Solution of Large Sparse Positive Definite Systems.
+Parallel preconditioning and approximate inverse on the Connection machines.
+A single cell high order scheme for the convection-diffusion equation with variable coefficients
+The Chaco User's Guide
+Scalable Parallel Computing.
+Parallel multilevel k-way partitioning scheme for irregular graphs
+A comparison of domain decomposition techniques for elliptic partial differential equations and their parallel implementation.
+Introduction to Parallel Computing.
+Direct Methods for Sparse Matrices.
+Partitioning sparse matrices with eigenvectors of graphs.
+A flexible inner-outer preconditioned GMRES algorithm
+ILUT: a dual threshold incomplete LU preconditioner.
+Parallel sparse matrix library (P SPARSLIB): The iterative solvers module.
+Iterative Methods for Sparse Linear Systems.
+Distributed Schur complement techniques for general sparse linear systems.
+Domain decomposition and multi-level type techniques for general sparse linear systems
+Design of an iterative solution module for a parallel sparse matrix library (P SPARSLIB).
+BILUM: block versions of multielimination and multilevel ILU preconditioner for general sparse linear systems.
+BILUTM: a domain-based multilevel block ILUT preconditioner for general sparse matrices
+Diagonal threshold techniques in robust multi-level ILU preconditioners for general sparse linear systems
+Enhanced multilevel block ILU preconditioning strategies for general sparse linear systems.
+Domain Decomposition: Parallel Multilevel Methods for Elliptic Partial Differential Equations.
+High performance preconditioning.
+Parallel computation of incompressible flows in materials processing: numerical experiments in diagonal preconditioning.
+Application of sparse matrix solvers as effective preconditioners.
+A multilevel dual reordering strategy for robust incomplete LU factorization of indefinite matrices.
+A parallelizable preconditioner based on a factored sparse approximate inverse technique.
+A sparse approximate inverse for parallel preconditioning of sparse matrices.
+Preconditioned iterative methods and finite difference schemes for convection-diffusion
+Preconditioned Krylov subspace methods for solving nonsymmetric matrices from CFD applications.
+Sparse approximate inverse and multilevel block ILU preconditioning techniques for general sparse matrices.
+Performance study on incomplete LU preconditioners for solving linear systems from fully coupled mixed finite element discretization of 3D Navier-Stokes equations
+Use of iterative refinement in the solution of sparse linear systems.
+--TR
+A comparison of domain decomposition techniques for elliptic partial differential equations and their parallel implementation
+High performance preconditioning
+Application of sparse matrix solvers as effective preconditioners
+Partitioning sparse matrices with eigenvectors of graphs
+Introduction to parallel computing
+A flexible inner-outer preconditioned GMRES algorithm
+Towards a cost-effective ILU preconditioner with high-level fill
+Domain decomposition
+Parallel computation of incompressible flows in materials processing
+Parallel Multilevel series <i>k</i>-Way Partitioning Scheme for Irregular Graphs
+Developments and trends in the parallel solution of linear systems
+Preconditioned iterative methods and finite difference schemes for convection-diffusion
+Distributed Schur Complement Techniques for General Sparse Linear Systems
+A Priori Sparsity Patterns for Parallel Sparse Approximate Inverse Preconditioners
+Sparse approximate inverse and multilevel block ILU preconditioning techniques for general sparse matrices
+Enhanced multi-level block ILU preconditioning strategies for general sparse linear systems
+Scalable Parallel Computing
+Numerical Linear Algebra for High Performance Computers
+Computer Solution of Large Sparse Positive Definite
+A Multilevel Dual Reordering Strategy for Robust Incomplete LU Factorization of Indefinite Matrices
+Iterative Methods for Sparse Linear Systems
+
+--CTR
+Chi Shen , Jun Zhang, A fully parallel block independent set algorithm for distributed sparse matrices, Parallel Computing, v.29 n.11-12, p.1685-1699, November/December
+Jun Zhang , Tong Xiao, A multilevel block incomplete Cholesky preconditioner for solving normal equations in linear least squares problems, The Korean Journal of Computational & Applied Mathematics, v.11 n.1-2, p.59-80, January
+Chi Shen , Jun Zhang , Kai Wang, Distributed block independent set algorithms and parallel multilevel ILU preconditioners, Journal of Parallel and Distributed Computing, v.65 n.3, p.331-346, March 2005

@@ -1,0 +1,529 @@
+--T
+Scalable Feature Mining for Sequential Data.
+--A
+Classification algorithms are difficult to apply to sequential examples, such as text or DNA sequences, because a vast number of features are potentially useful for describing each example. Past work on feature selection has focused on searching the space of all subsets of the available features, which is intractable for large feature sets. The authors adapt data mining techniques to act as a preprocessor to select features for standard classification algorithms such as Naive Bayes and Winnow. They apply their algorithm to a number of data sets and experimentally show that the features produced by the algorithm improve classification accuracy up to 20%.
+--B
+Introduction
+Many real world datasets contain irrelevant or redundant attributes. This may be because the data was collected
+without data mining in mind, or because the attribute dependences were not known a priori during data collection. It
+is well known that many data mining methods like classification, clustering, etc., degrade prediction accuracy when
+trained on datasets containing redundant or irrelevant attributes or features. Selecting the right feature set can not only
+improve accuracy, but can also reduce the running time of the predictive algorithms, and can lead to simpler, more
+understandable models. Good feature selection is thus one of the fundamental data preprocessing steps in data mining.
+Most research on feature selection to-date has focused on non-sequential domains. Here the problem may be
+defined as that of selecting an optimal feature subset of size m from the full d-dimensional feature space, where
+ideally m  d. The selected subset should maximize some optimization criterion such as classification accuracy or
+it should faithfully capture the original data distribution. The subset search space is exponentially large in the number
+of features.
+In contrast to traditional non-sequential data, we focus on sequence data in which each example is represented as a
+sequence of "events", where each event might be described by a set of predicates, i.e., we are dealing with categorical
+sequential domains. Examples of sequence data include text, DNA sequences, web usage data, multi-player games,
+and plan execution traces. In sequential domains, features are ordered sets of partial event descriptions. For example,
+a sequential feature that describes a chess game is "black moves a knight, and then white moves a bishop to square
+D-6". This feature holds in some chess games, but not in others, and thus might be used to classify chess games into,
+for example, ones played by experts vs. ones played by novices. Selecting the right features in sequential or temporal
+domains is even more challenging than in non-sequence data. The original feature set is itself undefined; there are
+potentially an infinite number of sequences of arbitrary length over d categorical attributes or dimensions. Even if we
+restrict ourselves to some maximum sequence length k, we have potentially O(d k ) subsequences over d dimensions.
+The complexity is d d if we consider maximum subsequence length to be d, as opposed to 2 d in the non-sequential
+case.
+The goal of feature selection in sequential domains is to select the best subset of sequential features out of the d k
+possible sequential features (i.e., subsequences) that can be composed out of the d attributes for describing individual
+events. We were motivated to use data mining techniques because the set of possible features is exponentially large.
+An alternative conception of the problem is that we are constructing new features out of the primitives for describing
+events. These new features augment the dimensionality of the original space by effectively pulling apart examples of
+the same class, making them more easily distinguishable by classification algorithms. Of course, the process of constructing
+features out of primitives is equivalent to the process of selecting features from the space of all combinations
+of those primitives.
+The input to our system is a set of labeled training sequences, and the output is a function which maps from a new
+sequence to a label. In other words we are interested in selecting (or constructing) features for sequence classification.
+In order to generate this function, our algorithm first uses sequence mining on a portion of the training data for
+discovering frequent and distinctive sequences and then uses these sequences as features to feed into a classification
+algorithm (Winnow or Naive Bayes) to generate a classifier from the remainder of the data.
+In past work, the rules produced by data mining algorithms have been used to construct classifiers primarily by
+ordering the rules into decision lists (e.g. [1, 2]) or by merging them into more general rules that occur in the training
+data (e.g., [3]). In this paper, we convert the patterns discovered by the mining algorithm into a set of boolean features
+to feed into standard classification algorithms. The classification algorithms, in turn, assign weights to the features
+which allows evidence for different features to be combined in order to classify a new example.
+There are two main contributions of this paper. First, we combine two powerful data mining paradigms: sequence
+mining which can efficiently search for patterns that are correlated with the target classes, and classification algorithms
+which learn to weigh evidence for different features to classify new examples. Second, we present a scalable feature
+mining algorithm that can handle very large datasets with thousands of items and millions of records. Additionally,
+we present criteria for selecting features, and present pruning rules that allow for more efficient mining of the features.
+We present FEATUREMINE, a scalable algorithm capable of handling large disk-resident datasets, which mines for
+good sequential features, and integrates pruning constraints in the algorithm itself, instead of post-processing. This
+enables it to efficiently search through large pattern spaces.
+1.1 Example: poker
+Let's first preview the main ideas in this paper with a simple, illustrative example. Suppose we observe three people
+playing poker with betting sequences and outcomes such as:
+example: P1 Bets 3, P2 Calls, P3 Raises 2, P1 Raises 1, P2 Folds, P3 Calls ) P1 wins
+example: P2 Passes, P3 Bets 1, P1 Folds, P2 Raises 2, P3 Raises 2, P2 Calls ) P3 wins
+Our objective is to learn a function that predicts who is most likely to win given a betting sequence. This task
+resembles standard classification: we are given labeled training examples and must produce a function that classifies
+new, unlabeled examples. Many classifiers require, however, that examples be represented as vectors of feature-value
+pairs. This paper addresses the problem of selecting features to represent the betting sequences.
+First, consider an obvious, but poor, feature set. Let N be the length of the longest betting sequence. We can
+represent betting sequences with 3N features by generating a distinct feature for every 0  i  N , for the person who
+made the ith bet, for the type of the ith bet, and for the amount of the ith bet. In section 3, we show experimentally that
+this feature set leads to poor classification. One problem with these features is that an individual feature can express
+only that a particular, complete bidding sequence took place, but not that an interesting subsequence occurred, such
+as:
+Feature:
+Feature: dollars
+The first feature would be important if P 1 tends to win whenever she raises twice. A classifier could construct a boolean
+expression out of the features described above to capture the notion "P 1 raises twice", but the expression would have
+disjuncts, since we need a disjunct for "P 1 raises in the ith bet and in the jth" for all
+believe it is important to consider partial specifications because it is difficult to know in advance whether "P 1 raises
+twice" or "P 1 raises by 2 and then raises by 3" will be a more useful feature.
+An alternative is to use a much larger feature set. If there are 3 players, 4 bids, and 5 different amounts then there
+are 4  5  specifications of a bet, such as "someone bets 3". We can chain partial specifications
+together with an "and then" relation, as in "P 1 raises and then someone bets 3". The number of such features of length
+K is 120 K . The problem with this feature set is that it is too large. Sets of 10,000 features are considered large for
+classification algorithms. Furthermore, irrelevant or redundant features can reduce classification accuracy [4].
+We adopt a middle ground between these two extremes. We use data mining techniques to search through the
+second, huge feature set and select a subset. We show that criteria similar to that used in the general knowledge
+discovery task works well for deciding which features will be useful.
+2 Data mining for features
+We now formulate and present an algorithm for feature mining. The formulation involves specifying a language for
+features that can express sequences of partial descriptions of events (with gaps), such as "P 1 raises and then in some
+later bid folds". We then present criteria for selecting a subset of the features, to be used for classification, from the
+entire set that can be expressed in our language. Finally, we describe the FEATUREMINE algorithm to efficiently mine
+the features selected by our criteria.
+We begin by adopting the following terminology, which closely resembles that used for sequence mining (e.g.,
+[5]). Let F be a set of distinct features, each with some finite set of possible values. Let I contain a unique element
+for every possible feature-value pair. A sequence is an ordered list of subsets of I . For example, if I = fA; B; C:::g,
+then an example sequence would be AB ! A ! BC. A sequence  is denoted as
+each sequence element  i is a subset of I . The length of sequence its width is the
+maximum size of any  i for 1  i  n. We say that  is a subsequence of , denoted as   , if there exists integers
+for all  j . For example, AB ! C is a subsequence of AB ! A ! BC. Let
+H be a set of class labels. An example is a pair h; ci where is a sequence and c 2 H is a
+label. Each example has a unique identifier eid, and each  i has a time-stamp at which it occurred. An example h; ci
+is said to contain sequence  if   .
+Our input database D consists of a set of examples. This means that the data we look at has multiple sequences,
+each of which is composed of sets of items. The frequency of sequence  in D, denoted fr(; D), is the fraction of
+examples in D that contain . Let  be a sequence and c be a class label. The confidence of the rule  ) c, denoted
+conf(; c; D), is the conditional probability that c is the label of an example in D given that it contains sequence .
+That is, conf(; c;
+where D c is the subset of examples in D with class label c. A sequence is said to be
+frequent if its frequency is more than a user-specified min freq threshold. A rule is said to be strong if its confidence
+is more than a user-specified min conf threshold. Our goal is to mine for frequent and strong patterns. Figure 1 shows
+a database of examples. There are 7 examples, 4 belonging to class c 1 , and 3 belonging to class c 2 . In general there
+can be more than two classes. We are looking for different min freq sequences on each class. For example, while C
+is frequent for class c 2 , it's not frequent for class c 1 . The rule C ) c 2 has confidence while the rule
+confidence
+A sequence classifier is a function from sequences to class labels, H. A classifier can be evaluated using standard
+A
+B->A
+A->A
+100%
+75%
+75%
+75%
+75%
+100%
+100%
+100%
+EID
+A C
+A
+A
+A
+Time
+A C
+A A
+A->C
+67%
+67%
+100%
+Class
+6 c2
+Examples
+New Boolean Features
+Class
+EID
+
+Figure
+
+1: of Examples, B) New Database with Boolean Features
+metrics such as accuracy and coverage. Finally, we describe how frequent sequences  1 ; :::; n can be used as features
+for classification. Recall that the input to most standard classifiers is an example represented as vector of feature-value
+pairs. We represent an example sequence  as a vector of feature-value pairs by treating each sequence  i as a boolean
+feature that is true iff  i  . For example, suppose the features are f
+The sequence AB ! BD ! BC would be represented as hf 1 ; truei; hf falsei. The sequence ABCD
+would be represented as truei. Note that features can "skip" steps: the
+feature A ! BC holds in AB ! BD ! BC. Figure 1B shows the new dataset created from the frequent sequences
+of our example database (in Figure 1 A). While we use all frequent sequences as features in this example, in general
+we use only a "good" subset of all frequent sequences as features, as described below.
+2.1 Selection criteria for mining
+We now specify our selection criteria for selecting features to use for classification. Our objective is to find sequences
+such that representing examples with these sequences will yield a highly accurate sequence classifier. However, we do
+not want to search over the space of all subsets of features [4]), but instead want to evaluate each new sequential feature
+in isolation or by pair-wise comparison to other candidate features. Certainly, the criteria for selecting features might
+depend on the domain and the classifier being used. We believe, however, that the following domain-and-classifier-
+independent heuristics are useful for selecting sequences to serve as features:
+Features should be frequent.
+Features should be distinctive of at least one class.
+Feature sets should not contain redundant features.
+The intuition behind the first heuristic is simply that rare features can, by definition, only rarely be useful for
+classifying examples. In our problem formulation, this heuristic translates into a requirement that all features have
+some minimum frequency in the training set. Note that since we use a different min freq for each class, patterns
+that are rare in the entire database can still be frequent for a specific class. We only ignore those patterns which are
+rare for any class. The intuition for the second heuristic is that features that are equally likely in all classes do not
+help determine which class an example belongs to. Of course, a conjunction of multiple non-distinctive features can
+be distinctive. In this case, our algorithm prefers to use the distinctive conjunction as a feature rather than the non-
+distinctive conjuncts. We encode this heuristic by requiring that each selected feature be significantly correlated with
+at least one class that it is frequent in.
+The motivation for our third heuristic is that if two features are closely correlated with each other, then either of
+them is as useful for classification as both are. We show below that we can reduce the number of features and the
+time needed to mine for features by pruning redundant rules. In addition to wanting to prune features which provide
+the same information, we also want to prune a feature if there is another feature available that provides strictly more
+information. Let M(f;D) be the set of examples in D that contain feature f . We say that feature f 1 subsumes feature
+with respect to predicting class c in data set D iff M(f
+Intuitively, if f 1 subsumes f 2 for class c then f 1 is superior to f 2 for predicting c because f 1 covers every example of c
+in the training data that f 2 covers and f 1 covers only a subset of the non-c examples that f 2 covers. Note that a feature
+f 2 can be a better predictor of class c than f 1 even if f 1 covers more examples of c than f 2 if, for example, every
+example that f 2 covers is in c but only half the examples that f 1 covers are in c. In this case, neither feature subsumes
+the other. The third heuristic leads to two pruning rules. The first pruning rule is that we do not extend (i.e, specialize)
+any feature with 100% accuracy. Let f 1 be a feature contained by examples of only one class. Specializations of f 1
+may pass the frequency and confidence tests in the definition of feature mining, but will be subsumed by f 1 . The
+following Lemma, which follows from the definition of subsume, justifies this pruning rule:
+with respect to class c.
+Our next pruning rule concerns correlations between individual items. Recall that the examples in D are represented
+as a sequence of sets. We say that examples D if B occurs in every set in every sequence in D in
+which A occurs. The following lemma states that if A ; B then any feature containing a set with both A and B will
+be subsumed by one of its generalizations:
+Lemma 2: Let will be subsumed
+by
+We precompute the set of all A ; B relations and immediately prune any feature, during the search, that contains
+a set with both A and B. In section 3, we discuss why A ; B relations arise and show they are crucial for the success
+of our approach for some problems. We can now define the feature mining task. The inputs to the FEATUREMINE
+algorithm are a set of examples D and parameters min freq, maxw , and max l . The output is a non-redundant set of
+the frequent and distinctive features of width maxw and length max l . Formally:
+Feature mining: Given examples D and parameters min freq, maxw , and max l return feature set F such that
+for every feature f i and every class c
+D) is significantly greater than jD c j=jDj then F contains f i or contains a feature that
+subsumes f i with respect to class c j in data set D (we use a chi-squared test to determine significance.)
+2.2 Efficient mining of features
+We now present the FEATUREMINE algorithm which leverages existing data mining techniques to efficiently mine
+features from a set of training examples. Sequence mining algorithms are designed to discover highly frequent and
+confident patterns in sequential data sets and so are well suited to our task. FEATUREMINE is based on the recently
+proposed SPADE algorithm [5] for fast discovery of sequential patterns. SPADE is a scalable and disk-based algorithm
+that can handle millions of example sequences and thousands of items. Consequently FEATUREMINE shares
+these properties as well. To construct FEATUREMINE, we adapted the SPADE algorithm to search databases of labeled
+examples. FEATUREMINE mines the patterns predictive of all the classes in the database, simultaneously. As
+opposed to previous approaches that first mine millions of patterns and then apply pruning as a post-processing step,
+FEATUREMINE integrates pruning techniques in the mining algorithm itself. This enables it to search a large space,
+where previous methods would fail.
+FEATUREMINE uses the observation that the subsequence relation  defines a partial order on sequences. If
+, we say that  is more general than , or  is more specific than . The relation  is a monotone specialization
+relation with respect to the frequency fr(; D), i.e., if  is a frequent sequence, then all subsequences    are
+also frequent. The algorithm systematically searches the sequence lattice spanned by the subsequence relation, from
+general to specific sequences, in a depth-first manner. Figure 2 shows the frequent sequences for our example database.
+EID
+SUFFIX-JOINS ON ID-LISTS
+Time Time
+Time
+Time
+{
+A->A B->A B->B
+A
+A->C
+(Intersect A->B and B->B)
+(Intersect A and B)
+
+Figure
+
+2: Frequent Sequence Lattice and Frequency Computation
+Frequency Computation: FEATUREMINE uses a vertical database layout, where we associate with each item X
+in the sequence lattice its idlist, denoted L(X), which is a list of all example IDs (eid) and event time (time) pairs
+containing the item. Figure 2 shows the idlists for all the items A and B. Given the sequence idlists, we can determine
+the support of any k-sequence by simply intersecting the idlists of any two of its (k 1) length subsequences. A
+check on the cardinality of the resulting idlist tells us whether the new sequence is frequent or not. There are two kinds
+of intersections: temporal and equality. For example, Figure 2 shows the idlist for A ! B obtained by performing
+a temporal intersection on the idlists of A and B, i.e., L(B). This is done by looking if,
+within the same eid, A occurs before B, and listing all such occurrences. On the other hand the idlist for
+obtained by an equality intersection, i.e., L(AB ! B). Here we check to see if the two
+subsequences occur within the same eid at the same time. Additional details can be found in [5]. We also maintain the
+class index table indicating the classes for each example. Using this table we are able to determine the frequency of a
+sequence in all the classes at the same time. For example, A occurs in eids f1; 2; 3; 4; 5; 6g. However eids f1; 2; 3; 4g
+have label c 1 and f5; 6g have label c 2 . Thus the frequency of A is 4 for c 1 , and 2 for c 2 . The class frequencies for each
+pattern are shown in the frequency table.
+To use only a limited amount of main-memory FEATUREMINE breaks up the sequence search space into small,
+independent, manageable chunks which can be processed in memory. This is accomplished via suffix-based partition-
+ing. We say that two k length sequences are in the same equivalence class or partition if they share a common k 1
+length suffix. The partitions, such as f[A]; [B]; [C]g, based on length 1 suffixes are called parent partitions. Each
+parent partition is independent in the sense that it has complete information for generating all frequent sequences that
+share the same suffix. For example, if a class [X ] has the elements . The only possible frequent
+sequences at the next step can be Y It should be obvious that no other
+item Q can lead to a frequent sequence with the suffix X , unless (QX) or Q ! X is also in [X ].
+for each parent partition P i do Enumerate-Features(P i )
+for all elements do
+for all elements do
+if Rule-Prune(R, maxw ,
+if accuracy(R) == 100% return TRUE;
+return FALSE;
+
+Figure
+
+3: The FEATUREMINE Algorithm
+Feature Enumeration: FEATUREMINE processes each parent partition in a depth-first manner, as shown in the
+pseudo-code of Figure 3. The input to the procedure is a partition, along with the idlist for each of its elements.
+Frequent sequences are generated by intersecting the idlists of all distinct pairs of sequences in each partition and
+checking the cardinality of the resulting idlist against min sup(c i ). The sequences found to be frequent for some class
+c i at the current level form partitions for the next level. This process is repeated until all frequent sequences have been
+enumerated.
+Integrated Constraints: FEATUREMINE integrates all pruning constraints into the mining algorithm itself, instead of
+applying pruning as a post-processing step. As we shall show, this allows FEATUREMINE to search very large spaces
+efficiently, which would have been infeasible otherwise. The Rule-Prune procedure eliminates features based on our
+two pruning rules, and also based on length and width constraints. While the first pruning rule has to be tested each
+time we extend a sequence with a new item, there exists a very efficient one-time method for applying the A ; B
+rule. The idea is to first compute the frequency of all 2 length sequences. Then if
+then A ; B, and we can remove AB from the suffix partition [B]. This guarantees that at no point in the future will
+AB appear together in any set of any sequence.
+3 Empirical evaluation
+We now describe experiments to test whether the features produced by our system improve the performance of the
+Winnow [6] and Naive Bayes [7] classification algorithms.
+Winnow is a multiplicative weight-updating algorithm. We used a variant of Winnow that maintains a
+weight w i;j for each feature f i and class c j . Given an example, the activation level for class c j is
+x i is 1 if feature f i is true in the example, or 0 otherwise. Given an example, Winnow outputs the class with the
+highest activation level. During training, Winnow iterates through the training examples. If Winnow's classification
+of a training example does not agree with its label then Winnow updates the weights of each feature f i that was true
+in the example: it multiplies the weights for the correct class by some constant  > 1 and multiples the weights for
+the incorrect classes by some constant  < 1. In our experiments, Learning is often sensitive
+to the values used for  and ; we chose our values based on what is common in the literature and a small amount of
+experimentation. Winnow can actually be used to prune irrelevant features. For example, we can run Winnow with
+large feature sets (say 10,000) and then throw away any features that are assigned weight 0, or near 0. However, this
+is not practical for sequence classification, since the space of potential features is exponential.
+Naive-Bayes Classifier: For each feature f i and class c j , Naive Bayes computes P(f i jc j ) as the fraction of training
+examples of class c j that contain f i . Given a new example in which features f 1 ; :::f n are true, Naive Bayes returns the
+class that maximizes P though the Naive Bayes algorithm appears to make the
+unjustified assumption that all features are independent it has been shown to perform surprisingly well, often doing as
+well as or better than C4.5 [8]. We now describe the domains we tested our approach in and then discuss the results of
+our experiments.
+3.0.1 Random parity problems:
+We first describe a non-sequential problem on which standard classification algorithms perform very poorly. In this
+problem, every feature is true in exactly half of the examples in each class and the only way to solve the problem
+is to discover which combinations of features are correlated with the different classes. Intuitively, we construct a
+problem by generating N randomly-weighted "meta features", each of which is composed of a set of M actual, or
+observable, features. The parity of the M observable features determines whether the corresponding meta feature is
+true or false, and the class label of an instance is a function of the sum of the weights of the meta features that are true.
+Thus, in order to solve these problems, FEATUREMINE must determine which of the observable features correspond
+to the same meta feature. It is more important to discover the meta features with higher weights than ones with lower
+weights. Additionally, to increase the difficulty of the problem, we add irrelevant features which have no bearing on
+the class of an instance.
+More formally, the problem consists of N parity problems of size M with L distracting, or irrelevant, features. For
+every there is a boolean feature F i;j . Additionally, for 0  k  L, there is an irrelevant,
+boolean feature I k . To generate an instance, we randomly assign each relevant and irrelevant boolean true or false
+with 50/50 probability. An example instance for
+There are NM+L features, and 2 NM+L distinct instances.
+All possible instances are equally likely.
+We also choose N weights w 1 ; :::; wN , from the uniform distribution between 0 and 1, which are used to assign
+each instance one of two class labels (ON or OFF) as follows. An instance is credited with weight w i iff the ith set of
+M features has an even parity. That is, the "score" of an instance is the sum of the weights w i for which the number
+of true features in f i;1 ; :::f i;M is even. If an instance's score is greater than half the sum of all the weights,
+then the instance is assigned class label ON, otherwise it is assigned OFF. Note that if M > 1, then no feature by
+itself is at all indicative of the class label ON or OFF, which is why parity problems are so hard for most classifiers.
+The job of FEATUREMINE is essentially to figure out which features should be grouped together. Example features
+that were produced by FEATUREMINE, for the results shown in Table 1, include (f 1;1 =true, f 1;2 =true), and (f 4;1 =true,
+f 4;2 =false). We used a min freq of .02 to .05,
+3.0.2 Forest fire plans:
+The FEATUREMINE algorithm was originally motivated by the task of plan monitoring in stochastic domains. Probabilistic
+planners construct plans with high probability of achieving their goal. The task of monitoring is to "watch" as
+the plan is executed and predict, in advance, whether the plan will most likely succeed or fail to facilitate re-planning.
+In order to build a monitor given a plan and goal, we first simulate the plan repeatedly to generate execution traces
+and label each execution trace with SUCCESS or FAILURE depending on whether or not the goal holds in the final
+state of the simulation. We then use these execution traces as input to FEATUREMINE.
+Plan monitoring (or monitoring any probabilistic process that we can simulate) is an attractive area for machine
+learning because there is an essentially unlimited supply of training data. Although we cannot consider all possible
+execution paths, because the number of paths is exponential in the length of the plan, or process, we can generate
+arbitrary numbers of new examples with Monte Carlo simulation. The problem of over-fitting is reduced because we
+can test our hypotheses on "fresh" data sets.
+As an example domain, we constructed a simple forest-fire domain based loosely on the Phoenix fire simulator [9]
+(execution traces are available by email; contact lesh@merl.com). We use a grid representation of the terrain. Each
+grid cell can contain vegetation, water, or a base. An example terrain is shown in figure 4. At the beginning of each
+.B.bb.B. ++d.d.+ ++d.d++ ++d++++d++
+.bb.d.bb.d. ++d.bb.d++ ++d.bb.d++ ++d.+b.d++
+.Bbb.B.wwwwww. ++d.bb.d++ ++d.bb.d++ ++d.d++
+.wwwwww.wwwwww. ++wwwwww++ ++wwwwww++ ++wwwwww++
+.wwwwww.wwwwww. ++wwwwww++ ++wwwwww++ ++wwwwww++
+.+www.++www. ++++www+++ ++++www+++ ++++www+++
+. ++++++++++ ++++++++++ ++++++++++
+. ++++++++++ ++++++++++ ++++++++++
+time
+
+Figure
+
+4: ASCII representation of several time slices of an example simulation of the fire world domain.A '+' indicates
+fire. A 'b' indicates a base. A 'B' indicates a bulldozer. A 'd' indicates a place where the bulldozer has dug a fire line.
+A 'w' indicates water, an unburnable terrain.
+simulation, the fire is started at a random location. In each iteration of the simulation, the fire spreads stochastically.
+The probability of a cell igniting at time t is calculated based on the cell's vegetation, the wind direction, and how
+many of the cell's neighbors are burning at time t 1. Additionally, bulldozers are used to contain the fire. For each
+example terrain, we hand-designed a plan for bulldozers to dig a fire line to stop the fire. The bulldozer's speed varies
+from simulation to simulation. An example simulation looks like:
+(time0 Ignite X3 Y7), (time0 MoveTo BD1 X3 Y4), (time0 MoveTo BD2 X7 Y4), (time0 DigAt BD2 X7 Y4), .,
+(time6 Ignite X4 Y8), (time6 Ignite X3 Y8), (time8 DigAt BD2 X7 Y3), (time8 Ignite X3 Y9), (time8 DigAt BD1
+X2 Y3), (time8 Ignite X5 Y8), ., (time32 Ignite X6 Y1), (time32 Ignite X6 Y0), .
+We tag each plan with SUCCESS if none of the locations with bases have been burned in the final state, or FAILURE
+otherwise. To train a plan monitor that can predict at time k whether or not the bases will ultimately be burned,
+we only include events which occur by time k in the training examples. Example features produced by FEATUREMINE
+in this domain are:
+The first sequence holds if bulldozer BD1 moves to the second column before time 6. The second holds if a fire ignites
+anywhere in the second column and then any bulldozer moves to the third row at time 8.
+Many correlations used by our second pruning rule described in section 2.2 arise in these data sets. For example,
+arises in one of our test plans in which a bulldozer never moves in the eighth column.
+For the fire data, there are 38 boolean features to describe each event. And thus the number of composite features
+we search over is ((38  l . In the experiments reported here, we used a min
+Experiment Winnow WinnowTF WinnowFM Bayes BayesTF BayesFM
+parity,
+parity,
+parity,
+spelling, their vs. there .70 N/A .94 .75 N/A .78
+spelling, I vs. me .86 N/A .94 .66 N/A .90
+spelling, than vs. then .83 N/A .92 .79 N/A .81
+spelling, you're vs. your .77 N/A .86 .77 N/A .86
+
+Table
+
+1: Classification results: the average classification accuracy using different feature sets to represent the examples.
+Legend: TF uses features obtained by Times  Features approach, and FM uses features produced by FEATUREM-
+INE. The highest accuracy was obtained with the features produced by the FEATUREMINE algorithm. The standard
+deviations are shown, in parentheses following each average, except for the spelling problems for which only one test
+and training set were used.
+3.0.3 Context-sensitive spelling correction
+We also tested our algorithm on the task of correcting spelling errors that result in valid words, such as substituting
+there for their ([10]). For each test, we chose two commonly confused words and searched for sentences in the 1-
+million-word Brown corpus [11] containing either word. We removed the target word and then represented each word
+by the word itself, the part-of-speech tag in the Brown corpus, and the position relative to the target word. For example,
+the sentence "And then there is politics" is translated into (word=and tag=cc pos=-2) ! (word=then tag=rb pos=-1)
+(word=is tag=bez pos=+1) ! (word=politics tag=nn pos=+2).
+Example features produced by FEATUREMINE include (pos=+3) ! (word=the), indicating that the word the occurs
+at least 3 words after the target word, and indicating that a noun occurs within three
+words before the target word. These features (for reasons not obvious to us) were significantly correlated with either
+there or their in the training set.
+For the "I" vs. "me" dataset there were 3802 training examples, 944 test examples, and 4692 feature/value pairs;
+for "there" vs. "their" dataset there were 2917 training examples, 755 test examples, and 5663 feature/value pairs;
+for "than" vs. "then" dataset there were 2019 training examples, 494 test examples, and 4331 feature/value pairs; and
+finally for "you're'' vs. ''your'' dataset there were 647 training examples, 173 test examples, and 1646 feature/value
+pairs. If N is the number of feature/value pairs, then we search over (N maxw In the experiments
+reported here, we used a min 2.
+3.1 Results
+For each test in the parity and fire domains, we generated 7,000 random training examples. We mined features from
+1,000 examples, pruned features that did not pass a chi-squared significance test (for correlation to a class the feature
+was frequent in) in 2,000 examples, and trained the classifier on the remaining 5,000 examples. We then tested on 1,000
+additional examples. The results in Tables 1 and 2 are averages from 25-50 such tests. For the spelling correction, we
+Experiment Evaluated Selected
+features features
+fire world, time =10 64,766 553
+spelling, there vs. their 782,264 318
+
+Table
+
+2: Mining results: number of features considered and returned by FEATUREMINE
+Experiment CPU seconds CPU seconds CPU seconds Features Features examined Features
+with no pruning with only with all examined with with only examined with
+pruning pruning no pruning A ; B pruning all pruning
+random 320 337 337 1,547,122 1,547,122 1,547,122
+fire world 5.8 hours 560 559 25,336,097 511,215 511,215
+spelling 490 407 410 1,126,114 999,327 971,085
+
+Table
+
+3: Impact of pruning rules: running time and nodes visited for FEATUREMINE with and without the A ; B
+pruning. Results taken from one data set for each example.
+used all the examples in the Brown corpus, roughly 1000-4000 examples per word set, split 80-20 (by sentence) into
+training and test sets. We mined features from 500 sentences and trained the classifier on the entire training set.
+
+Table
+
+1 shows that the features produced by FEATUREMINE improved classification performance. We compared
+using the feature set produced by FEATUREMINE with using only the primitive features themselves, i.e. features of
+length 1. In the fire domain, we also evaluated the feature set containing a feature for each primitive feature at each
+time step (this is the feature set of size 3N described in section 1.1). Both Winnow and Naive Bayes performed
+much better with the features produced by FEATUREMINE. In the parity experiments, the mined features dramatically
+improved the performance of the classifiers and in the other experiments the mined features improved the accuracy of
+the classifiers by a significant amount, often more than 20%.
+
+Table
+
+2 shows the number of features evaluated and the number returned, for several of the problems. For the
+largest random parity problem, FEATUREMINE evaluated more than 7 million features and selected only about 200.
+There were in fact 100 million possible features (there are 50 booleans features, giving rise to 100 feature-value pairs.
+We searched to depth 4 since but most of were rejected implicitly by the pruning rules.
+
+Table
+
+3 shows the impact of the A ; B pruning rule described in Section 2.2 on mining time. The results are
+from one data set from each domain, with slightly higher values for max l and maxw than in the above experiments.
+The pruning rule did not improve mining time in all cases, but made a tremendous difference in the fire world prob-
+lems, where the same event descriptors often appear together. Without A ; B pruning, the fire world problems are
+essentially unsolvable because FEATUREMINE finds over 20 million frequent sequences.
+4 Related work
+A great deal of work has been done on feature-subset selection, motivated by the observation that classifiers can
+perform worse with feature set F than with some F 0  F (e.g., [4]). The algorithms explore the exponentially
+large space of all subsets of a given feature set. In contrast, we explore exponentially large sets of potential features,
+but evaluate each feature independently. The feature-subset approach seems infeasible for the problems we consider,
+which contain hundreds of thousands to millions of potential features.
+[10] applied a Winnow-based algorithm to context-sensitive spelling correction. They use sets of 10,000 to 40,000
+features and either use all of these features or prune some based on the classification accuracy of the individual features.
+They obtain higher accuracy than we did. Their approach, however, involves an ensemble of Winnows, combined by
+majority weighting, and they took more care in choosing good parameters for this specific task. Our goal, here, is to
+demonstrate that the features produced by FEATUREMINE improve classification performance.
+Data mining algorithms have often been applied to the task of classification. [2] build decision lists out of patterns
+found by association mining, which is the non-sequential version of sequence mining. Additionally, while previous
+work has explored new methods for combining association rules to build classifiers, the thrust of our work has been
+to leverage and augment standard classification algorithms. Our pruning rules resemble ones used by [1], which also
+employs data mining techniques to construct decision lists. Previous work on using data mining for classification has
+focused on combining highly accurate rules together. By contrast, our classification algorithms can weigh evidence
+from many features which each have low accuracy in order to classify new examples.
+Our work is close in spirit to [12], which also constructs a set of sequential, boolean features for use by classification
+algorithms. They employ a heuristic search algorithm, called FGEN, which incrementally generalizes features
+to cover more and more of the training examples, based on its classification performance on a hold-out set of training
+data, whereas we perform an exhaustive search (to some depth) and accept all features which meet our selection crite-
+ria. Additionally, we use a different feature language and have tested our approaches on different classifiers than they
+have.
+Conclusions
+We have shown that data mining techniques can be used to efficiently select, or construct, features for sequential
+domains such as DNA, text, web usage data, and plan execution traces. These domains are challenging because of the
+exponential number of potential subsequence features that can be formed from the primitives for describing each item
+in the sequence data. The number of features is too large to be practically handled by today's classification algorithms.
+Furthermore, this feature set contains many irrelevant and redundant features which can reduce classification accuracy.
+Our approach is to search over the set of possible features, mining for ones that are frequent, predictive, and not-
+redundant. By adapting scalable and disk-based data mining algorithms, we are able to perform this search efficiently.
+However, in one of the three domains studied, this search was only practical due to the pruning rules we have incorporated
+into our search algorithms. Our experiments in several domains show that the features produced by applying our
+selection criteria can significantly improve classification accuracy. In particular, we have shown that we can construct
+problems in which classifiers perform no better than random guessing using the original features but perform with near
+perfect accuracy when using the features produced by FEATUREMINE. Furthermore, we have shown that the features
+produced by FEATUREMINE can improve performance by as much as 20% in a simulated fire-planning domain and
+on spelling correction data. More generally, this work shows that we can apply classification algorithms to domains in
+which there is no obvious, small set of features for describing examples, but there is a large space of combinations of
+primitive features that probably contains some useful features. Future work could involve applying these ideas to the
+classification of, for example, images or audio signals.
+
+
+
+--R
+
+Learning decision lists using homogeneous rules.
+Integrating classification and association rule mining.
+Mining audit data to build intrusion detection models.
+Greedy attribute selection.
+Efficient enumeration of frequent sequences.
+Learning quickly when irrelevant attributes abound: A new linear-threshold algorithm
+Pattern Classification and Scene Analysis.
+Beyond independence: conditions for the optimality of the simple bayesian clas- sifier
+Predicting and explaining success and task duration in the phoenix planner.
+Applying winnow to context-sensitive spelling correction
+Computational Analysis of Present-Day American English
+Feature generation for sequence categorization.
+--TR
+
+--CTR
+Xiaonan Ji , James Bailey , Guozhu Dong, Mining minimal distinguishing subsequence patterns with gap constraints, Knowledge and Information Systems, v.11 n.3, p.259-286, April 2007
+Florence Duchne , Catherine Garbay , Vincent Rialle, Learning recurrent behaviors from heterogeneous multivariate time-series, Arificial Intelligence in Medicine, v.39 n.1, p.25-47, January, 2007
+San-Yih Hwang , Chih-Ping Wei , Wan-Shiou Yang, Discovery of temporal patterns from process instances, Computers in Industry, v.53 n.3, p.345-364, April 2004
+Sbastien Ferr , Ross D. King, A Dichotomic Search Algorithm for Mining and Learning in Domain-Specific Logics, Fundamenta Informaticae, v.66 n.1-2, p.1-32, January 2005
+Mohammed J. Zaki , Charu C. Aggarwal, XRules: An effective algorithm for structural classification of XML data, Machine Learning, v.62 n.1-2, p.137-170, February  2006
+Chih-Ming Chen, Incremental personalized web page mining utilizing self-organizing HCMAC neural network, Web Intelligence and Agent System, v.2 n.1, p.21-38, January 2004
+Chih-Ming Chen, Incremental personalized web page mining utilizing self-organizing HCMAC neural network, Web Intelligence and Agent System, v.2 n.1, p.21-38, August 2004

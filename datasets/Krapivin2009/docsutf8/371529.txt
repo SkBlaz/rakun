@@ -1,0 +1,568 @@
+--T
+Implementing E-Transactions with Asynchronous Replication.
+--A
+AbstractThis paper describes a distributed algorithm that implements the abstraction of e-Transaction: a transaction that executes exactly-once despite failures. Our algorithm is based on an asynchronous replication scheme that generalizes well-known active-replication and primary-backup schemes. We devised the algorithm with a three-tier architecture in mind: the end-user interacts with front-end clients (e.g., browsers) that invoke middle-tier application servers (e.g., web servers) to access back-end databases. The algorithm preserves the three-tier nature of the architecture and introduces a very acceptable overhead with respect to unreliable solutions.
+--B
+Introduction
+Until very recently, three-tier architectures were at the leading edge of development. Only a few
+tools supported them, and only a small number of production-level applications implemented them.
+Three-tier applications are now becoming mainstream. They match the logical decomposition of
+applications (presentation, logic, and data) with their software and hardware structuring (PCs,
+workstations, and clusters). Clients are diskless (e.g., browsers), application servers are stateless,
+but contain the core logic of the application (e.g., web servers), and back-end databases contain
+the state of the applications. Basically, the client submits a request to some application server,
+on behalf of an end-user. The application server processes the client's request, stores the resulting
+state in a back-end database, and returns a result to the client. This simple interaction scheme is
+at the heart of the so-called e-Business game today.
+Motivation. The partitioning of an application into several tiers provides for better modularity and
+scalability. However, the multiplicity of the components and their interdependencies make it harder
+to achieve any meaningful form of reliability. Current reliability solutions in three-tier architectures
+are typically transactional [1, 2]. They ensure at-most-once request processing through some form
+of "all-or-nothing" guarantee. The major limitation of those solutions is precisely the impossibility
+for the client-side software to accurately distinguish the "all" from the "nothing" scenario. If a failure
+occurs at the middle or back-end tier during request processing, or a timeout period expires at
+the client side, the end-user typically receives an exception notification. This does not convey what
+had actually happened, and whether the actual request was indeed performed or not. 1 In practice,
+end-users typically retry the transaction, with the risk of executing it several times, e.g., having
+1 The transactional guarantee ensures that if the request was indeed performed, all its e#ects are made durable
+("all" scenario), and otherwise, all its e#ects are discarded ("nothing" scenario) [3].
+the user charged twice. In short, current transactional technology typically ensures at-most-once
+request processing and, by retrying transactions, end-users typically obtain at-least-once guaran-
+tees. Ensuring exactly-once transaction processing is hard. Basically, some transaction outcome
+information should be made highly available, but it is not clear exactly which information should be
+preserved, where it should be stored, and for how long. The motivation of our work is to define and
+implement the abstraction of exactly-once-Transaction (e-Transaction) in a three-tier architecture.
+Intuitively, this abstraction masks (physical) transaction aborts. It adds a liveness dimension to
+transactional systems that also includes the client side, and frees the end-user from the burden of
+having to resubmit transactions.
+Protocol. This paper presents a distributed protocol that implements the e-Transaction abstraction.
+We integrate a replication scheme that guarantees the e-Transaction liveness property with a transactional
+scheme that ensures the traditional safety counterpart. This integration involves the client,
+the application servers, and the database servers. To deal with the inherent non-determinism of the
+interaction with third-party databases, we make use of write-once registers (wo-register). These are
+consensus-like abstractions that capture the nice intuition of CD-ROMs - they can be written once
+but read several times. Building on such abstractions leads to a modular protocol, and enables us
+to reuse existing results on the solvability of consensus in distributed systems, e.g., [4]. 2 Indirectly,
+we contribute to better understand how the safety aspect of transactions can be practically mixed
+with the liveness feature of replication, and how a consensus abstraction can help achieve that mix.
+Related work. Considerable work has been devoted to transaction execution on replicated data [3].
+However, we know of no approach to replicate the actual "transaction processing-state" in order
+to ensure the fault-tolerance of the transaction itself, i.e., that it eventually commits exactly-once.
+Traditionally, it is assumed that a transaction that cannot access "enough" replicas is aborted [3],
+but the issue of how to reliably determine the transaction's outcome, and possibly retry it, is not
+addressed. In fact, addressing this issue requires a careful use of some form of non-blocking trans-action
+processing, with some highly available recovery information that reflects the "transaction-
+processing state". In [6], the problem of exactly-once message delivery was addressed for communication
+channels. The author pointed out the importance of reliably storing some "message
+recovery information". In the context of exactly-once transaction processing, this recovery information
+should represent the transaction-processing state. Several approaches were proposed in the
+literature to store that state for recovery purposes, e.g., [7, 8, 9]. Nevertheless, those approaches
+do not guarantee the high-availability of that state. Furthermore, they rely on disk storage at the
+client or at some application server. Relying on the client's disk is problematic if the client is a Java
+applet that does not have the right to access the disk. Solutions based on disk storage at a specific
+application server would make that server host dependent, and three-tier architectures are considered
+scalable precisely because they prevent any form of host dependence at the middle-tier [10].
+Our e-Transaction protocol uses the very same replication scheme, both as a highly available storage
+for the "transaction-processing state", and as an e#ective way to retry transactions behind the
+scenes. In contrast to most replication schemes we know about [11, 12, 13, 14], we assume stateless
+servers that interact with third-party databases - replication schemes have usually been designed in
+a client-server context: servers are stateful but do not interact with third-party entities. Another
+A wo-register can also be viewed as a distributed form of software counter [5].
+characteristic of our replication scheme is its asynchronous nature: it tolerates unreliable failure
+detection and may vary, at run-time, between some form of primary-backup [12] and some form of
+active replication [11].
+Practical considerations. Our e-Transaction protocol was designed with a very practical objective
+in mind. In particular, we assume that the functionality of a database server is given: it is a state-
+ful, autonomous resource that runs the XA interface [15] - the X/Open standard that database
+vendors are supposed to comply with in distributed transaction-processing applications. We preserve
+the three-tier nature of the applications by not relying on any disk access at the client site,
+or any application server site. We do not make any assumption on the failure detection scheme
+used by the client-side software to detect the crash of application servers, and we tolerate failure
+suspicion mistakes among application servers. The overhead of our e-Transaction protocol is very
+acceptable in a practical setting where application servers are run by the Orbix 2.3 Object Request
+Broker [16], and database servers by the Oracle 8.0.3 database management system [17]. In terms
+of the latency, as viewed by a client, our protocol introduces an overhead of about 16% over a
+baseline protocol that does not o#er any reliability guarantee.
+Roadmap. The rest of the paper is organized as follows. Section 2 defines our system model. Section
+3 describes the e-Transaction problem. Section 4 describes our protocol and the assumptions
+underlying its correctness. Finally, Section 5 puts our contribution in perspective through some
+final remarks. Appendix 1 describes the pseudo-code used to express our protocol, Appendix 2
+discusses the protocol correctness, and Appendix 3 the performance of its implementation.
+Three-Tier Model
+We consider a distributed system with a finite set of processes that communicate by message
+passing. Processes fail by crashing. At any point in time, a process is either up or down. A crash
+causes a transition from up to down, and a recovery causes the transition from down to up. The
+crash of a process has no impact on its stable storage. When it is up, a process behaves according
+to the algorithm that was assigned to it: processes do not behave maliciously.
+In the following, we outline our representation of the three types of processes in a three-tier
+application: clients, application servers, and database servers.
+Clients
+Client processes are denoted by c 1 , c 2 , . , c k (c i # Client). We assume a domain, "Request", of
+request values, and we describe how requests in this domain are submitted to application servers.
+Clients have an operation issue(), which is invoked with a request as parameter (e.g., on behalf
+of an end-user). We say that the client issues a request when the operation issue() is invoked.
+The issue() primitive is supposed to return a result value from the domain "Result". When it
+does so, we say that the client delivers the result (e.g., to the end-user). A result is a value in the
+"Result" domain, and it represents information computed by the business logic, such as reservation
+number and hotel name, that must be returned to the user. In practice, the request can be a vector
+of values. In the case of a travel application for instance, the request typically indicates a travel
+destination, the travel dates, together with some information about hotel category, the size of a
+car to rent, etc. A corresponding result typically contains information about a flight reservation, a
+hotel name and address, the name of a car company, etc.
+After being issued by a client, a request is processed without further input from the client.
+Furthermore, the client issues requests one-at-a-time and, although issued by the same client, two
+consecutive requests are considered to be unrelated. Clients cannot communicate directly with
+databases, only through application servers.
+We assume that each request and each result are uniquely identified. Furthermore, we assume
+that every result is uniquely associated with a transaction. When we say that a result is committed
+(resp. aborted), we actually mean that the corresponding transaction is committed (resp. aborted).
+For presentation simplicity we assume that a result and the corresponding transaction have the same
+identifier, and we simply represent such indentifiers using integers.
+Application Servers
+Application server processes are denoted by a 1 , a 2 , . , am (a i # AppServer). Application servers
+are stateless in the sense that they do not maintain states accross request invocations: requests do
+not have side-e#ects on the state of application servers, only on the database state. Thus, a request
+cannot make any assumption about previous requests in terms of application-server state changes.
+Having stateless application servers is an important aspect of three-tier applications. Stateless
+servers do not have host a#nity, which means that we can freely migrate them. Moreover, fail-over
+is fast because we do not have to wait for a server to recover its state. We do not model the chained
+invocation of application servers. In our model, a client invokes a single application server, and this
+server does not invoke other application servers. Chained invocation does not present additional
+challenges from a reliability standpoint because application servers are stateless. We ignore this
+aspect in our model to simplify the discussion.
+Application servers interact with the databases through transactions. For presentation simplic-
+ity, we only explicitly model the commitment processing, not the business logic or SQL queries
+performed by application servers. We use a function, called compute(), to abstract over the (tran-
+database manipulations performed by the business logic. In a travel example, compute()
+would query the database to determine flight and car availabilities, and perform the appropriate
+bookings. However, the compute() function does not commit the changes made to the database. It
+simply returns a result. Since the commitment processing can fail, we may call compute() multiple
+times for the same request. However, compute() is non-deterministic because its result depends on
+the database state. We assume that each result returned by compute() is non-nil. In particular, we
+model user-level aborts as regular result values. A user-level abort is a logical error condition that
+occurs during the business logic processing, for example if there are no more seats on a requested
+flight. Rather than model user-level aborts as special error values returned by compute(), we model
+them as regular result values that the databases then can refuse to commit.
+Every application server has access to a local failure detector module which provides it with
+information about the crash of other application servers. Let a 1 and a 2 be any two application
+servers. We say that server a 2 suspects server a 1 if the failure detector module of a 2 suspects a 1 to
+have crashed. We abstract the suspicion information through a predicate suspect(). Let a 1 and a 2
+be any two application servers. The execution of suspect(a 1 ) by server a 2 at t returns true if and
+only if a 2 suspects a 1 at time t.
+Database Servers
+Database server processes are denoted by s 1 , s 2 , . , s n (s i # Server). Since we want our approach
+to apply to o#-the-shelf database systems, we view a database server as an XA [15] engine. In
+particular, a database server is a "pure" server: it does not invoke other servers, it only responds
+to invocations. We do not represent full XA functionality, we only represent the transaction commitment
+aspects of XA (prepare() and commit()). We use two primitives, vote() and decide(), to
+represent the transaction commitment functionality. The vote() primitive takes as a parameter a
+result identifier, and returns a vote in the domain Vote = {yes, no}. Roughly speaking, a yes vote
+means that the database server agrees to commit the result (i.e., the corresponding transaction).
+The decide() primitive takes two parameters: a result identifier and an outcome in the domain
+abort}. The decide() primitive returns an outcome value such that: (a) if the
+input value is abort, then the returned value is also abort; and (b) if the database server has voted
+yes for that result, and the input value is commit, then the returned value is also commit. 3
+3 The Exactly-Once Transaction Problem
+Roughly speaking, providing the e-Transaction (exactly-once-Transaction) abstraction comes down
+to ensure that whenever a client issues a request, then unless it crashes, there is a corresponding
+result computed by an application server, the result is committed at every database server, and
+then eventually delivered by the client. The servers might go through a sequence of aborted
+intermediate results until one commits and the client delivers the corresponding result. Ensuring
+database consistency requires that all database servers agree on the outcome of every result (abort or
+commit). Client-side consistency requires that only a committed result is returned to the end-user.
+In the following, we state the specification of the e-Transaction problem. More details on the
+underlying intuition and the rationale behind the problem specification are given in [18]. For the
+sake of presentation simplicity, but without loss of generality, we consider here only one client,
+and assume that the client issues only one request. We assume the existence of some serializability
+protocol [3]. We hence omit explicit identifiers to distinguish di#erent clients and di#erent requests,
+together with identifiers that relate di#erent results to the same request.
+We define the e-Transaction problem with three categories of properties: termination, agreement
+, and validity . Termination captures liveness guarantees by preventing blocking situations.
+Agreement captures safety guarantees by ensuring the consistency of the client and the databases.
+Validity restricts the space of possible results to exclude meaningless ones.
+. Termination.
+(T.1) If the client issues a request, then unless it crashes, it eventually delivers a result;
+(T.2) If any database server votes for a result, then it eventually commits or aborts the result.
+. Agreement.
+delivered by the client unless it is committed by all database servers;
+commits two di#erent results;
+decide di#erently on the same result.
+3 In terms of XA, the vote() primitive corresponds to a prepare() operation while the decide() primitive is patterned
+after the commit() operation.
+. Validity.
+If the client delivers a result, then the result must have been computed by an application
+server with, as a parameter, a request issued by the client;
+server commits a result unless all database servers have voted yes for that
+result.
+Termination ensures that a client does not remain indefinitely blocked (T.1). Intuitively, this
+property provides at-least-once request processing guarantee to the end-user, and frees her from
+the burden of having to retry requests. Termination also ensures that no database server remains
+blocked forever waiting for the outcome of a result (T.2), i.e., no matter what happens to the
+client. This non-blocking property is important because a database server that has voted yes for a
+result might have locked some resources. These remain inaccessible until the result is committed
+or aborted [3]. Agreement ensures the consistency of the result (A.1) and the databases (A.3). It
+also guarantees at most-once request processing (A.2). The first part of Validity (V.1) excludes
+trivial solutions to the problem where the client invents a result, or delivers a result without having
+issued any request. The second part (V.2) conveys the classical constraint of transactional systems:
+no result can be committed if at least some database server "refuses" to do so. Basically, and
+as we point out in Section 5, the e-Transaction specification adds to the traditional termination
+properties of distributed databases, properties that bridge the gap between databases and clients
+on one hand, and between at-least-once and exactly-once on the other hand.
+4 An Exactly-Once Transaction Protocol
+Our protocol consists of several parts. One is executed at the client, one is executed at the application
+servers, and one at the database servers (Figure 1). The client interacts with the application
+servers, which themselves interact with database servers. The complete algorithms are given in
+
+Figure
+
+2, Figure 3, Figure 4, Figure 5, and Figure 6. We describe the pseudo-code used in those
+algorithms in Appendix 1, and give their correctness proofs in Appendix 2.
+Client Protocol
+The client part of the protocol is encapsulated within the implementation of the issue() primitive
+
+Figure
+
+2). This primitive is invoked with a request as an input parameter and is supposed to
+eventually return a result. Basically, the client keeps retransmitting the request to the application
+servers, until it receives back a committed result. The client might need to go through several tries
+(intermediate results) before it gets a committed result. To optimize the failure-free scenario, the
+client does not initially send the request to all application servers unless it does not receive a result
+after a back-o# period (line 7 in Figure 2).
+Application Server Protocol
+Application servers execute what we call an asynchronous replication protocol (Figure 5 and Figure
+6). In a "nice" run, where no process crashes or is suspected to have crashed, the protocol
+goes as follows. There is a default primary application server that is supposed to initially receive
+the client's request. The primary application server computes a result for the client's request, and
+orchestrates a distributed atomic commitment protocol among the database servers to commit or
+abort that result. Then the application server informs the client of the outcome of the result. The
+outcome might be commit or abort, according to the votes of the databases (Figure 1 (a) and (b)).
+Any application server that suspects the crash of the primary becomes itself a primary and tries
+to terminate the result (Figure 6). If the result was already committed, the new primary finishes
+the commitment of that result and sends back the decision to the client (Figure 1 (c)). Otherwise,
+the new primary aborts the result, and informs the client about the abort decision (Figure 1 d).
+Some form of synchronization is needed because (1) the result computation is non-deterministic
+and (2) several primaries might be performing at the same time - we do not assume reliable failure
+detection -. We need to ensure that the application servers agree on the outcome of every result. We
+factor out the synchronization complexity through a consensus abstraction, which we call write-once
+registers (or simply wo-registers). A wo-register has two operations: read() and write(). Roughly
+speaking, if several processes try to write a value in the register, only one value is written, and
+once it is written, no other value can be written. A process can read that value by invoking the
+operation read(). More precisely:
+. Write() takes a parameter input and returns a parameter output. The returned parameter is
+either input - the process has indeed written its value - or some other value already written
+in the register.
+. Read() returns a value written in the register or the initial value #. If a value v was written
+in the register, then, if a process keeps invoking the read() operation, then unless the process
+crashes, eventually the value returned is the value v.
+Intuitively, the semantics of a wo-register looks very much like that of a CD-ROM. In fact,
+a wo-register is a simple extension of a so-called consensus object [19]. We simply assume here
+the existence of wait-free wo-registers [19]. It is easy to see how one could obtain a wait-free
+implementation of a wo-register from a consensus protocol executed among the application servers
+(e.g., [4]): every application server would have a copy of the register. Basically, writing a value in
+the wo-register comes down to proposing that value for the consensus protocol. To read a value, a
+process simply returns the decision value received from the consensus protocol, if any, and returns
+# if no consensus has been triggered.
+Database Server Protocol
+
+Figure
+
+3 illustrates the functionality of database servers. A database server is a pure server (not a
+client of other servers): it waits for messages from application servers to either vote or decide on
+results. The database server protocol has a parameter that indicates whether the protocol is called
+initially or during recovery. The parameter is bound to the variable recovery, that is then used in
+the body of the protocol to take special recovery actions (line 2 of Figure 3). During recovery, a
+database server informs the application servers about its "coming back".
+Correctness Assumptions
+We prove the correctness of our protocol in Appendix 2. The proofs are based on the following
+assumptions. We will discuss the practicality of these assumptions in Section 5.
+client
+Transactional
+manipulation
+databases
+prepare
+yes
+ackack
+commit
+result
+appServers
+regD.write(result,commit)
+request
+a2 a3
+client
+Transactional
+manipulation
+databases
+prepare
+ackack
+appServers
+request
+a2 a3
+abort
+abort
+regD.write(nil,abort)
+no
+client
+Transactional
+manipulation
+databases
+prepare
+yes
+appServers
+regD.write(result,commit)
+request
+a2 a3
+crash
+suspect
+client
+Transactional
+manipulation
+databases
+appServers
+request
+a2 a3
+crash
+suspect
+Fail-over with abort
+Fail-over with commit
+ack
+commit
+result
+ack
+abort
+abort
+(c) (d)
+(a) Failure-free run with commit (b) Failure-free run with abort
+
+Figure
+
+1: Communication steps in various executions
+Class ClientProtocol {
+list of AppServer alist := theAppServers; /* list of all application servers */
+AppServer a 1 := thePrimary; /* the default primary */
+period := thePeriod; /* back-o# period */
+issue(Request request) {
+AppServer a i ; /* an application server */
+Decision decision; /* a pair (result,outcome) */
+begin
+while true do
+send [Request,request, j] to a 1 ;
+3 timeout := period; /* set the timeout period */
+4 wait until (receive [Result,j, decision] from a i ) or expires(timeout);
+5 if expired(timeout) then
+6 send [Request,request, j] to alist;
+7 wait until (receive [Result,j, decision] from a i );
+9 return(decision.result); /* delivers the result and exits */
+
+Figure
+
+2: Client algorithm
+Class DataServer {
+list of AppServer alist := theAppServers; /* list of all application servers */
+main(Bool recovery) {
+Outcome outcome; /* outcome of a result: commit or abort */
+AppServer a i ; /* an application server */
+Integer j; /* a result identifier */
+begin
+recovery from the initial starting case */
+send [Ready] to alist; /* recovery notification */
+3 while (true) do
+(receive [Prepare,j] from a i )
+6 send [Vote,j,this.vote(j)] to a
+(receive [Decide,j, outcome] from a i );
+9 send [AckDecide,j] to a
+terminate(Integer j, Outcome outcome) {.} /* commit or abort a result */
+vote(Integer determine a vote for a result */
+
+Figure
+
+3: Database server algorithm
+Class AppServerProtocol {
+Client c; /* the client */
+list of AppServer alist := theAppServers; /* list of all application servers */
+list of DataServer dlist := theDataServers; /* list of all database servers */
+array of Decision WORegister regD; /* array of decision WORegisters */
+array of AppServer WORegister regA; /* array of application server WORegisters */
+main(array of Decision WORegister r A , AppServer WORegister r D ) {
+begin
+3 while (true) do
+computation thread */
+cleanning thread */
+7 coend
+terminate(Integer j, Decision decision) {
+repeat
+3 send [Decide,j, decision.outcome] to dlist;
+4 wait until (for every d k # dlist:
+5 (receive [AckDecide,j] or [Ready] from d k ));
+6 until (received([AckDecide,j]) from every d k # dlist)
+7 send [Result,j, decision] to c;
+9 }
+prepare(Integer {
+send [Prepare,j] to dlist;
+3 wait until (for every d k # dlist:
+4 (receive [Vote,j, vote k ] or [Ready] from d k ));
+5 if (for every d k # dlist: (received([Vote,j,yes]) from d k )) then
+6 return(commit);
+7 else return(abort);
+clean() {.}
+
+Figure
+
+4: Application server algorithm
+{
+Request request; /* request from the client */
+AppServer a i ; /* an application server */
+Decision decision := (nil,abort); /* a pair (outcome,result) */
+Integer j; /* a result identifier */
+begin
+while (true) do
+(receive [Request,request, j] from c);
+4 send [Result,j, decision] to c; /* the result is already committed */
+5 else
+6 a i := regA[j].write(this);
+9 decision.outcome := this.prepare(j);
+decision := regD[j].write(decision);
+
+Figure
+
+5: The computation thread
+{
+Decision decision := (nil,abort); /* a pair (outcome,result) */
+AppServer a i ; /* an application server */
+list of Integer clist; /* list of "cleaned" results */
+Integer j; /* a result identifier */
+begin
+while (true) do
+2 for every a i # alist /* cleanning all results initiated by a i */
+5 while (regA[j].read() #) do
+6 if (j /
+# clist) and
+7 decision := regD[j].write(nil,abort);
+9 add j into clist;
+
+Figure
+
+The cleanning thread
+We assume that a majority of application servers are correct: they are always up. The failure
+detector among application servers is supposed to be eventually perfect in the sense of [4]. In other
+words, we assume that the following properties are satisfied: (completeness) if any application
+server crashes at time t, then there is a time t # > t after which it is permanently suspected by
+every application server; (accuracy) there is a time after which no correct application server is ever
+suspected by any application server. We also assume that all database servers are good: (1) they
+always recover after crashes, and eventually stop crashing, and (2) if an application server keeps
+computing results, a result eventually commits. 4
+We assume that clients, application servers, and database servers, are all connected through
+reliable channels. The guarantees provided by the reliable channel abstraction are captured by the
+following properties: (termination) if a process p i sends message m to process p j , then unless p i
+or eventually delivers m; (integrity) every process receives a message at most once,
+and only if the message was previously broadcasts by some process (messages are supposed to be
+uniquely identified).
+Concluding Remarks
+On the specification of e-Transactions. Intuitively, the e-Transaction abstraction is very desir-
+able. If a client issues a request "within" an e-Transaction, then, unless it crashes, the request
+is executed exactly-once, and the client eventually delivers the corresponding result. If the client
+crashes, the request is executed at-most-once and the database resources are eventually released.
+As conveyed by our specification in Section 3, the properties underlying e-Transactions encompass
+all players in a three-tier architecture: the client, the application servers, and the databases. Not
+surprisingly, some of the properties are similar to those of non-blocking transaction termination [3].
+In some sense, those properties ensure non-blocking at-most-once. Basically, the specification of
+e-Transactions extend them to bridge the gap between at-most-once and exactly-once semantics.
+On the asynchrony of the replication scheme. The heart of our e-Transaction protocol is the asynchronous
+replication scheme performed among the application servers. Roughly speaking, with a
+"patient" client and a reliable failure detector, our replication scheme tends to be similar to a primary
+backup scheme [12]: there is only one active primary at a time. With an "impatient" client,
+or an unreliable failure detector, we may easily end up in the situation where all application servers
+try to concurrently commit or abort a result. In this case, like in an active replication scheme [11],
+there is no single primary and all application servers have equal rights. One of the characteristics
+of our replication protocol is precisely that it may vary, at run-time, between those two extreme
+schemes.
+On the practicality of our protocol. Many of the assumptions we made are "only" needed to
+ensure the termination properties of our protocol (Appendix 2). These include the assumption of
+a majority of correct application servers, the assumption of an eventually perfect failure detector
+among application servers, the assumption that every database server being eventually always up,
+4 The assumption that results eventually commit does not mean that there will eventually be a seat on a full flight.
+It means that an application server will eventually stop trying to book a seat on a full flight, and instead compute a
+result that can actually run to completion, for example a result that informs the user of the booking problem.
+and the liveness properties of wo-registers and communication channels. In other words, if any
+of these properties is violated, the protocol might block, but would not violate any agreement
+nor validity property of our specification (Appendix 2). In practice, these termination-related
+assumptions need only hold during the processing of a request. For example, we only need to assume
+that, for each request, a majority of application servers remains up, and every database server will
+eventually stay up long enough to successfully commit the result of that request. 5 Furthermore, the
+assumption of a majority of correct processes is only needed to keep the protocol simple: we do not
+explicitly deal with application server recovery. Without the assumption of a majority of correct
+processes, one might still ensure termination properties by making use of underlying building blocks
+that explicitly handle recovery, as in [22, 23]. The assumption of reliable channels do not exclude
+link failures, as long as we can assume that any link failure is eventually repaired. In practice, the
+abstraction of reliable channels is implemented by retransmitting messages and tracking duplicates.
+Finally, to simplify the presentation of our protocol, we did not consider garbage collection
+issues. For example, we did not address the issue of cleanning the wo-register arrays. To integrate
+a garbage collector task, one needs to state that the at-most-once guarantee is only ensured if the
+client does not retransmit requests after some known period of time. Being able to state this kind
+of guarantees would require a timed model, e.g., along the lines of [24].
+On the failure detection schemes. It is important to notice that our protocol makes use of three
+failure detection schemes in our architecture, and this is actually not surprising given the nature of
+three-tier systems. (1) Among application servers, we assume a failure detector that is eventually
+perfect in the sense of [4]. As we pointed out, failure suspicions do however not lead to any incon-
+sistency. (2) The application servers rely on a simple notification scheme to tell when a database
+server has crashed and recovered. In practice, application servers would detect database crashes
+because the database connection breaks when the database server crashes. Application servers
+would receive an exception (or error status) when trying to manipulate the database. This can be
+implemented without requiring the database servers to know the identity of the application servers.
+(3) Clients use a simple timeout mechanisms to re-submit requests. This design decision reflects
+our expectation that clients can communicate with servers across the Internet, which basically gives
+rise to unpredictible failure detection.
+On the practicality of our implementation Our current implementation was built using o#-the-shelf
+technologies: the Orbix 2.3 Object Request Broker [16] and the Oracle 8.0.3 database management
+system [17]. Our prototype was however aimed exclusively for testing purposes. In terms of the
+latency, as viewed by a client, our protocol introduces an overhead of about 16% over a baseline
+protocol that does not o#er any reliability guarantee (see Appendix 3). This overhead corresponds
+to the steady-state, failure and suspicion free executions. These are the executions that are the
+most likely to occur in practice, and for which protocols are usually optimized. Nevertheless, for a
+complete evaluation of the practicality of our protocol, one obviously needs to consider the actual
+5 Ensuring the recovery of every database server (within a reasonable time delay) is typically achieved by running
+databases in clusters of machines [20, 21]. With a cluster, we can ensure that databases always recover within a
+reasonable delay, but we must still assume that the system reaches a "steady state" where database servers stay up
+long enough so that we can guarantee the progress of the request processing. In an asynchronous system however,
+with no explicit notion of time, the notion of long enough is impossible to characterize, and is simply replaced with
+the term always.
+response-time of the protocol in the case of various failure alternatives. This should go through
+the use of underlying consensus protocols that are also optimized in the case of failures and failure
+suspicions, e.g., [25, 23].
+
+
+
+--R
+
+"How microsoft transaction server changes the com programming model,"
+Object Management Group
+Concurrency Control and Recovery in Database Systems.
+"Unreliable failure detectors for reliable distributed systems,"
+"Supporting nondeterministic execution in fault-tolerant sys- tems,"
+"Reliable messages and connection establishment,"
+"Implementing recoverable requests using queues,"
+"E#cient transparent application recovery in client-server information systems,"
+"Integrating the object transaction service with the web,"
+"Corba fault-tolerance: why it does not add up,"
+"Replication management using the state machine approach,"
+"The primary-backup approach,"
+"The delta-4 approach to dependability in open distributed computing systems,"
+"Semi-passive replication,"
+x/Open Company Ltd
+Orbix 2.2 Programming Guide
+Oracle8 Application Developer's Guide.
+"Exactly-once-transactions,"
+"Wait-free synchronization,"
+Clusters for High-Availability: A Primer of HP-UX Solutions
+"The design and architecture of the microsoft cluster service-a practical approach to high-availability and scalability,"
+"Failure detection and consensus in the crash-recovery model,"
+"Lazy consensus,"
+"The timed asynchronous model,"
+"A simple and fast asynchronous consensus protocol based on a weak failure detector,"
+--TR
+
+--CTR
+Francesco Quaglia , Paolo Romano, Reliability in three-tier systems without application server coordination and persistent message queues, Proceedings of the 2005 ACM symposium on Applied computing, March 13-17, 2005, Santa Fe, New Mexico
+Paolo Romano , Francesco Quaglia , Bruno Ciciani, A Lightweight and Scalable e-Transaction Protocol for Three-Tier Systems with Centralized Back-End Database, IEEE Transactions on Knowledge and Data Engineering, v.17 n.11, p.1578-1583, November 2005
+Wenbing Zhao , Louise E. Moser , P. Michael Melliar-Smith, Unification of Transactions and Replication in Three-Tier Architectures Based on CORBA, IEEE Transactions on Dependable and Secure Computing, v.2 n.1, p.20-33, January 2005
+Svend Frlund , Rachid Guerraoui, e-Transactions: End-to-End Reliability for Three-Tier Architectures, IEEE Transactions on Software Engineering, v.28 n.4, p.378-395, April 2002
+Roberto Baldoni , Carlo Marchetti, Three-tier replication for FT-CORBA infrastructures, SoftwarePractice & Experience, v.33 n.8, p.767-797, 10 July

@@ -1,0 +1,648 @@
+--T
+Procedure placement using temporal ordering information.
+--A
+Instruction cache performance is very important to instruction fetch efficiency and overall processor performance. The layout of an executable has a substantial effect on the cache miss rate during execution. This means that the performance of an executable can be improved significantly by applying a code-placement algorithm that minimizes instruction cache conflicts. We describe an algorithm for procedure placement, one type of code-placement algorithm, that significantly differs from previous approaches in the type of information used to drive the placement algorithm. In particular, we gather temporal ordering information that summarizes the interleaving of procedures in a program trace. Our algorithm uses this information along with cache configuration and procedure size information to better estimate the conflict cost of a potential procedure ordering. We compare the performance of our algorithm with previously published procedure-placement algorithms and show noticeable improvements in the instruction cache behavior.
+--B
+Introduction
+The linear ordering of procedures in a program's text segment fixes the addresses of each of these
+procedures and this in turn determines the cache line(s) that each procedure will occupy in the
+instruction cache. In the case of a direct-mapped cache, conflict misses result when the execution
+of the program alternates between two or more procedures whose addresses map to overlapping
+sets of cache lines. Several compile-time code-placement techniques have been developed that
+use heuristics and profile information to reduce the number of conflict misses in the instruction
+cache by a reordering of the program code blocks [5,6,7,8,11]. Though these techniques successfully
+remove a sizeable number of the conflict misses when compared to the default code layout
+produced during the typical compilation process, it is possible to do even better if we gather
+improved profile information and consider the specifics of the hardware configuration. To this
+end, we propose a method for summarizing the important temporal ordering information related
+to code placement, and we show how to use this information in a machine-specific manner that
+often further reduces the number of instruction cache conflict misses. In particular, we apply our
+new techniques to the problem of procedure placement in direct-mapped caches, where the compiler
+2achieves an optimized cache line address for each procedure by specifying the ordering of
+the procedures and gaps between procedures in an executable.
+Code-placement techniques may reorganize an application at one or more levels of granularity.
+Typically, a technique focuses on the placement of whole procedures or individual basic blocks.
+We use the term code block to refer to the unit of granularity to which a code-placement technique
+applies. Though we focus on the placement of variable-sized code blocks defined by procedure
+boundaries, our techniques for capturing temporal information and using this information during
+placement apply to code blocks of any granularity.
+The default code layout produced by most compilers places the procedures of an executable in the
+same order in which they were listed in the source files and preserves the order of object files
+from the linker command line. Therefore, it is left to chance which code blocks will conflict in the
+cache. Whenever there are code blocks that are often executed together and happen to overlap in
+the cache, they can cause a significant number of conflict misses in the instruction cache. Several
+studies have shown that compile-time optimizations that change the relative placement of code
+blocks can cause large changes in the instruction cache miss rate [3,4]. When changes in the relative
+placement of code blocks occurs, the performance of the program will be affected not only by
+the intended effect of the optimization, but also by the resulting change in instruction cache
+misses. This makes it difficult to predict the total effect of optimizations which change the code
+size and use the change in running time of the optimized executable to judge the effectiveness of
+the optimizations. In summary, code-placement techniques are important because they improve
+the performance of the instruction fetcher and because they enable the effective use of other compile-time
+optimizations.
+To reduce the instruction cache miss rate of an application, a code placement algorithm requires
+two capabilities: it must be able to assign code blocks to the cache lines; and it must have information
+on the relative importance of avoiding overlap between different sets of code blocks.
+There are only a few ways for the compiler to set the addresses of a code block. The compiler can
+manipulate the order in which procedures appear in the executable, and it can leave gaps between
+two adjacent procedures to force the alignment of the next procedure at a specific cache line. The
+more interesting problem is determining how procedures should overlap in the hardware instruction
+cache.
+The previous work on procedure placement has almost exclusively been based on summary profile
+statistics that simply indicate how often a code block was executed. Often this information is
+organized into a weighted procedure call graph (WCG) that records the number of calls that
+occurred between pairs of procedures during a profiling run of the program. Figure 1 contains an
+example of a WCG. This summary information is used to estimate the penalty resulting from the
+placement of these procedure pairs in the same cache locations. The aim of most existing algorithms
+is to place procedures such that pairs with high call counts do not conflict in the cache.
+Counting the number of calls between procedures and summarizing this information in a WCG
+provides a way of recognizing procedures that are temporally related during the execution of a
+program. However, a WCG does not give us all the temporal information that we would like to
+have. In particular, the absence of an edge between two procedures does not necessarily mean that
+there is no penalty to overlapping the procedures. For example, the WCG in Figure 1 is produced
+both when the condition cond alternates between true and false (Trace #1 in Figure 1) and when
+Proc M()
+loop 20-times
+loop 4-times
+if (cond)
+call
+else
+call T;
+endl
+call Z;
+endl
+
+Figure
+
+1. Example of a simple program that calls three leaf procedures. The weighted procedure
+call graph is obtained when the condition cond is true 50% of the time. Notice that this same WCG
+is obtained from both call traces given on the right of the figure.
+(a) Example program (b) Weighted procedure call graph (c) Possible traces corresponding
+to the WCG
+Trace #1:
+Trace #2:
+the condition cond is true 40 times and then false 40 times (Trace #2). Assume for the purposes
+of this example that all procedures in Figure 1 require only a single cache line and that we have
+only three locations in our direct-mapped instruction cache. If one cache location is reserved for
+procedure M, we clearly do not want the same code layout for the last two cache locations in both
+these execution traces. Trace #1 experiences fewer cache conflict misses when procedures S and
+T are each given distinct cache line (Z shares a cache line with S or T), while Trace #2 experiences
+fewer cache conflict misses when procedures S and T share a cache line (Z is given its own
+cache line). The WCG in Figure 1 does not capture the temporal ordering information that is
+needed to determine which layout is best. A WCG summarizes only direct call information; no
+precise information is provided on the importance of conflicts between siblings (as illustrated in
+
+Figure
+
+1) or on more distant temporal relationships.
+To enable better code layout, we want to have a measure of how much the execution of a program
+alternates between each pair of procedures (not just the pairs connected by an edge in the WCG).
+We refer to this measure as temporal ordering information. With this and other information concerning
+procedure sizes and the target cache configuration, we can make a better estimate of the
+number of conflict misses experienced by any specific layout.
+We begin in Section 2 with a brief description of a well-known procedure-placement algorithm
+that sets a framework for understanding our new algorithm. We present the details of our algorithm
+in Sections 3 and 4. Section 3 describes our method for extracting and summarizing the
+temporal ordering information in a program trace, while Section 4 presents our procedure-place-
+ment algorithm that uses the information produced by this method. In Section 5, we explain our
+experimental methodology and present some empirical results that demonstrate the benefit of our
+algorithm over previous algorithms for direct-mapped caches. Section 6 describes how to modify
+our algorithm for set-associative caches. Finally, Section 7 reviews other related work in code lay-out
+and Section 8 concludes.
+Procedure placement from Pettis and Hansen
+Current approaches to procedure placement rely on greedy algorithms. We can summarize the differences
+between these algorithms by describing how
+. selects the order in which procedures are considered for placement; and
+. determines where to place each procedure relative to the already-placed procedures.
+We begin with a description of the well-known procedure-placement algorithm by Pettis and
+Hansen [8]. As we will explain, our new algorithm retains much of the structure and many of the
+important heuristics found in the Pettis and Hansen approach. In addition to procedure placement,
+Pettis and Hansen also address the issues of basic-block placement and branch alignment. For the
+purposes of this paper, we use the acronym PH when referring to our implementation of the procedure
+placement portion of their algorithm.
+Pettis and Hansen reduce instruction-cache conflicts between procedures by placing the most frequent
+caller/callee procedure pairs at adjacent addresses. Their approach is based on a WCG summary
+of the profile information. They use this summary information both to select the next
+procedure to place and to determine where to place that procedure in relationship to the already-
+placed procedures.
+For our implementation of PH, we produce an undirected graph with weighted edges, which contains
+essentially the same information as a WCG. There is one node in the graph for each procedure
+in the program. An edge e p,q connects two nodes p and q if p calls q or q calls p. The weight
+W(e p,q ) given to e p,q is equal to the (2 * (calls p,q + calls q,p )), where calls p,q is the total number of
+calls made from procedure p to procedure q. We collect this information by scanning an instruc-
+tion-address trace of the program and noting each transition between procedures, which counts
+both calls and returns. Therefore, we get an edge weight that is twice the number of calls; the
+extra factor of two does not change the procedure placement produced by PH.
+This graph is used to select both the next procedure to place and determine the relative placement
+for this procedure. PH begins by making a copy of this initial graph; we refer to this copy as the
+working graph. PH searches this working graph for the edge with the largest weight. Call this
+edge e u,v . Once this edge is found, the algorithm merges the two nodes u and v into a single node
+u' in the working graph (more details in a moment). The remaining edges from the original nodes
+u and v to other nodes become edges of the new node u'. To maintain the invariant of a single edge
+between any pairs of nodes, PH combines each pair of edges e u,r and e v,r into a single edge e u',r
+with weight (W(e u,r )). The algorithm then repeats the process, again searching for the
+edge with the largest weight in the working graph, until the graph is reduced to a single node.
+In PH, the only way of reducing the chance of a conflict miss between procedures is proximity in
+the address space: the closer that we place two procedures in the address space, the less likely it is
+that they will conflict. The procedures within a node are organized as a linear list called a chain
+[8]. When PH merges two nodes, their chains can be combined into a single chain in four ways.
+Let A and B represent the chains, and A' and B' the reverse of each chain. The four possibilities
+are AB, AB', A'B and A'B'. To choose the best one of these, PH queries the original graph to
+determine the edge e with the largest weight between a procedure p in the first chain and a procedure
+q in the second chain. Our implementation of PH chooses the merged chain that minimizes
+the distance (in bytes) between p and q.
+3 Summarizing temporal ordering information
+Any algorithm that aims to optimize the arrangement of code blocks needs a conflict metric which
+quantifies the importance of avoiding conflicts between sets of code blocks. Ideally, the metric
+would report the number of cache conflict misses caused by mapping a set of code blocks to overlapping
+cache lines. We do not expect to find a metric that gives the exact number of resulting
+cache conflict misses, and we do not need one. We simply need the metric to be a linear function
+of number of conflict misses. 1 Section 5.3 shows that the metric used in our algorithm exhibits
+strong correlation with the instruction cache miss rate.
+1. Clearly, any difference between the training and testing data sets will also affect the metric's ability to predict
+cache conflict misses in the testing run.
+As discussed in the previous section, PH uses the call-graph edge weight W(p,q) between two procedures
+and q as its conflict metric. This simple metric drives the merging of nodes. Unfortu-
+nately, this metric has several drawbacks, as illustrated in Section 1.
+To understand how to build a better conflict metric, it is helpful to review the actions of a cache
+when processing an instruction stream. Assume for a moment that we are tracking code blocks
+with a size equal to the size of a cache line. For a direct-mapped cache, a code block b maps to
+cache line l = (Addr(b) DIV line_size) MOD cache_lines. This code block remains in the cache
+until another code block maps to the same cache line. In terms of code layout, it is important
+therefore to note which other code blocks are referenced temporally nearby to a reference to b.
+Ideally, none of the blocks referenced between consecutive references to b map to the same cache
+line as b. In this way, we get reuse of the initial fetch of block b and do not experience a conflict
+miss during the second reference to b.
+Since the reuse of a code block can be prevented by a single other code block in direct-mapped
+caches, we construct a data structure that summarizes the frequency of alternating between two
+code blocks. It is convenient to build this data structure as a weighted graph, where the nodes represent
+individual code blocks. We refer to this graph as a temporal relationship graph (TRG). As
+in PH, the conflict metric is simply the edge weight e p,q between two nodes p and q. A TRG is
+more general than a call graph because it can contain edges connecting any pair of code blocks for
+which there is some interleaving during the program execution. The rest of this section describes
+the process by which we build a TRG, and the next section explains how we use the resulting
+TRG to place procedures.
+To construct a summary of the temporal locality of the code blocks in a trace, we analyze the set
+of recently-referenced code blocks at each transition between code blocks. By implementing an
+ordered set, Q, of code-block identifiers (e.g. procedure names) ordered as they appeared in the
+trace, we always have access to a history of the recently-referenced code blocks. There is a bound
+on the maximum size of Q because its entries eventually become irrelevant and can be removed.
+There are two ways in which a code block identifier p can become irrelevant. First, we need only
+the latest occurrence of p in Q. Any code blocks that are executed after the most recent occurrence
+of p can only have an effect on that occurrence, but not on an earlier occurrence of p. Second, p
+can become irrelevant if a sufficiently large amount of (unique) code has been executed since p's
+last occurrence and evicted p from the cache. Let T be the set of code block identifiers reached
+since the last reference to p. Let S(T) be the sum of the sizes of the code blocks referenced in T.
+Exactly how big S(T) needs to grow before p becomes irrelevant depends on the cache mapping of
+the code. Assuming that the code layout maximizes the reuse of the members of T, they will be
+mapped to non-overlapping addresses, and their cache footprint will be equal to S(T). Therefore, p
+becomes irrelevant when S(T) is greater than the cache size. In summary, we perform the following
+steps when inserting a new element p into our ordered set Q. First, place p at the most recent
+end of Q. If there is a previous occurrence of p in Q, remove it. If not, we remove the oldest members
+of Q until the removal of the next least-recently-used identifier would cause the total size (in
+bytes) of remaining code blocks in Q to be less than the cache size.
+To build a TRG, we process the trace one code block identifier at a time. At each processing step,
+contains a set of code blocks that have temporal locality. The more often that a set of code
+blocks appears in Q, the more important it is that they not occupy the same cache locations. For
+each code block identifier p that we remove from the trace, we update the TRG as follows. For
+every code block q in Q starting from the most-recent end of Q, we increment the weight on the
+edge e p,q . If node p does not exist, we create it; if the edge e p,q does not exist, we create it with a
+weight of 1. We continue down Q until we reach previous occurrence of p or the end of Q. We
+stop when we encounter previous occurrence of p because this indicates a reuse. Any code blocks
+temporarily referenced before this previous occurrence of p in Q could not have displaced p from
+the instruction cache. Once we have collected the relationship data for p, we insert p into Q as
+described above. The process then repeats until we have processed the entire trace. After process-
+ing, we are left with a TRG whose edge weights W(e p,q ) record the number of times p and q
+occurred within a sufficiently small temporal distance to be present in Q at the same time, independent
+of how p and q are related in the program's call graph.
+4 Our placement algorithm
+Given the discussion in Sections 2 and 3, it should be clear that we could use TRG constructed in
+Section 3 within the procedure-placement algorithm described by Pettis and Hansen [8]. We have
+found however that extra temporal ordering information alone is not sufficient to guarantee lower
+instruction cache miss rates. To get consistent improvements, we also make two key changes to
+the way we determine where to place each procedure relative to the already-placed procedures.
+The first involves the use of procedure size and cache configuration information that allows us to
+make a more informed procedure-placement decision. The second involves the gathering of temporal
+ordering information at a granularity finer than the procedure unit; we use this more detailed
+information to overcome problems created by procedures that are larger than the cache size. For
+efficiency reasons, we also consider only popular (i.e. frequently executed) procedures during the
+building of a relationship graph, as was proposed by Hashemi et al. [5].
+The rest of this section outlines our procedure-placement algorithm. Section 4.1 begins with a
+description of the TRGs required for our algorithm and how we iterate through the procedure list
+selecting the order in which procedure processed by the main outer loop. Section 4.2 focuses on
+the portion of our algorithm's main loop that places a procedure relative to the procedures already
+processed using cache configuration and procedure size information. This placement decision
+simply specifies a cache-relative alignment among a set of procedures. The determination of each
+procedure's starting address (i.e. its placement in the linear address space) occurs only after all
+popular procedures have been processed. Section 4.3 presents the details of this process.
+4.1 TRGs and the main outer loop
+Our algorithm uses two related TRGs. One selects the next procedure to be placed (TRG select );
+and other aids in the determination of where to place this selected procedure (TRG place ). In PH,
+these two graphs are initially the same. In our algorithm, the graphs differ in the granularity of the
+code blocks processed during TRG build. While a code block in TRG select corresponds to a whole
+procedure, a code block in TRG place corresponds to a chunk of a procedure. For our benchmarks,
+we have found that "chunking" procedures into 256-byte pieces works well. TRG place therefore
+contains nodes for each procedure p in a program. It is straightforward
+to modify the algorithm in the previous section to generate both TRGs simultaneously.
+Though we record temporal information concerning the parts of procedures, our procedure-place-
+ment algorithm places only whole procedures. We use the finer-grain information only to find the
+best relative alignment of the whole procedures as explained below.
+Though TRG select contains more edges per node than the relationship graph built in PH (due to
+the additional temporal ordering information), we process TRG select in exactly the same greedy-
+merging manner as the relationship graph discussed in Section 2. Though we tried several other
+methods for creating an order to select procedures for placement, we could not find a more robust
+heuristic (or one that was as simple and elegant). The only other difference in our "working" relationship
+graph is that TRG select contains only popular procedures. Section 4.3 discusses how we
+place the remaining unpopular procedures.
+4.2 Determining cache-relative alignments
+In PH, the data structure for the nodes in the working graph is a linear list (or a chain) of the pro-
+cedures. The building of a chain is more restrictive in terms of selecting starting addresses for
+placed procedures than it needs to be however. The only constraint that we need to maintain is that
+the placed procedures are mapped to addresses that result in a cache layout with a small conflict
+cost. We explain how exactly we calculate the cost of a placement in a moment. So, instead of
+chains, we use a data structure for nodes in TRG select that comprises of a set of tuples. Each tuple
+consists of a procedure identifier and an offset, in cache lines, of the beginning of this procedure
+from the beginning of the cache. For a node containing only a single procedure, the offset is zero.
+When two nodes, each containing a single procedure, are merged together, our algorithm modifies
+the offset of the second procedure to ensure that the cost metric of the placement of these two procedures
+in the cache is minimized. The algorithm in Figure 2 presents the pseudo-code for the
+merging of two nodes containing any number of already-placed procedures.
+Three items are note-worthy concerning the merge_nodes routine in Figure 2. First, when we
+merge two nodes, we leave the relative alignment of all the procedures within each node
+
+Figure
+
+2. Pseudo-code for the merging of two nodes from the temporal relationship graph RG select . Procedure
+chunks within a node are identified by unique id's. An offset for a chunk id records the cache-line index corresponding
+to the beginning of that chunk. Offsets are always in units of cache lines.
+array [#_cache_lines] of {id, .};
+merge_nodes (NODE n1, NODE n2) {
+// Initialize cache array c1 by marking each line with the
+procedure-chunk id's from node n1 occupying that line.
+foreach (id, offset) pair p in n1
+for {
+int
+foreach (id,offset) pair p in
+p.offset += best_offset;
+return (n1 -
+unchanged. We do not backtrack and undo any previous decisions. Though the ability to rearrange
+the entire set of procedures in the two nodes being merged might lead to a better layout, this flexibility
+would noticeably increase the computational complexity of the algorithm. We assume that
+the selection order for procedure placement has guaranteed that we have already avoided the most
+expensive, potential cache conflicts. As our experimental results show, this greedy heuristic
+works quite well in practice. It is an open research question if limited amounts of backtracking
+could improve upon the layouts found by our current approach.
+Second, merge_nodes calculates a cost metric for each potential alignment of the layout in the
+first node with respect to the layout in the second node. If we fix the layout of the first node to
+begin at cache line 0, we can offset the start of the second node's layout by any number between 0
+and the number of lines in the cache. We evaluate each of these relative offsets using the fine-grained
+temporal information in TRG place . For a given offset, we compute, for each procedure
+piece in the first node, which procedure pieces in the second node overlap with it in the cache. For
+each pair of overlapping procedure pieces, we compute the estimated number of cache conflicts
+corresponding to this overlap by accessing the weight on the edge (if any) between these two procedure
+pieces in TRG place . We then sum all of these estimates to obtain the total estimate for this
+potential placement. We calculate the estimate for procedure-piece conflicts only between nodes
+(and not the intra-node conflicts between procedure pieces) because we want the incremental cost
+of the placement. The cost of the intra-node overlaps are fixed and will not change the ultimate
+finding. The calculation of this extra cost would only increase the work done by our algorithm.
+Third, if the cost-metric calculation produces several relative offsets with the same cost, our algorithm
+selects the first of these offsets. In the simplest case, if we merge two nodes each containing
+a single procedure (call them p and q) and the total size of these two procedures is less than the
+cache size, the merging of these nodes will result in a node that is equivalent to the chain created
+by PH. In other words, merge_nodes selects the first empty cache line after procedure p to begin
+procedure q since that is the first zero-cost location for q.
+4.3 Producing the final linear list
+The merging phase of our algorithm ends when there are no more edges left in TRG select . 2 The
+final step in our algorithm produces a linear arrangement of all of the program procedures given
+the relative alignment decisions contained in remaining TRG select nodes. To begin, we select a
+procedure p with an cache-line offset of 0. 3 This is the first procedure in our linear layout. To find
+the next procedure in the linear layout, we search the nodes for a procedure q whose cache-rela-
+tive offset results in the smallest positive gap in cache lines between the end of p and the start of q.
+To understand the general case, assume that procedure p is the last procedure in the linear layout.
+If p ends at the cache-relative offset pEndLine, we choose a procedure q which starts at cache-rel-
+ative offset qStartLine as the next procedure in the linear layout if q produces the smallest positive
+value for gap among all unconsidered popular procedures, where
+Finally, whenever we produce a gap between two popular procedures, we search the unpopular
+procedures for one that fits in the gap. Once we determine an address for each popular procedures
+in the linear address space, we simply append any remaining un-placed, unpopular procedures to
+the end of our linear list.
+5 Experimental evaluation
+In this section, we compare three different procedure-placement algorithms. In addition to PH and
+our algorithm (GBSC), we present results for a recently published procedure-placement algo-
+rithm, an algorithm by Hashemi, Kaeli, and Calder [5] which we refer to as HKC. Like our algo-
+rithm, HKC also extends PH to use knowledge of the procedure sizes, the cache size, and the
+cache organization. HKC uses a weighted call graph but not any additional temporal information.
+The key advantage of HKC over PH is that HKC records the set of cache lines occupied by each
+2. Unlike PH, our "working" graph, TRG select , is not necessarily reduced to a single node. TRG select contains
+only popular procedures, and it is possible to have the only connection between two popular procedures be
+through an unpopular procedure.
+3. This assumes that the start of the text segment maps to cache-line 0. If not, it is easy to adjust the algorithm.
+gap qStartLine pEndLine
+qStartLine numCacheLines pEndLine
+procedure during placement, and it tries to prevent overlap between a procedure and any of its
+immediate neighbors in the call graph.
+We begin in Section 5.1 with some aspects of the behavior of code placement techniques that need
+to be addressed in order to make a meaningful comparison of different algorithms. In particular,
+we introduce an experimental methodology based on randomization techniques. Section 5.2 outlines
+our experimental methodology while Section 5.3 presents our results.
+5.1 Evaluating the performance of code placement algorithms
+We normally expect code optimizations to behave similar to a continuous function: small changes
+in the behavior of the optimization cause small changes in the performance of the resulting exe-
+cutable. With code placement optimizations, this is often not the case: small changes in the layout
+of a program can cause dramatic changes in the cache miss rate.
+As an example, we simulated the instruction cache behavior of the SPECint95 perl program for
+two slightly different layouts. The first layout is the output of our own code layout algorithm, and
+the second layout is identical to the first except that each procedure is padded by an additional
+bytes (one cache line) of empty space at its end. The instruction cache miss rate changed from
+3.8% for the first layout to 5.4% for the second layout; this is a remarkable change for such a trivial
+difference between the layouts. In fact, it is possible to introduce a large number of misses by
+moving one code block by only a single cache line.
+For greedy code-layout algorithms, we have the additional problem that different layouts, in fact
+substantially different layouts, often result from small changes in the input profile data. At each
+step, PH, HKC, and GBSC greedily choose the highest-weight edge in the working graph. If there
+are two edges, say with weight 1,000,000 and 1,000,001, the (barely) larger edge will always be
+chosen first, even though such a small difference is unlikely to represent a statistically significant
+basis for preferring one edge over the other. Worse, ties resulting from identical edge weights are
+decided arbitrarily. Decisions between two equally good alternatives, which must necessarily be
+made one way or the other, affect not only the current step of the algorithm, but all future steps.
+As a result, we find it difficult to draw conclusions about the relative performance of different
+code layout algorithms from a small number of program traces. Ideally, we would like to have a
+large enough set of different inputs for each benchmark to get an accurate impression of the distribution
+of results. Unfortunately, this is very hard to do in practice since common benchmark
+suites are not distributed with more than a handful of input sets for each benchmark application.
+We simulate the effect of many slightly different application input sets by first running the application
+with a single input, and then applying random perturbations to the resulting profile data.
+For the algorithms in our comparison, we perturb all of our weighted graphs by multiplying each
+edge weight by a value close to one. Specifically, the initial weight w is replaced by the perturbed
+weight according to the equation , where X is a random variable, normally
+distributed with mean 0 and variance 1, and s is a scaling factor which determines the magnitude
+of the random perturbations. Using multiplicative rather than additive noise is attractive for
+two reasons. First, additive noise can cause weights to become negative, for which there is no
+obvious interpretation. Second, the method is inherently self-scaling in the sense that reasonable
+values for s are independent of the initial edge weights.
+A large enough value for s will cause the layout to be effectively random, as the perturbed graphs
+will bear little relationship to the profile data. Low values of s will cause only statistically insignificant
+differences in edge weights, and we can then observe the range of results produced by
+these small changes. We use in our experiments. Blackwell [2] shows that for several
+code placement algorithms, values of s as low as 0.01 elicit most of the range of performance variation
+from the system, and that values of s as high as 2.0 do not degrade the average performance
+very much.
+exp
+5.2 Methodology
+We have implemented the PH, HKC, and GBSC procedure-placement algorithms such that they
+can be integrated into one of two different environments: a simulation environment based on
+ATOM [10]; and a compiler environment based on SUIF [9]. The results in Section 5.3 are based
+on the ATOM environment, but we have used the SUIF environment to verify that our algorithms
+produce runnable, correct code.
+
+Table
+
+1 lists the benchmarks used in our study. Except for ghostscript, they are all from the
+SPECint95 benchmark suite. We use only five of the eight SPECint95 benchmarks because the
+other three (compress, ijpeg, and xlisp) are uninteresting in that all have small instruction working
+sets that do equally well under any reasonable procedure-placement algorithm. We compiled go
+and perl using the SUIF compiler (version 1.1.2), while all other benchmarks were compiled
+using gcc 2.7.2 with the -O2 optimization flag. We chose the input data sets to keep the traces to a
+manageable size. All of the reported miss rates in this and the next section are based on the simulation
+of an 8 kilobyte direct-mapped cache with a line size of 32 bytes. We use the training input
+to drive the procedure-placement algorithms, and then simulate the instruction-cache performance
+of the resulting optimized executable using the testing input.
+5.3 Results
+The graphs in Figure 3 show our experimental results for PH, HKC, and GBSC. Each graph
+shows the results for a single benchmark. For each of the three algorithms, there is a curve showing
+the cumulative distribution of results over a set of 20 experiments, all based on the same training
+and testing traces. As described in Section 5.1, we use randomization to obtain twenty slightly
+different WCGs or TRGs that result in slightly different placements. For each point along a curve,
+the X-coordinate is the cache miss rate for one of the placements, and the Y-coordinate gives the
+percentage of all placements that had an equal or better miss rate. Consequently, if the curve for
+one algorithm is to the left of the curve for another algorithm, then the first algorithm gives better
+results. We notice that our algorithm gives clearly better results than the other two for all benchmarks
+7except for m88ksim and perl. For these two benchmarks, the ranges of results overlap,
+though GBSC yields the lowest average miss rate over all placements. In summary, these results
+demonstrate the benefits of using temporal ordering information as well as an algorithm that considers
+cache-relative alignments in placing code.
+In Section 3, we said that a useful conflict metric should be strongly correlated with the number of
+cache misses. Figure 4 examines this issue by showing the relationship between conflict-metric
+values and cache miss rates. Each plot in Figure 4 contains 80 points, where each point corresponds
+to a different placement of the go benchmark. These placements are based on the GBSC
+algorithm; however we varied the output of this algorithm to produce a placement with a range of
+different miss rates. We accomplished this by randomly selecting 0-50 procedures in the GBSC
+placement and randomly changing their cache-relative offsets. The metric value plotted corresponds
+to the resulting placement. Figure 4a shows that our conflict metric, based on the fine-grained
+information in TRG place , shows a linear relationship with the actual number of cache
+misses; all the points in the graph are close to the diagonal. On the other hand, Figure 4b shows
+that a metric based only on a WCG is not always a good predictor of cache misses.
+Program
+Name
+All procedures Popular
+procedures Training trace Testing trace Miss
+rate of
+default
+layout
+Avg. size
+of
+procedure
+history
+size count size count input
+description length input
+description length
+go 590 K 3221 134 K 112 11x11 board,
+level 4, no
+stones
+level 6, 4
+stones
+ghostscript 1817 K 372 104 K 216 14-page pre-
+sentation
+37 M 3-page paper 38 M 2.63 8.9
+limited to
+50M BBs
+limited to
+50M BBs
+50 M 2.92 14.3
+perl 664 K 271
+reduced dic-
+tionary
+reduced input
+file
+vortex 1073 K 923 117 K 156 persons.250,
+reduced iteration
+
+reduced iteration
+
+
+Table
+
+1: Details of our benchmark applications. We report sizes in bytes and trace lengths in basic blocks. A
+benchmark's ``average size of procedure history'' reports the average number of procedures that were
+present in our ordered set Q during the building of the TRG.
+Figure
+
+3. Instruction cache miss rates for our benchmarks. Each graph shows the distribution of miss rates
+corresponding to the layouts produced by PH, HKC, and our new procedure-placement algorithm (GBSC).
+Each data point in the graphs represents the result for a single placement. Cache miss rates vary along the
+x-axis, and the y-axis shows the cumulative distribution of miss rates.0.20.61
+"gc.PH"
+"gc.HKC"
+"gc.GBSC"
+(a) gcc0.20.61
+"gs.PH"
+"gs.HKC"
+"gs.GBSC"
+(b) ghostscript0.20.61
+"go.PH"
+"go.HKC"
+"go.GBSC"
+(c) go (d) m88ksim0.20.61
+"m8.PH"
+"m8.HKC"
+"m8.GBSC"
+"pl.PH"
+"pl.HKC"
+"pl.GBSC"0.20.61
+"vo.PH"
+"vo.HKC"
+"vo.GBSC"
+(f) vortex
+6 Extensions for set-associative caches
+To this point, we have described a technique for collecting and using temporal information that is
+specific to direct-mapped cache implementations. In other words, we have assumed that a single
+occurrence of a procedure q between two occurrences of a procedure p is sufficient to displace p.
+This assumption is not necessarily true for set-associative caches, especially for those that implement
+a LRU policy. To use our approach for set-associative caches, we construct a slightly different
+data structure that replaces TRG place , and we slightly modify the cost-metric calculation in
+merge_nodes. This section focuses on 2-way set-associative caches; the implementation of
+changes for other associativities follows directly from this explanation.
+Instead of a graph representation for TRG place , it is now more convenient to think of the temporal-
+relationship structure as a database D that records the number of times that a code-block pair {r,s}
+appears between consecutive occurrences of another code block p in a program trace. We can still
+use our ordered set approach to build this database. However, when we process the temporal associations
+related to the next code block p in the trace, we associate p with all possible selections of
+two identifiers from the identifiers currently in Q (up to any previous occurrence of p as before).4812
+
+Figure
+
+4. Correlation between conflict metric and cache misses. Data points are 80 randomized layouts for the
+go benchmark. The X-coordinate of a point is the cache miss rate for that layout, and its Y-coordinate is the
+sum of the conflict metrics for the indicated method over the entire placement.
+cache miss rate
+conflict
+estimate
+(millions)
+(a) Conflict metric based on a fine-grained TRG. (b) Conflict metric based on a WCG.4812
+cache miss rate
+conflict
+estimate
+(millions)
+We do this because two unique references are required to guarantee no reuse. Thus, the database
+simply records the frequency of each association between p and the pair {r,s}, accessed as
+D(p,{r,s}). If r, s, and p all occupy the same set in a two-way set-associative cache, then we estimate
+that D(p,{r,s}) of the program references to p will result in cache conflicts due to the displacement
+of p by intervening references to both r and s. We access this information instead of
+TRG place edge weights during the conflict-metric calculation in merge_nodes. Clearly the inner-loop
+of this calculation must also change slightly so that we can check the cost of the association
+between a code block in node n1 against all pairs of code blocks in n2 and vice-versa.
+Though we change TRG place , we do not change TRG select . TRG select is only a heuristic for selecting
+the order of code blocks to be placed; it is not obviously affected by a cache's associativity. As
+we mentioned earlier, other heuristic approaches may work better, but we have not found one.
+7 Discussion and related work
+Much of the prior work in the area of compile-time code placement is related to early work in
+reducing the frequency of page faults in the virtual memory system and more recent work at
+reducing the cost of pipeline penalties associated with control transfer instructions. However, we
+limit our discussion here to studies that directly address the issue of code placement aimed at
+reducing instruction cache conflict misses. Some of the earliest work in this area was done by
+Hwu and Chang [6], McFarling [7], and Pettis and Hansen [8]. Hwu and Chang use a WCG and a
+proximity heuristic to address the problem of basic-block placement. Their approach is unique in
+that they also perform function inline expansion during code placement to overcome the artificial
+barriers imposed by procedure call boundaries.
+McFarling [7] uses an interesting program representation (a DAG of procedures, loops, and condi-
+tionals) to drive his code-placement algorithm, but the profile information is still summarized in
+such a way that some of the temporal interleaving of blocks in the trace is lost. In fact, this paper
+explicitly states that, because he is unable to collect temporal interleaving information, his algorithm
+assumes and optimizes for a worst-case interleaving of blocks. Like our algorithm, McFarling
+1does consider the cache size and its modulo property when evaluating potential layouts, but
+his cost calculation is obviously different from ours. Finally, his algorithm is unique in its ability
+to determine which portions of the text segment should be excluded from the instruction cache.
+Torellas, Xia, and Daigle [11] propose a code-placement technique for kernel-intensive applica-
+tions. Their algorithm considers the cache address mapping when performing code placement.
+They define an array of logical caches, equal in size and address alignment to the hardware cache.
+Code placed within a single logical cache is guaranteed never to conflict with any other code in
+that logical cache. Though there is sub-area of all logical caches that is reserved for the most frequently-executed
+basic blocks, there is no general mechanism for calculating the placement costs
+across different logical caches. Their code placement is guided by execution counts of edges
+between basic blocks, and therefore does not capture temporal ordering information.
+The history mechanism we use to analyze the temporal behavior of a trace is similar to the problem
+of profiling paths in a procedure call graph. Ammons et al. [1] describe a way of implementing
+efficient path profiling. However, the data structure generated by this technique cannot be used
+in the place of our TRG, because it does not capture sufficient temporal ordering information.
+8 Conclusion
+We have presented a method for extracting temporal ordering information from a trace. We then
+described a procedure-placement algorithm that uses this information along with the knowledge
+of the cache lines each procedure occupies to predict accurately which placements will result in
+the least number of conflict misses. The results show that these two factors combined allow us to
+obtain better instruction cache miss rates than previous procedure-placement techniques. Other
+code-placement techniques, such as "fluff removal" [8] and branch alignment [12], are orthogonal
+to the problem of placing whole procedures and can therefore be combined with our technique to
+achieve further improvements. The success of our experiments indicates that it is worthwhile to
+continue research on the temporal behavior of applications. In particular, we plan to develop similar
+techniques to optimize the behavior of applications in other layers of the memory hierarchy.
+9
+
+
+
+--R
+
+"Exploiting Hardware Performance Counters with Flow and Context Sensitive Profiling,"
+"Applications of Randomness in System Performance Measurement."
+"The Effect of Code Expanding Optimizations on Instruction Cache Design,"
+"Performance Issues in Correlated Branch Prediction Schemes,"
+"Efficient Procedure Mapping Using Cache Line Coloring,"
+"Achieving High Instruction Cache Performance with an Optimizing Compiler,"
+"Program Optimization for Instruction Caches,"
+"Profile Guided Code Positioning,"
+"Extending SUIF for Machine-dependent Optimizations,"
+"ATOM: A System for Building Customized Program Analysis Tools,"
+"Optimizing Instruction Cache Performance for Operating System Intensive Workloads,"
+"Near-Optimal Intraprocedural Branch Alignment,"
+--TR
+Program optimization for instruction caches
+Achieving high instruction cache performance with an optimizing compiler
+Profile guided code positioning
+ATOM
+Performance issues in correlated branch prediction schemes
+Exploiting hardware performance counters with flow and context sensitive profiling
+Efficient procedure mapping using cache line coloring
+Near-optimal intraprocedural branch alignment
+Optimizing instruction cache performance for operating system intensive workloads
+Applications of randomness in system performance measurement
+
+--CTR
+Christophe Guillon , Fabrice Rastello , Thierry Bidault , Florent Bouchez, Procedure placement using temporal-ordering information: Dealing with code size expansion, Journal of Embedded Computing, v.1 n.4, p.437-459, December 2005
+Keoncheol Shin , Jungeun Kim , Seonggun Kim , Hwansoo Han, Restructuring field layouts for embedded memory systems, Proceedings of the conference on Design, automation and test in Europe: Proceedings, March 06-10, 2006, Munich, Germany
+Alex Ramrez , Josep-L. Larriba-Pey , Carlos Navarro , Josep Torrellas , Mateo Valero, Software trace cache, Proceedings of the 13th international conference on Supercomputing, p.119-126, June 20-25, 1999, Rhodes, Greece
+Alex Ramirez , Josep Ll. Larriba-Pey , Carlos Navarro , Mateo Valero , Josep Torrellas, Software Trace Cache for Commercial Applications, International Journal of Parallel Programming, v.30 n.5, p.373-395, October 2002
+John Kalamatianos , Alireza Khalafi , David R. Kaeli , Waleed Meleis, Analysis of Temporal-Based Program Behavior for Improved Instruction Cache Performance, IEEE Transactions on Computers, v.48 n.2, p.168-175, February 1999
+Young , Michael D. Smith, Better global scheduling using path profiles, Proceedings of the 31st annual ACM/IEEE international symposium on Microarchitecture, p.115-123, November 1998, Dallas, Texas, United States
+Rakesh Kumar , Dean M. Tullsen, Compiling for instruction cache performance on a multithreaded architecture, Proceedings of the 35th annual ACM/IEEE international symposium on Microarchitecture, November 18-22, 2002, Istanbul, Turkey
+S. Bartolini , C. A. Prete, Optimizing instruction cache performance of embedded systems, ACM Transactions on Embedded Computing Systems (TECS), v.4 n.4, p.934-965, November 2005
+Architectural and compiler support for effective instruction prefetching: a cooperative approach, ACM Transactions on Computer Systems (TOCS), v.19 n.1, p.71-109, Feb. 2001
+Trishul M. Chilimbi , Ran Shaham, Cache-conscious coallocation of hot data streams, ACM SIGPLAN Notices, v.41 n.6, June 2006
+Alex Ramirez , Luiz Andr Barroso , Kourosh Gharachorloo , Robert Cohn , Josep Larriba-Pey , P. Geoffrey Lowney , Mateo Valero, Code layout optimizations for transaction processing workloads, ACM SIGARCH Computer Architecture News, v.29 n.2, p.155-164, May 2001
+Chandra Krintz , Brad Calder , Han Bok Lee , Benjamin G. Zorn, Overlapping execution with transfer using non-strict execution for mobile programs, ACM SIGOPS Operating Systems Review, v.32 n.5, p.159-169, Dec. 1998
+Stephen S. Brown , Jeet Asher , William H. Mangione-Smith, Offline program re-mapping to improve branch prediction efficiency in embedded systems, Proceedings of the 2000 conference on Asia South Pacific design automation, p.111-116, January 2000, Yokohama, Japan
+Alex Ramirez , Josep L. Larriba-Pey , Mateo Valero, Software Trace Cache, IEEE Transactions on Computers, v.54 n.1, p.22-35, January 2005
+Trishul M. Chilimbi, Efficient representations and abstractions for quantifying and exploiting data reference locality, ACM SIGPLAN Notices, v.36 n.5, p.191-202, May 2001
+Alex Ramirez , Oliverio J. Santana , Josep L. Larriba-Pey , Mateo Valero, Fetching instruction streams, Proceedings of the 35th annual ACM/IEEE international symposium on Microarchitecture, November 18-22, 2002, Istanbul, Turkey
+Young , Michael D. Smith, Static correlated branch prediction, ACM Transactions on Programming Languages and Systems (TOPLAS), v.21 n.5, p.1028-1075, Sept. 1999
+Ann Gordon-Ross , Frank Vahid , Nikil Dutt, A first look at the interplay of code reordering and configurable caches, Proceedings of the 15th ACM Great Lakes symposium on VLSI, April 17-19, 2005, Chicago, Illinois, USA
+Brad Calder , Chandra Krintz , Simmi John , Todd Austin, Cache-conscious data placement, ACM SIGPLAN Notices, v.33 n.11, p.139-149, Nov. 1998
+Timothy Sherwood , Brad Calder , Joel Emer, Reducing cache misses using hardware and software page placement, Proceedings of the 13th international conference on Supercomputing, p.155-164, June 20-25, 1999, Rhodes, Greece
+Thomas Kistler , Michael Franz, Automated data-member layout of heap objects to improve memory-hierarchy performance, ACM Transactions on Programming Languages and Systems (TOPLAS), v.22 n.3, p.490-505, May 2000
+Murali Annavaram , Jignesh M. Patel , Edward S. Davidson, Call graph prefetching for database applications, ACM Transactions on Computer Systems (TOCS), v.21 n.4, p.412-444, November
+Rajiv A. Ravindran , Pracheeti D. Nagarkar , Ganesh S. Dasika , Eric D. Marsman , Robert M. Senger , Scott A. Mahlke , Richard B. Brown, Compiler Managed Dynamic Instruction Placement in a Low-Power Code Cache, Proceedings of the international symposium on Code generation and optimization, p.179-190, March 20-23, 2005
+Nikolas Gloy , Michael D. Smith, Procedure placement using temporal-ordering information, ACM Transactions on Programming Languages and Systems (TOPLAS), v.21 n.5, p.977-1027, Sept. 1999
+Martha Mercaldi , Steven Swanson , Andrew Petersen , Andrew Putnam , Andrew Schwerin , Mark Oskin , Susan J. Eggers, Modeling instruction placement on a spatial architecture, Proceedings of the eighteenth annual ACM symposium on Parallelism in algorithms and architectures, July 30-August 02, 2006, Cambridge, Massachusetts, USA
+S. Bartolini , C. A. Prete, A proposal for input-sensitivity analysis of profile-driven optimizations on embedded applications, ACM SIGARCH Computer Architecture News, v.32 n.3, p.70-77, June 2004
+Trishul M. Chilimbi , Mark D. Hill , James R. Larus, Cache-conscious structure layout, ACM SIGPLAN Notices, v.34 n.5, p.1-12, May 1999
+Sangwook P. Kim , Gary S. Tyson, Analyzing the working set characteristics of branch execution, Proceedings of the 31st annual ACM/IEEE international symposium on Microarchitecture, p.49-58, November 1998, Dallas, Texas, United States
+Mahmut Kandemir, Compiler-Directed Collective-I/O, IEEE Transactions on Parallel and Distributed Systems, v.12 n.12, p.1318-1331, December 2001
+Thomas Kistler , Michael Franz, Continuous program optimization: A case study, ACM Transactions on Programming Languages and Systems (TOPLAS), v.25 n.4, p.500-548, July

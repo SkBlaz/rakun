@@ -1,0 +1,932 @@
+--T
+A file system for continuous media.
+--A
+The Continuous Media File System, CMFS, supports real-time storage and retrieval of continuous media data (digital audio and video) on disk. CMFS clients read or write files in sessions, each with a guaranteed minimum data rate. Multiple sessions, perhaps with different rates, and non-real-time access can proceed concurrently. CMFS addresses several interrelated design issues; real-time semantics fo sessions, disk layout, an acceptance test for new sessions, and disk scheduling policy. We use simulation to compare different design choices.
+--B
+INTRODUCTION
+Current disk drives have raw data rates of 5 to 10 million bits per second (Mbps) or more.
+Such rates suffice for many forms of digital audio and motion video (continuous media, or CM)
+data: audio data rates are from 8 Kbps to 1.4 Mbps, while compressed video ranges from one to
+several Mbps. However, when a disk is accessed via a general-purpose file system, the data rates
+seen by clients are generally lower and may vary unpredictably.
+We have developed a Continuous Media File System (CMFS) whose clients read and write
+files in "sessions", each with a guaranteed minimum data rate. Multiple sessions, perhaps with
+different data rates, can coexist. CMFS can handle non-real-time traffic concurrently with these
+real-time sessions.
+Authors' addresses: D.P. Anderson, 1891 East Francisco Blvd. San Rafael, CA 94901. Y. Osawa, MO Business Development
+Division, Storage Systems Group, Sony Corporation, 2255 Okata, Atsugi, Kanagawa 243 Japan. R. Govindan, CS Division, EECS
+Department, UC Berkeley, Berkeley, CA 94720.
+This work was performed at the University of California at Berkeley, and was supported by NSF Infrastructure Grant CDA-
+8722788, NSF PYI grant CCR-86-57529, the California MICRO program, and Sun Microsystems.
+To provide data rate guarantees, CMFS addresses the following interrelated issues:
+# Real-time semantics: The CMFS client interface, described in Section 2, has flexible but
+well-defined real-time semantics.
+# Disk layout: Section 4 gives the CMFS assumptions about disk layout.
+Acceptance test: Section 5 describes how CMFS determines if a new session can be
+accommodated.
+alternative policies for ordering disk read and write operations
+are discussed in Sections 6 and 7.
+Several broad classes of CM data servers can be envisioned: workstation file systems that
+handle voice mail messages as well as other data; network-accessible archives of data resources
+(lectures, hypermedia documents, etc.) for research and education; and, with the advent of B-ISDN
+networks, commercial information services offering movies, news, and music to hundreds
+or thousands of concurrent clients. High-level issues such as security, naming and indexing, and
+file structuring differ among these classes; we do not deal with these issues here. However, there
+is a common need to store and retrieve data streams with predictable real-time performance; thus
+the concepts and techniques of CMFS apply to each class.
+CMFS is meant to serve as part of a distributed system that handles integrated audio and
+video. End-to-end performance guarantees cannot, of course, be achieved by disk scheduling
+alone. CMFS conforms to the "meta-scheduling" model [2], which provides a mechanism for
+making such guarantees. The role of CMFS in this larger context is discussed in Section 3.
+2. CLIENT INTERFACE
+CMFS clients access real-time files in sessions. Each session has a FIFO buffer for data
+transfer between the client and CMFS. For concreteness, assume that CMFS is part of an OS ker-
+nel, a client is a kernel process, and FIFOs are circular buffers in physical memory. Alternatives
+will be discussed in Section 3.1.
+2.1. The Semantics of Sessions
+The flow of data in a session is not necessarily smooth or periodic. Instead, session semantics
+are defined in terms of a "logical clock" that runs at a fixed rate through the FIFO, stopping
+if it catches up to the client's position. CMFS promises to stay ahead of the logical clock by a
+given positive amount (the "cushion"). These semantics allow CMFS to handle variable-rate
+files and other non-uniform access in a simple way. Because CMFS is guided by client behavior,
+it need not know about data timestamps or file internals.
+A session is created using
+int direction, /* READ or WRITE */
+FILE_ID name,
+int offset,
+FIFO* buffer,
+TIME cushion,
+int rate);
+If direction is READ, request_session() requests a session in which the given file is
+read sequentially starting from the given offset (henceforth assumed to be zero). If the session
+cannot be accepted, an error code is returned. Otherwise, a session is established and its ID is
+returned. Start_clock() starts the session's logical clock; the client can remove up to
+cushion amount of data before calling this. The appropriate value for cushion depends on
+the client's maximum delay in handling data (see Section 3.2). The client is notified (via an RPC
+or exception) when the end of the file has been reached. CMFS provides a seek() operation
+that flushes data currently in the FIFO and repositions the read or write point.
+To describe the semantics of read sessions more formally, we use the following notation
+(see
+
+Figure
+
+1a).
+R : the rate argument to request_session().
+Y
+: the cushion argument to request_session().
+start : the time when start_clock() is called.
+the index of the next byte to be put into the FIFO by CMFS at time t .
+the index of the next byte to be removed from the FIFO by the client at time t .
+the value of the logical clock at time t .
+the size of the FIFO buffer, in bytes.
+The logical clock C (t ) is zero for increases at rate R whenever
+The following "Read Session Axioms" must hold for all t - t start :
+(1)
+(2)
+(client
+(CMFS read)
+b) write session
+offset in file
+if zero
+stop clock
+a) read session
+offset in file
+(CMFS
+(client read)
+if zero
+stop clock
+
+Figure
+
+1: The semantics of read and write sessions are described in terms of a "put pointer"
+logical clock C (t ). The shaded rectangles represent data in the
+FIFO.
+These conditions say that CMFS does not overflow the FIFO, CMFS allows the client to read
+ahead of the logical clock by up to Y
+bytes, and the client does not read beyond the write point.
+CMFS therefore provides a guaranteed minimum data rate, but only as long as the client keeps up
+with its reading. There is no upper bound on the actual data rate; the client and CMFS can in
+principle work arbitrarily far ahead of the logical clock.
+In a write session, the client transfers data into the FIFO buffer and CMFS moves data from
+the buffer to disk. We describe the semantics of write sessions using the same notation as above.
+In this case, P (t ) is the index of the next byte to be inserted in the FIFO by the client, and G (t ) is
+the index of the next byte to be removed by CMFS. The logical clock C (t ) increases at rate R
+whenever The following "Write Session Axioms" must hold for all t - t start (see
+
+Figure
+
+These conditions say that the client does not overflow the FIFO, that CMFS removes data from
+the FIFO fast enough so that the client can always write ahead of the logical clock by at least Y
+and that CMFS does not read beyond the write point.
+2.2. File Creation and Non-Real-Time Access
+CMFS supports both real-time and non-real-time files. A real-time file is created using
+create_realtime_file(
+BOOLEAN expandable,
+int size,
+int max_rate);
+expandable indicates whether the file can be dynamically expanded. If not, size gives its
+(fixed) size. max_rate is the maximum data rate (bytes per second) at which the file is to be
+read or written. CMFS rejects the creation request if it lacks disk space or if max_rate is too
+high.
+Non-real-time operations may be performed on either type of file. CMFS provides two
+non-real-time service classes: interactive and background. Interactive access is optimized for fast
+response, background for high throughput. There are no performance guarantees for non-realtime
+operations.
+2.3. The Symmetry of Reading and Writing
+In describing session acceptance and scheduling algorithms, the redundancy of treating read
+and write sessions separately can be avoided by observing the following symmetry between reading
+and writing. Suppose a write session S W has fixed parameters t start , B , Y
+, and R and time-varying
+parameters Consider an (imaginary) read session S R having the
+same t start , B , Y
+and R parameters, and for which
+(see
+
+Figure
+
+2). Each disk block written by CMFS in S W advances P W , and thus corresponds to a
+disk block read by CMFS in S R .
+in file
+byte offset
+(CMFS read) (client write)
+a) write session
+(client read) (CMFS write)
+equivalent
+read session
+
+Figure
+
+2: By interchanging empty/full and read/write, a write session (a) is transformed into a
+read session (b) that is equivalent with respect to scheduling.
+Claim 1. Suppose S W is a write session, and S R is defined as above. Then C R (t
+all t - t start , and S R satisfies the Read Session Axioms (Eqs. 1, 2, and only if S W satisfies
+the Write Session Axioms (Eqs. 4, 5, and 6).
+Proof. When G (t ) is substituted for in the definition of C W (t ), the result defines C R (t ).
+Thus the logical clock advances in S R exactly when it advances in S W , and at the same rate, so
+The equivalence of the Read and Write axioms then follows from substituting
+Eqs. 7 and 8 in Eqs. 1 and 2. #
+So, from the point of view of scheduling in CMFS, reading and writing are essentially
+equivalent. The main difference is the initial condition: an empty buffer for a write session
+corresponds to a full buffer for a read session. In describing CMFS's algorithms for scheduling
+and session acceptance, we will refer only to read sessions.
+2.4. Using the CMFS Interface
+An idealized client might read 1 byte from the FIFO every 1/R seconds, beginning at the
+moment of session acceptance. In general, however, this uniformity is neither necessary nor
+desirable. For example: 1) data may be grouped into large chunks (for example, video frames)
+that are needed at a single moment; 2) data may have long-term rate variation (perhaps because of
+variable-rate compression); clients may delay initial I/O to synchronize multiple sessions;
+clients may pause and resume I/O during sessions; 5) clients may "work ahead", filling up intermediate
+buffers to improve overall performance.
+The CMFS interface accommodates these requirements. To show this, we start by defining
+a notion of temporal data with variable but bounded rate.
+file F has parameters R and E , and the i th byte of F has a
+timestamp
+for all i > j (see Figure 3). In other words, the amount of data in a time interval of length T is at
+most (In a digital video file, for example, R is the maximum long-term data rate, and E
+is the maximum number of bytes per frame.) The timestamps may be explicit (embedded in the
+data) or implicit.
+Suppose a client reads a bounded-rate file F . We say that the file is read in real
+time starting at t 0 with buffer size N if 1) byte i is read (i.e., removed from the FIFO) before
+and 2) at any time t , no more than N bytes i such that T (i
+Intuitively, this means that the client reads the file fast enough to get the data on time, but
+slow enough so that only N bytes of additional buffer space are needed. The CMFS interface
+allows a client to read a bounded-rate file in real time using limited buffer space:
+2. Suppose a client creates a session reading a bounded-rate file F with parameters
+R and E , and the session begins at time 0. Then it is possible for the client to read F in real time
+starting at E /R with buffer size E .
+The proof is given in an Appendix.
+The implicit flow control provided by the CMFS interface and can accomplish other goals
+as well:
+# A client can pause a session by simply stopping the removal of data from the FIFO; the logical
+clock will stop soon thereafter. Data rate and buffer-requirement guarantees will
+remain valid after the client resumes reading. (The pause/resume is equivalent to shifting
+the timestamps of the remaining data.)
+at most
+byte offset i
+of data
+timestamp
+30KB
+50KB
+33.3 66.6 133.3
+
+Figure
+
+3: A bounded-rate file contains timestamped data. This example represents a file of
+frames/second video data with a varying number of bytes per frame; each frame is shown as a
+vertical bar. The file has parameters R and E ; the number of bytes with timestamps in an interval
+of length T cannot exceed TR
+# Suppose a client plays several files, transmitted via network connections from different
+CMFS servers, in synchrony on a single workstation. The I/O server on the workstation
+handles the synchronization; it begins output only when sufficient data has been received on
+each connection (as done, for example, by the ACME server [3]). CMFS handles this case
+with no client intervention: logical clocks pause during the initial synchronization period,
+and resume thereafter.
+# The client can, if the hardware is fast enough, read arbitrarily far ahead of the logical clock.
+This "workahead" data can then be buffered (in distributed applications, the buffers may
+be spread across many nodes), protecting against playback glitches and allowing improved
+system response to transient workload.
+3. SYSTEM INTEGRATION ISSUES
+3.1. Implementation Alternatives
+Our implementation of CMFS runs as a user-level process on UNIX, accesses a SCSI disk
+via the UNIX raw disk interface, and communicates with clients via TCP connections. Other
+architectures, however, are possible (see Figure 4). For example, CMFS could be implemented at
+either kernel or user level. The client control interface could be provided either as system calls
+(for local clients only) or by remote procedure call.
+The client data interface (the mechanism by which data is removed from a read session's
+FIFO) can take several forms. A general approach is to have data sent out on a flow-controlled
+network connection, established as part of the request_session() call. Data is removed
+from the FIFO whenever the protocol allows it. If the client is a user-level process on the same
+machine as CMFS, the FIFO could be a shared-memory buffer or "memory-mapped stream" [6].
+Finally, if the data is consumed by an I/O device on the same machine as CMFS, the FIFO might
+reside in kernel memory, accessed directly by the I/O device interrupt handler.
+These alternatives have different performance implications. For example, a kernel-level
+implementation might have lower CPU scheduling overhead (most work could be done at the
+interrupt level) and improved control of physical memory. However, the issues addressed by
+CMFS (disk scheduling, buffer allocation, etc.) apply regardless of the alternative chosen.
+3.2. End-to-End Scheduling
+In typical applications, CM data is handled by many shared hardware "resources": disk,
+CPU, network, bus, memory, etc. To provide applications with deterministic end-to-end perfor-
+mance, we must integrate the scheduling of all these resources. CMFS is designed to serve as
+part of such a "meta-scheduling" scheme, the CM-resource model [2]. In this scheme, each
+resource can be reserved in "sessions" with fixed workload and delay bounds. The parameterization
+of workload and delay lets resources "work ahead" on real-time streams so they can
+response quickly to non-real-time workload.
+A CMFS session's ``cushion'' parameter Y
+allows the adjacent resource (typically the CPU)
+to have looser delay bounds. For example, suppose a client runs on the same host as CMFS (as in
+Figure 4c) and does CPU processing on the data before sending it to the next resource (say, a net-
+work). The client determines an upper bound on the CPU time per unit of data it requires, and
+reserves a session with the CPU resource. This session has a delay bound, say Y . It is easy to
+show the following:
+3. Suppose, in the above situation, that the client successfully creates a CMFS session
+with cushion Y , starts the session when it has processed Y amount of data (say, at time 0),
+and thereafter processes data without (voluntarily) pausing. Then at all times t - 0, the client has
+processed at least Rt bytes of data (R is the session data rate).
+control
+data
+system
+calls
+client
+d)
+c)
+a)
+I/O device
+audio/video
+FIFO
+CMFS
+FIFO
+client
+CMFS
+client
+FIFO
+client
+CMFS
+RPC
+data
+FIFO
+CMFS
+system
+calls
+calls
+system
+kernel
+user
+
+Figure
+
+4: The CMFS prototype is a user-level process that communicates with its clients over
+network connections (a). Alternatively, it could be implemented in an OS kernel, with client data
+access by system calls (b), memory-mapped streams (c), or device interrupts (d).
+(Note that this would not hold if the cushion were less than the CPU delay bound, because it
+would then be possible for the logical clock to stop.) Claim 3 can be generalized to bounded-rate
+files. This provides a more useful version of Claim 2, which makes the unrealistic assumption
+that client CPU processing is instantaneous and can be scheduled at precise instants.
+4. DISK LAYOUT ASSUMPTIONS
+We assume that the CMFS uses a single-spindle disk drive; disk operations are done
+sequentially. The disk is read and written in blocks of fixed size (a multiple of the hardware sector
+size). The CMFS reservation and scheduling algorithms do not mandate a particular disk lay-
+out. Instead, we assume that the layout allows the following "bounding functions" U F and V F to
+be obtained:
+(1) For a given file F , U F (n ) is an upper bound on the time to read n logically contiguous
+blocks of F (including all seek and rotation time), independent of the position of the disk
+head and the starting block number to be read.
+is an upper bound on the time needed to read the n blocks of file F starting at
+block i .
+The bounds need not be tight; slackness in the bounds may, however, cause sessions to be
+rejected unnecessarily.
+The functions U and V should take into account sector interleaving, interrupt-handling
+latency, the CPU time used by CMFS itself, features (such as track buffering) of the disk con-
+troller, and bad sectors detected when the disk is initialized.
+4.1. Examples of Disk Layouts
+Our CMFS prototype uses contiguous allocation. Each file begins at some point within a
+cylinder, filling the remainder of that cylinder, zero or more adjacent cylinders, and part of a final
+cylinder. The number of sectors per block is a fixed parameter. Ignoring CPU overhead and
+other factors, bounds functions for this layout are easy to derive. We assume L seek_min and L seek_max
+are bounds on the 1-track seek time and the worst-case seek time respectively, L block is the time to
+read one block, L rotation is the rotation time, and N is the number of blocks per cylinder. Further-
+more, we assume that the controller does track-buffering; it reads a track into a local buffer
+immediately after seeking to it. Hence, if an entire track is read, rotational latency is negligible
+regardless of the order in which the sectors are read. Possible bounds functions are then
+rotation
+and
+# L rotation
+where k is the number of cylinders storing the n blocks of F starting at offset i , and j is the
+number of blocks not in F in the first and last of these cylinders. To account for CPU overhead,
+it would be necessary to leave a gap between blocks (perhaps by interleaving them) and to
+modify U and V accordingly.
+A contiguous layout policy is feasible for read-only file systems or if disk space is abun-
+dant. For more flexibility, a variant of the 4.2BSD UNIX file system layout [8] could be used. A
+real-time file might consist of clusters of n contiguous blocks, with every sequence of k clusters
+constrained to a single cylinder group. n and k are per-file parameters; they are related to the
+max_rate parameter of the file. Bounds functions U and V can be computed from n , k , the
+size of a cylinder group, the disk parameters, and the overhead of reading and writing allocation
+map and index blocks. Allocation and compaction strategies would pose a complex set of issues;
+we do not discuss them here.
+5. ACCEPTANCE TEST
+CMFS can accept a new session S only if its data rate requirements, together with those of
+existing sessions, can be guaranteed. For this, a sufficient condition is the existence of a static
+schedule (that cyclically reads fixed numbers of blocks of each session) satisfying the rate
+requirements of all session under worst-case assumptions, and for which enough buffer space is
+available.
+In this section we give an algorithm for deciding whether such a schedule exists. The algorithm
+constructs the shortest such schedule; this minimal static schedule also plays an important
+role in dynamic scheduling (see Section 6).
+5.1. Properties of Static Schedules
+Suppose that sessions S 1
+. S n read files F 1
+. F n at rates R 1
+. R n . An operation set f
+assigns to each S i a positive integer M i . CMFS performs an operation set by seeking to the next
+block of file F i , reading M i blocks of the file, and doing this for every session S i (the order of
+operations is not specified). From Section 4,
+are upper bounds on the elapsed time of S i 's operation and f as a whole, respectively.
+The data read in f "sustains" session i for a period R i
+# , where A is the block size in
+bytes; we denote this period D i (f). D (f), the period for which the data read in f sustains all the
+sessions, is then
+If the data read in f "lasts longer" than the worst-case time it takes to perform f, we call it
+a workahead-augmenting set (WAS). This holds if L (f) < D (f), or equivalently
+for all i .
+If the amount of data read for each session in an operation set f fits in the corresponding
+FIFO, we say that f is feasible. This holds if, for all i ,
+is the size of the FIFO buffer used by S i and Y
+i is the cushion parameter of S i (Section
+2.1). This inequality reflects the worst case in which a fractional block is already buffered and
+the client has used none of its cushion.
+An operation sequence F is a pair (p, f), where p is a permutation of 1 . n and f is an
+operation set. CMFS performs an operation sequence by doing the operations in f in the order
+. p(n ). F is called workahead-augmenting if f is workahead-augmenting; likewise F is
+feasible if f is feasible.
+the duration of data buffered for session S i , above and beyond the client's
+cushion Y
+, is given by
+and R are the parameters for S i . We
+call this the "workahead" of S i and denote it by W i (t ). We say that starves if W i becomes
+negative. The file system state W (t ) at time t is the vector <W 1 (t ) . W n (t )>.
+Let F be an operation sequence. Suppose that enough data is buffered so that, if F is performed
+immediately, no session starves before its operation is completed. We then say that the
+state is safe relative to F. This holds if
+for all j (recall that L ( j ) is the worst-case time needed for S j 's operation).
+The following two claims show that CMFS can accept a set of session if there is a feasible
+workahead-augmenting sequence. The order p is not important; for simplicity we assume it is the
+identity permutation.
+4. If F is workahead-augmenting and feasible, then there is a system state that is
+safe relative to F.
+Proof. Let W be the state in which all buffers are full. Then for all j we have
+)/R
+)/R
+so W is safe relative to F (the final three steps use Eqs. 13, 12, and 11). #
+5. Suppose that there is a feasible workahead-augmenting operation sequence F,
+and assume that at time t 0 the state W is safe relative to F. Then the CMFS can satisfy the Read
+Session Axioms (Eqs. 1 and 2) for all i and t - t 0 .
+Proof. We prove this by defining a disk scheduling policy, called the Static policy, that
+satisfies the axioms. The policy is as follows. Repeatedly apply the schedule given by F, with
+the following exception: if at the point of starting a block read for S i , then
+immediately skip to the next session (since reading the block could cause a buffer overflow). It is
+clear that this policy preserves Eq. 1.
+Consider a particular session S k during one "cycle" of F, starting at time
+5). Let t D denote the time at which S k 's operation ends. Eq. 2 holds during [0, t D ] since
+and C (t ) advances by at most R bytes/second. The operation for S k either reads the full amount
+or is truncated; in either case
+since F is workahead-augmenting. Let t E denote the time at which the cycle ends. Then
+Combining Eq. 14, Eq. 15, and the clock rate bound R , we see that W k remains positive during
+Therefore no starvation occurs during the cycle, and (by Eq. 16) the state W at the end of the
+cycle remains safe relative to F. Hence the Static scheduling policy maintains the Read Session
+Axioms for all sessions. #
+5.2. The Minimal Feasible WAS
+shows that CMFS can satisfy the data rates of a set of sessions if there is a feasible
+WAS. We now describe an algorithm to compute the minimal feasible WAS f
+(the feasible WAS
+for which L (f) is least). Clearly, a minimal feasible WAS exists if and only if a feasible WAS
+exists.
+Suppose that sessions S 1
+. S n are given. Let D i be the "duration" of one block of data for
+. } be the set of numbers of the form kD i for k - 0 and i - 0
+-t D
+operation
+
+Figure
+
+5: Diagram for the proof of Claim 5, showing the workahead W k of a session S k during
+one cycle of the Static scheduling policy. At the start of the cycle, S k has enough workahead to
+last until time t D , when its operation is finished. The amount of data read suffices for at least
+L (f), which exceeds the length t E of the cycle. Therefore W k is always positive; i.e., S k never
+"starves".
+(see
+
+Figure
+
+6). Let I i denote the interval (t i , t i +1 ]. Let f i denote the operation set
+. #
+# >. Note that f i +1 differs from f i by the addition of 1 block to all sessions whose
+data periods divide t i hence the sequence of f i is easy to compute. Note also that
+is an operation set such that D (f) - I i , then L (f) - L (f i ).
+Proof. Any sequence f for which D (f) > t i must read at least #
+# blocks for each session
+7. If there is a feasible WAS f such that D (f) - I i , then f i is feasible.
+Proof. f must read at least as many blocks for each session as does f i . Therefore, since f is
+feasible, so is f i . #
+8. The following algorithm computes the minimal WAS:
+(this is the minimal operation set for which D (f) - I 0 ).
+(2) If f i is infeasible (i.e., there is no allocation
+. B n > of buffer space to client
+FIFOs such that M i A
+there is no feasible WAS.
+is the minimal feasible WAS.
+and go to (2).
+Proof. Suppose the algorithm stops in step 3, returning a WAS in I j . Let f be the minimal
+WAS, and let i be such that D (f) - I i . It is not possible that i < j , since then f i is feasible (Claim
+and workahead-augmenting, so the algorithm would have terminated at iteration i . It is also
+I
+I 0
+
+Figure
+
+A block of data for session S i has a "duration" D i that depends on the data rate of S i .
+The set of all multiples of these periods defines a set of intervals I i . Within each interval there is
+a unique minimal-length operation set f i . By enumerating the f i we can find the minimal feasible
+WAS.
+not possible that i > j , since then L (f) - L (f contradicting the minimality of L (f).
+Therefore (from Claim 6) we must have L (f is the minimal WAS.
+Finally, suppose that the algorithm terminates in step 2 for some i . Suppose that a feasible
+exists, with D (f) - I j . By the above arguments i - j . But then f reads at least as many
+blocks for each session as does f i , so the buffer allocation feasible for f is feasible for f i , which
+is a contradiction. #
+5.3. Buffer Space Allotment
+Suppose that a fixed amount B of buffer space is available for CMFS client FIFOs. How
+should this space be divided among the various clients? CMFS performs best when all sessions
+can "work ahead" by about the same time (see Section 7). In other words, the buffer space allocated
+to a session, beyond that needed for the client's cushion Y
+, should be roughly proportional
+to the data rate R .
+CMFS therefore uses following policy. Let
+Y
+i and
+R i . Session S j is allocated
+Y
+bytes. This allocation is rounded up, if needed, to a multiple of the memory-allocation block
+size.
+6. DISK SCHEDULING POLICY
+On completion of each disk block I/O, CMFS decides which disk block to read or write
+next, and issues the appropriate command (seek, read, or write) to the disk device driver. The
+algorithm for this decision constitutes a disk scheduling policy. Such a policy must prevent starvation
+of current sessions, and must delay the return of the request_session() call for a
+newly accepted session until it is safe to do so. It should also handle non-real-time workload
+efficiently. Policies for real-time CPU scheduling, such as earliest-deadline-first [7], are not
+immediately relevant because of seeks. In this section we describe several possible disk scheduling
+policies. Some of these policies are defined in terms of slack time, which we will now define.
+6.1. Slack Time
+If, at a particular time, enough data is buffered for all sessions, CMFS is free to do non-
+real-time operations or workahead for real-time sessions. The amount of this "slack time",
+denoted H , is computed as follows. Suppose that the minimal WAS f
+takes worst-case time
+be a permutation of 1 . n , and let F be the operation
+sequence (p, f
+If F is performed immediately, the workahead of session j will not fall
+below
+is called the slack time of session j). CMFS can safely defer starting
+F for a period of
+min
+9. Let p
+be the ordering of sessions by increasing value of workahead W i . Then,
+among all permutations p, p
+gives the maximal value of H .
+Proof. Consider a permutation p in which W i is not increasing; in particular suppose
+denote the slack times of the two sessions. If we
+reverse the order of the two sessions in p, then for the new slack times D and E we have C < D
+and C < E (see Figure 7). The slack times of other sessions remain unchanged. Hence the
+minimum of the slack times is not decreased by reversing the order. #
+We therefore consider only the increasing-workahead ordering p
+of sessions. Let F
+denote
+(p
+denote the corresponding slack times at a particular moment. It is important
+to note that H< 0 does not imply that starvation has occurred or will occur. H is based on the
+pessimistic assumption that an inter-file seek is needed prior to every operation in the WAS. For
+example, if H < 0 during of a multi-block file operation, CMFS is compelled to finish the current
+operation; starting a new WAS would incur an inter-file seek.
+6.2. Real-Time Scheduling Policies
+We now describe several possible disk scheduling policies. These policies all avoid starva-
+tion; their relative performance is discussed in Section 7.
+(1) The Static/Minimal policy (a special case of the Static policy described in Section 5)
+simply repeats the minimal WAS.
+(2) The Greedy policy does the longest possible read for each session. At each iteration, it
+computes the slack time H , finds the session S i with smallest workahead, and reads
+blocks for S i for a period of H in other words, it devotes the entire slack time to
+reading ahead on S i .
+(3) The Cyclical Plan policy differs from Greedy in that it tries to distribute current slack
+time among the sessions in a way that maximizes future slack time. It augments the
+minimal WAS F
+with H seconds of additional reads (these reads are done, for each session
+immediately after the read for S i in F
+). The policy distributes workahead by
+identifying the "bottleneck session" (that for which H i is smallest) and schedules an
+extra block for it, updating H i and H ; this is repeated until H is exhausted. The resulting
+A
+time
+A
+
+Figure
+
+7: Slack time is maximized by ordering sessions by increasing workahead. Suppose a sequence
+has two sessions S i and S j that are not in this order. The bold lines represent their worka-
+heads W , and their slack times are B and C as shown denotes the maximum time needed for
+operations preceding is the time bound for the operation of session S i ). By reversing the
+order of the two sessions, the slack times are D and E . Simple algebra shows that C < D and
+Global slack time is the minimum of the session slack times, so the result follows.
+schedule determines the number for blocks read for the least-workahead session; when
+this read completes, the procedure is repeated.
+In both the Greedy and Cyclical Plan policies, the least-workahead session is serviced
+immediately. Therefore the value of H used by these policies can be computed as the minimum
+of the slack times of all sessions except the least-workahead session, yielding Aggressive versions
+of each policy. All policies skip to the next session when a buffer size limit is reached. If
+at some point all buffers are full, no operation is done; when a client subsequently removes
+sufficient data from a FIFO, the policy is restarted.
+Greedy and Static/Minimal have low CPU overhead: in our prototype, on a 15 MIPS workstation
+and with three sessions, they use about 200 microseconds per scheduling decision.
+Because Cyclical Plan builds its schedule one block at a time, it uses CPU time proportional to
+buffer space on each transition between sessions. This limits its utility.
+6.3. Non-Real-Time Operations
+A non-real-time operation N with worst-case latency L can safely be started if L - H . How-
+ever, the policy of servicing non-real-time operations whenever it is safe to do so may tend to
+low. This forces the scheduler to do short real-time operations (close to the minimal
+WAS), causing the system to run inefficiently. It may be preferable to do non-real-time operations
+only when H exceeds some nonzero threshold.
+To avoid the seek overhead of rapidly alternating between real-time and non-real-time
+operations, CMFS uses the following slack time hysteresis policy for non-real-time workload. An
+interactive operation can be started whenever H - H 2. Initially, interactive operations can be
+started if H - H 1 ; however, if H falls below H I 1 no further interactive operations are started until
+H exceeds H I 2 . Similarly, background operations are done within a hysteresis interval [H
+operation is started if an interactive operation is eligible to start. In Section 7 we
+examine the effects of hysteresis, and of the hysteresis parameters, on system performance.
+6.4. Session Startup
+A newly-accepted session is said to start when its request_session() call returns.
+This must occur only when the system state is safe with respect to the new WAS. A special
+mechanism is needed for handling this "startup" phase.
+Suppose sessions S 1
+. S n are currently active, and session S n +1 has been accepted but not
+yet started. Let f n and f n +1 denote the feasible WASs for the sets S 1
+. S n and S 1
+. S n +1 respec-
+tively. S n +1 is started as follows. CMFS adjusts FIFO buffer sizes according to the procedure
+described in Section 5.3. It can shrink a buffer by discarding data from the end of the FIFO if
+needed (it must later reread the data from disk). The scheduler then goes into "startup mode"
+during which its policies are changed as follows:
+(1) Non-real-time operations are queued for later execution.
+(2) For scheduling purposes, slack time H is computed relative to f n . However, in the Cyclical
+Plan policy the allocation of slack time for workahead is done relative to f n +1 , using a
+session ordering in which the new session appears first (however, no I/O for S n +1 is done
+during this phase).
+(3) When the system state is safe with respect to f n +1 , a read of f n +1 (n +1) blocks for S n +1 is
+started. When this read is completed, the system state is "safe" for all n +1 sessions. The
+call for S n +1 is allowed to return, f n +1 becomes the system's
+WAS, and the system leaves startup mode.
+Step (3) can be omitted for write sessions because the equivalent read session starts with a
+full buffer (Section 2.3).
+7. PERFORMANCE
+In this section we study the effects of disk scheduling policies and hardware parameters on
+CMFS performance. Our study uses simulation. We chose not to use the "real I/O" version of
+CMFS because of the scheduling vagaries of UNIX, the poor performance of its SCSI disk I/O,
+and the restriction to our available disk.
+We wrote the CMFS prototype so that disk I/O operations can optionally be simulated
+rather than performed. The simulator keeps track of the disk head radial and rotational position,
+and models latencies realistically. Other actions (e.g., CPU execution) are modeled as instantane-
+ous. Unless otherwise stated, the simulations use the Cyclical Plan policy, and assume a disk
+with 11.8 Mbps transfer rate and 39 ms worst case seek time. Block size is 512 bytes.
+7.1. Number of Concurrent Sessions
+
+Figure
+
+8 shows the maximum number of concurrent sessions accepted by CMFS as a function
+of total buffer space. This is shown for two different session data rates: 64 Kbps and 1.4
+Mbps. In each graph, curves are given for three different disk types: 39 ms maximum seek time
+and 11.8 Mbps transfer rate (CDC Wren V), 35 ms maximum seek time and 8.6 Mbps transfer
+rate (CDC Wren III) and, 180 ms maximum seek time and 5.2 Mbps transfer rate (Sony 5.25"
+optical disk).
+The disk transfer rate imposes an upper bound on the number of concurrent sessions that
+can be accepted. Unbounded buffer space is needed as this limit is approached. To reach 90% of
+the limit with a Wren V disk requires 4 MB for 1.4 Mbps sessions and 85 MB for 64 Kbps ses-
+sions. The efficiency depends on the length of operations in the minimal WAS; 64 Kbps sessions
+require a proportionally longer WAS and therefore more buffer space. When the number of
+accepted sessions is fixed, a disk with higher seek time needs a longer minimal WAS and therefore
+more buffer space.
+7.2. Performance of Disk Scheduling Policies
+Since non-real-time operations can be done only if there is enough slack time, an important
+criterion for disk scheduling policies is how quickly they increase slack time. To study this, we
+simulated CMFS with three concurrent 1.4 Mbps sessions, no non-real-time traffic, and 8 MB
+system buffer size. From the results (Figure we see that
+Cyclical Plan performs slightly better than Greedy when slack is low, but Greedy quickly
+catches up. Static/Minimal, because it cannot do long operations, performs much worse at higher
+slack levels. With appropriate hysteresis values CMFS maintains moderate slack levels during
+steady-state operation; thus the dynamic policies are preferable.
+7.3. Response Time of Interactive Traffic
+To study the effect of real-time traffic on interactive traffic, we simulated a fixed number of
+sessions together with interactive requests that read randomly positioned blocks from disk. The
+interactive request arrival is Poisson with mean arrival rate l. We define the response time of an
+interactive request as the time from its arrival to the start of the disk operation; the delay of the
+operation itself, including the seek, is not included.
+The effect of hysteresis parameters is most noticeable under heavy load (otherwise slack
+remains high and hysteresis is not exercised). Figure 10 plots mean interactive response time
+5.2 Mbps, 180 ms
+8.6 Mbps, 35 ms
+ms
+5.2 Mbps, 180 ms
+8.6 Mbps, 35 ms
+ms
+number of sessions84(64 Kbps
+number of sessions15050
+100B 10KB 1MB 100MB 10GB 10KB 1MB 100MB
+buffer space
+buffer space
+(1.4 Mbps
+
+Figure
+
+8: The number of sessions that can be accepted by CMFS depends on the available buffer
+space. The disk transfer rate imposes an upper limit on the number of sessions; to reach 90% of
+the limit with the 11.8 Mbps disk requires 4 MB of buffer space for 1.4 Mbps sessions and 85
+MB for 64 Kbps sessions.
+
+Figure
+
+9: Disk scheduling policies build up slack at different rates. The Aggressive Cyclical
+Plan (solid line), Aggressive Greedy (dotted) and Static/Minimal (dashed) policies are shown
+here (the non-aggressive versions, not shown, performed slightly worse).
+against H I 2 , for different values of H I 1 , under a heavy load. We observe that:
+# For fixed H I 1 and increasing H I 2 , interactive response time drops steeply and then rises gra-
+dually. When H I 1 nearly equals H I 2 , interactive response is poor because the system
+switches rapidly between real-time and non-real-time operations, causing high seek over-
+head. As H I 2 increases, this oscillation becomes less frequent and response improves.
+Since interactive requests are queued while slack builds up from H I 1 to H I 2 , response
+degrades if H I 2 is increased past a certain point. For all H I 1 , response is best when H I 2 - H I 1
+is about 0.5 seconds.
+# When H I 1 is very small (e.g., 0.1 sec in Figure 10), slack builds up slowly from H I 1 to H I 2 so
+response is poor. A similar effect is observed if H I 2 exceeds about 0.95Hmax (H max denotes
+the upper bound on H imposed by buffer space), since it is difficult to fill all buffers simultaneously
+
+500.0300.0100.02.50.9interactive response time
+(milliseconds)
+upper hysteresis limit (seconds)
+lower
+lower
+lower
+lower
+
+Figure
+
+10: The effect of the hysteresis limits H I 1 and H I 2 on the mean response time for non-
+real-time requests of the interactive class. This experiment was conducted with 2 MB total buffer
+(H max is 3.4 seconds), 20 interactive arrivals per second and three 1.4 Mbps sessions.
+Based on these observations, reasonable "rule of thumb" values are H I
+
+Figure
+
+plots mean interactive response time as a function of arrival rate, for different
+values of system buffer size. If interactive arrival rate is low, system slack stays near H
+ure 12) and most interactive requests are serviced without waiting for real-time traffic. At higher
+arrival rates (in Figure 11, about 5 per second for the 500 KB case and 10 per second for 1 MB),
+interactive response degrades because slack sometimes reaches the lower hysteresis limit H I 1 , and
+interactive requests then are blocked until slack reaches H I 2 .
+7.4. Throughput of Background Traffic
+To estimate the effect of real-time traffic on background traffic throughput, we simulated
+three 1.4 Mbps sessions and a single background task that sequentially reads a long,
+contiguously-allocated file. We define the background throughput fraction T as the fraction of
+residual disk bandwidth (i.e., disk bandwidth not taken up by real-time sessions) used by the
+background task. For the same reasons as discussed in Section 7.3, T is low if H B 1 is very small,
+is close to H max , or H is small. In this case (since throughput, rather than response
+time, is the goal) there is no penalty if H large. We found that T was maximized for
+plots T (with these hysteresis limits) against
+buffer space.
+(analytical approximation)
+mean response time
+mean arrival rate (per second)
+
+Figure
+
+11: Mean interactive response time as a function of arrival rate, for different values of total
+buffer space. In this experiment there were four concurrent 1.4 Mbps sessions. The hysteresis
+limits (0.04, 0.08) and (0.35, 0.65) were used for the 500 KB and 1 MB cases respectively. The
+"infinite buffer" curve was obtained analytically, modeling the file system as an M/G/1 queue.
+time (seconds)3.02.01.00.02515520 arrivals/second
+arrivals/second
+slack time (seconds)
+
+Figure
+
+12: The variation of slack time H in the presence of interactive non-real-time traffic.
+Three 1.4 Mbps sessions start at time zero, the system has 2MB of buffer space (H max is 3.4
+seconds), and hysteresis limits are H I 2.0. If the interactive arrival rate is low
+per second in this case), H stays near H max . For high arrival rates (20 per second), H oscillates
+between the hysteresis limits.
+fraction T
+background throughput0.950.850.75
+100KB 1MB 10MB 100MB
+total buffer space
+
+Figure
+
+13: Background throughput as a function of total buffer space, with a real-time workload
+of three 1.4 Mbps sessions. As buffer space increases so does H longer
+periods of background I/O, and hence less seek overhead.
+7.5. Session Startup Time
+Write sessions can usually be started immediately; see Section 2.3. To study startup time
+for read sessions, we ran a simulation in which requests for six sessions arrive at time zero. Figure
+14 shows the start times of the sessions. The difference between successive start times
+increase; this is because the workaheads of existing sessions have to be increased to accommodate
+the new minimal WAS, which becomes longer as more sessions are added. Startup times are
+on the order of one second, which is similar to the startup time of a consumer VCR. However, it
+is too large for applications that require instantaneous response, such as interactive musical performance
+using sounds stored on disk. This problem can be solved by storing an initial segment
+of each sound file in memory.
+8. RELATED WORK
+Structural issues for multi-media files (sharing, parallel composition, annotations, etc.) have
+been addressed in the Xerox Etherphone system [14], the Sun Multimedia File System [13], and
+the Northwestern Network Sound System [12]. These projects do not concentrate on performance
+or scheduling issues, and the systems cannot make performance guarantees.
+Other projects have addressed performance but without hard guarantees. Abbott gives a
+qualitative discussion of disk scheduling for playback of multiple audio tracks [1]. He compares
+a "balanced" policy in which read-ahead is divided among sessions, to a shortest-seek-first pol-
+icy. His analysis does not, however, provide an acceptance test or performance guarantees.
+Park and English [9] describe a system supporting single channel audio playback. Non-
+real-time traffic may concurrently access the disk, causing available disk bandwidth to change.
+0.752.25session number
+start time
+
+Figure
+
+14: When six 1.4 Mpbs session requests arrive simultaneously at time zero, their actual
+start times are staggered as shown.
+As an alternative to disk bandwidth reservation for the audio channel, they propose changing the
+data rate of the channel dynamically, to accommodate non-real-time workload. The high data
+rate is chosen if the workahead on the stream is above a fixed threshold. This strategy does not
+guarantee a minimum data rate.
+Yu et al. [15] discuss the layout of interleaved data streams with different data rates on a
+compact disk for guaranteed-performance playback. Their assumptions (single session, fixed
+rates, small buffers, no non-real-time traffic) are more restrictive than ours.
+Gemmell and Christodoulakis [5] describe a file system supporting multiple audio channel
+playback with concurrent non-real-time traffic. Like CMFS, this work provides a basis for hard
+performance guarantees. However, it differs from CMFS in several respects. The channels must
+have the same (constant) data rate and must start at the same time. The scheduling policy is
+static: the system repeatedly applies a single feasible WAS for the audio channels, and reserves
+time during each operation sequence to service non-real-time traffic. For non-real-time
+traffic, this static policy may perform worse than CMFS because 1) CMFS can "interrupt" a
+WAS, allowing non-real-time traffic to start immediately, and 2) CMFS can use accumulated system
+slack to handle long bursts of non-real-time traffic.
+Rangan and Vin [11] describe a system that combines disk input and display-device output
+for multiple data streams. They give expressions for admission control under the assumption that
+streams have equal data rates. Their disk scheduling policy is similar to Static/Minimum.
+9. CONCLUSION
+The Continuous Media File System (CMFS) provides guaranteed-performance read and
+"sessions". Several such sessions can coexist with non-real-time workload on a single
+disk. The central ideas of CMFS include the following:
+# Semantics: The CMFS session interface supports a range of client requirements, including
+variable-rate data, starting and stopping, synchronization of multiple streams, and client
+workahead. The semantics are defined rigorously (Section 2.1), but they include a
+that provides flexibility in client CPU scheduling.
+# Layout: CMFS requires that bounds functions U and V can be obtained (Section 4), but
+does not mandate a particular disk layout.
+# Session acceptance: To decide if a session request can be accepted, CMFS checks if a feasible
+WAS (Section 5.2) exists.
+# Disk scheduling: We found that dynamic policies (Greedy and Cyclical Plan) performed
+better than the Static/Minimal policy.
+Concurrent non-real-time access: CMFS handles non-real-time as well as real-time file
+access; disk space can be dynamically used for either purpose. CMFS uses the slack time
+hysteresis policy for scheduling non-real-time access. With appropriate parameters, this
+policy allows long non-real-time operations to complete without interruption.
+9.1. Refinements and Future Work
+The following observations suggest possible improvements to CMFS. First, for a session
+the graph of workahead W i as a function of time is roughly a "sawtooth" function. If we consider
+two sessions S 1 and S 2 that have opposite phases in the scheduling cycle, then
+is generally less than max(W share buffer space, possibly
+improving non-real-time performance or increasing the number of sessions that can be accepted.
+Second, the scheduling policy could take disk head position into account in various ways. For
+example, it could yield a session ordering that is more efficient than smallest-workahead-first
+(Section 6.1). Similarly, the use of a policy such as SCAN [4] for ordering non-real-time operations
+could improve their performance.
+Although we have presented the CMFS algorithms in the context of a single-spindle disk
+drive, they are equally applicable to a disk array in which files are "striped" across multiple
+disks [10]. A client-level session could be composed of sessions on multiple disks, with each
+disk reserved and scheduled as described here. This could be used to provide sessions with data
+rates higher than those of the underlying disk drives. It could improve load-balancing and availability
+even for sessions with data rates lower than individual disks.
+
+ACKNOWLEDGEMENTS
+
+Discussions with Vassilios Polimenis, George Homsy, and Mark Moran contributed to the
+CMFS design.
+
+
+
+--R
+
+"Efficient Editing of Digital Sound on Disk"
+"Meta-Scheduling for Distributed Continuous Media"
+"A Continuous Media I/O Server and its Synchronization Mechanism"
+"Effects of Scheduling on File Memory Operations"
+"Principles of Delay-Sensitive Multimedia Data Storage and Retrieval"
+"Scheduling and IPC Mechanisms for Continuous Media"
+"Scheduling Algorithms for Multiprogramming in a Hard- Real-Time Environment"
+"A Fast File System for UNIX"
+"A Variable Rate Strategy for Retrieving Audio Data From Secondary Storage"
+"A Case for Redundant Arrays of Inexpensive Disks (RAID)"
+"Designing File Systems For Digital Audio and Video"
+"A Network Sound System for UNIX"
+"The Multimedia File System"
+"Managing Stored Voice in the Etherphone System"
+"Efficient Placement of Audio Data on Optical Disks for Real-Time Applications"
+--TR
+A fast file system for UNIX
+Managing stored voice in the Etherphone system
+A case for redundant arrays of inexpensive disks (RAID)
+Efficient placement of audio data on optical disks for real-time applications
+Scheduling and IPC mechanisms for continuous media
+Designing file systems for digital video and audio
+A Continuous Media I/O Server and Its Synchronization Mechanism
+A variable rate strategy for retrieving audio data from secondary storage
+Principles of delay-sensitive multimedia data storage retrieval
+Scheduling Algorithms for Multiprogramming in a Hard-Real-Time Environment
+Meta-Scheduling For Distributed Continuous Media
+
+--CTR
+D. James Gemmell , Harrick M. Vin , Dilip D. Kandlur , P. Venkat Rangan , Lawrence A. Rowe, Multimedia Storage Servers: A Tutorial, Computer, v.28 n.5, p.40-49, May 1995
+Tat Seng Chua , Cheng Hian Goh , Beng Chin Ooi , Kian-Lee Tan, A Replication Strategy for Reducing Wait Time in Video-On-Demand Systems, Multimedia Tools and Applications, v.15 n.1, p.39-58, September 2001
+Simon S. Y. Shim , Tai-Sheng Chang , David H. C. Du , Jenwei Hsieh , Yuewei Wang, Performance of a Scalable Multimedia Server with Shared-Storage Clusters, Multimedia Tools and Applications, v.18 n.1, p.31-54, September 2002
+Ravi Jain , John Werth , J. C. Browne, Introduction to the Special Issue on Input/Output in Parallel Computer Systems, ACM SIGARCH Computer Architecture News, v.21 n.5, p.5-6, Dec. 1993
+Raymond T. Ng , Jinhai Yang, Maximizing Buffer and Disk Utilizations for News On-Demand, Proceedings of the 20th International Conference on Very Large Data Bases, p.451-462, September 12-15, 1994
+Jen-Wen Ding , Yueh-Min Huang, Resource-Based Striping: An Efficient Striping Strategy for Video Servers Using Heterogeneous Disk-Subsystems, Multimedia Tools and Applications, v.19 n.1, p.29-19, January
+Stephen Childs, Filing system interfaces to support distributed multimedia applications, Proceedings of the 8th ACM SIGOPS European workshop on Support for composing distributed applications, p.162-169, September 1998, Sintra, Portugal
+Yueh-Min Huang , Jen-Wen Ding , Shiao-Li Tsao, Constant time permutation: an efficient block allocation strategy for variable-bit-rate continuous media data, The VLDB Journal  The International Journal on Very Large Data Bases, v.8 n.1, p.44-54, April 1999
+Raymond T. Ng , Paul Shum, Optimal clip ordering for multi-clip queries, The VLDB Journal  The International Journal on Very Large Data Bases, v.7 n.4, p.239-252, December 1998
+Hiroshi Tezuka , Tatsuo Nakajima, Simple continuous media storage server on real-time mach, Proceedings of the Annual Technical Conference on USENIX 1996 Annual Technical Conference, p.8-8, January 22-26, 1996, San Diego, CA
+Dwight Makaroff , Gerald Neufeld , Norman Hutchinson, An evaluation of VBR disk admission algorithms for continuous media file servers, Proceedings of the fifth ACM international conference on Multimedia, p.143-154, November 09-13, 1997, Seattle, Washington, United States
+Silvano Maffeis, Design and implementation of a configurable mixed-media file system, ACM SIGOPS Operating Systems Review, v.28 n.4, p.4-10, Oct. 1994
+Huang , Hung-Ming Ho, Pinned demand paging based on the access frequency of video files in video servers, Journal of Systems and Software, v.78 n.3, p.223-233, December 2005
+Philip Kwok Chung Tse , Clement H. C. Leung, Improving multimedia systems performance using constant-density recording disks, Multimedia Systems, v.8 n.1, p.47-56, Jan. 2000
+Divyesh Jadav , Alok Choudhary , P. Bruce Berra, An evaluation of design trade-offs in a high-performance, media-on-demand server, Multimedia Systems, v.5 n.1, p.53-68, Jan. 1997
+Prashant J. Shenoy , Harrick M. Vin, Efficient support for interactive operations in multi-resolution video servers, Multimedia Systems, v.7 n.3, p.241-253, May 1999
+Babak Hamidzadeh , Tsun-Ping J. To, Prioritized Admission Strategies to Improve User-Perceived Performance in Interactive VOD Servers, Multimedia Tools and Applications, v.13 n.1, p.5-34, January 2001
+Jonathan Chien-Liang Liu , David H. C. Du , Simon S. Y. Shim , Jenwei Hsieh , MengJou Lin, Design and Evaluation of a Generic Software Architecture for On-Demand Video Servers, IEEE Transactions on Knowledge and Data Engineering, v.11 n.3, p.406-424, May 1999
+Rajesh Krishnan , Dinesh Venkatesh , Thomas D. C. Little, A failure and overload tolerance mechanism for continuous media servers, Proceedings of the fifth ACM international conference on Multimedia, p.131-142, November 09-13, 1997, Seattle, Washington, United States
+Ramzi R. Yehia , Imad Mahgoub, Storage System and Multimedia: Classification and Extensions, Distributed and Parallel Databases, v.7 n.4, p.429-442, Oct. 1999
+Tsun-Ping J. To , Babak Hamidzadeh, Dynamic real-time scheduling strategies for interactive continuous media servers, Multimedia Systems, v.7 n.2, p.91-106, March 1999
+Ketil Lund , Vera Goebel, Adaptive disk scheduling in a multimedia DBMS, Proceedings of the eleventh ACM international conference on Multimedia, November 02-08, 2003, Berkeley, CA, USA
+Kyungoh Lee , Heon Y. Yeom, An effective admission control mechanism for variable-bit-rate video streams, Multimedia Systems, v.7 n.4, p.305-311, July 1999
+Prashant J. Shenoy , Harrick M. Vin, Efficient support for scan operations in video servers, Proceedings of the third ACM international conference on Multimedia, p.131-140, November 05-09, 1995, San Francisco, California, United States
+Divyesh Jadav , Alok N. Choudhary , P. Bruce Berra, Techniques for Increasing the Stream Capacity of A High-Performance Multimedia Server, IEEE Transactions on Knowledge and Data Engineering, v.11 n.2, p.284-302, March 1999
+Wonjun Lee , Difu Su , Duminda Wijesekera , Jaideep Srivastava , Deepak Kenchammana-Hosekote , Mark Foresti, Experimental evaluation of PFS continuous media file system, Proceedings of the sixth international conference on Information and knowledge management, p.246-253, November 10-14, 1997, Las Vegas, Nevada, United States
+H. Vin , P. Goyal , A. Goyal, A statistical admission control algorithm for multimedia servers, Proceedings of the second ACM international conference on Multimedia, p.33-40, October 15-20, 1994, San Francisco, California, United States
+Jayanata K. Dey-Sircar , James D. Salehi , James F. Kurose , Don Towsley, Providing VCR capabilities in large-scale video servers, Proceedings of the second ACM international conference on Multimedia, p.25-32, October 15-20, 1994, San Francisco, California, United States
+Asit Dan , Dinkar Sitaram, An online video placement policy based on bandwidth to space ratio (BSR), ACM SIGMOD Record, v.24 n.2, p.376-385, May 1995
+Michael Vernick , Chitra Venkatramani , Tzi-cker Chiueh, Adventures in building the Stony Brook video server, Proceedings of the fourth ACM international conference on Multimedia, p.287-295, November 18-22, 1996, Boston, Massachusetts, United States
+Prashant Shenoy , Harrick M. Vin, Cello: A Disk Scheduling Framework for Next Generation Operating Systems*, Real-Time Systems, v.22 n.1-2, p.9-48, Jan.-March 2002
+Prashant J. Shenoy , Harrick M. Vin, Cello: a disk scheduling framework for next generation operating systems, ACM SIGMETRICS Performance Evaluation Review, v.26 n.1, p.44-55, June 1998
+Banu zden , Rajeev Rastogi , Avi Silberschatz, Multimedia support for databases, Proceedings of the sixteenth ACM SIGACT-SIGMOD-SIGART symposium on Principles of database systems, p.1-11, May 11-15, 1997, Tucson, Arizona, United States
+Weifeng Shi , Shahram Ghandeharizadeh, Trading memory for disk bandwidth in video-on-demand servers, Proceedings of the 1998 ACM symposium on Applied Computing, p.505-512, February 27-March 01, 1998, Atlanta, Georgia, United States
+Hui Guo , Guobin Shen , Zhiguang Wang , Shipeng Li, Optimized streaming media proxy and its applications, Journal of Network and Computer Applications, v.30 n.1, p.265-281, January 2007
+Cheng-Han Tsai , Edward T.-H. Chu , Tai-Yi Huang, WRR-SCAN: a rate-based real-time disk-scheduling algorithm, Proceedings of the 4th ACM international conference on Embedded software, September 27-29, 2004, Pisa, Italy
+Rodney Van Meter , Minxi Gao, Latency management in storage systems, Proceedings of the 4th conference on Symposium on Operating System Design & Implementation, p.8-8, October 22-25, 2000, San Diego, California
+A. L. N. Reddy , Jim Wyllie , K. B. R. Wijayaratne, Disk scheduling in a multimedia I/O system, ACM Transactions on Multimedia Computing, Communications, and Applications (TOMCCAP), v.1 n.1, p.37-59, February 2005
+Deepak R. Kenchammana-Hosekote , Jaideep Srivastava, I/O scheduling for digital continuous media, Multimedia Systems, v.5 n.4, p.213-237, July 1997
+Hsung-Pin Chang , Ray-I Chang , Wei-Kuan Shih , Ruei-Chuan Chang, GSR: A global seek-optimizing real-time disk-scheduling algorithm, Journal of Systems and Software, v.80 n.2, p.198-215, February, 2007
+W. G. Aref , I. Kamel , S. Ghandeharizadeh, Disk Scheduling in Video Editing Systems, IEEE Transactions on Knowledge and Data Engineering, v.13 n.6, p.933-950, November 2001
+Craig S. Freedman , David J. DeWitt, The SPIFFI scalable video-on-demand system, ACM SIGMOD Record, v.24 n.2, p.352-363, May 1995
+Fabio Panzieri , Marco Roccetti, Synchronization support and group-membership services for reliable distributed multimedia applications, Multimedia Systems, v.5 n.1, p.1-22, Jan. 1997
+Scheduling and data layout policies for a near-line multimedia storage architecture, Multimedia Systems, v.5 n.5, p.310-323, Sept. 1997
+Dominic Mazzoni , Roger B. Dannenberg, A Fast Data Structure for Disk-Based Audio Editing, Computer Music Journal, v.26 n.2, p.62-76, July 2002
+Wonjun Lee , Jaideep Srivastava , Bikash Sabata, QoS-Aware Admission Control and Dynamic Resource Provisioning Framework in Ubiquitous Multimedia Computing Environments, The Journal of Supercomputing, v.32 n.1, p.25-50, April 2005
+Nevzat Hurkan Balkir , Gultekin Ozsoyoglu, Delivering presentations from multimedia servers, The VLDB Journal  The International Journal on Very Large Data Bases, v.7 n.4, p.294-307, December 1998
+Ray-I Chang , Wei-Kuan Shih , Ruei-Chuan Chang, Real-Time Disk Scheduling for Multimedia Applications withDeadline-Modification-Scan Scheme, Real-Time Systems, v.19 n.2, p.149-168, Sept. 2000
+Banu zden , Alexandros Biliris , Rajeev Rastogi , Abraham Silberschatz, A Low-Cost Storage Server for Movie on Demand Databases, Proceedings of the 20th International Conference on Very Large Data Bases, p.594-605, September 12-15, 1994
+Nabil J. Sarhan , Chita R. Das, Caching and Scheduling in NAD-Based Multimedia Servers, IEEE Transactions on Parallel and Distributed Systems, v.15 n.10, p.921-933, October 2004
+David P. Anderson, Device reservation in audio/video editing systems, ACM Transactions on Computer Systems (TOCS), v.15 n.2, p.111-133, May 1997
+Murthy Devarakonda, Impact of application scale and diversity on file systems, Proceedings of the 6th workshop on ACM SIGOPS European workshop: Matching operating systems to application needs, September 12-14, 1994, Wadern, Germany
+Banu zden , Rajeev Rastogi , Avi Silberschatz, On the storage and retrieval of continuous media data, Proceedings of the third international conference on Information and knowledge management, p.322-328, November 29-December 02, 1994, Gaithersburg, Maryland, United States
+Xiaoye Jiang , Prasant Mohapatra, Efficient admission control algorithms for multimedia servers, Multimedia Systems, v.7 n.4, p.294-304, July 1999
+Martha L. Escobar-Molano , Shahram Gandeharizadeh , Douglas Ierardi, An Optimal Resource Scheduler for Continuous Display of Structured Video Objects, IEEE Transactions on Knowledge and Data Engineering, v.8 n.3, p.508-511, June 1996
+Michael K. Bradshaw , Bing Wang , Lixin Gao , Jim Kurose , Prashant Shenoy , Don Towsley , Subhabrata Sen, Periodic broadcast and patching services: implementation, measurement, and analysis in an internet streaming video testbed, Proceedings of the ninth ACM international conference on Multimedia, September 30-October 05, 2001, Ottawa, Canada
+Gin-Kou Ma , Chiung-Shien Wu , Mei-Chian Liu , Bao-Shuh P. Lin, Efficient real-time data retrieval through scalable multimedia storage, Proceedings of the fifth ACM international conference on Multimedia, p.165-172, November 09-13, 1997, Seattle, Washington, United States
+Divyesh Jadav , Alok Choudhary, Designing and Implementing High-Performance Media-on-Demand Servers, IEEE Parallel & Distributed Technology: Systems & Technology, v.3 n.2, p.29-39, June 1995
+Michael K. Bradshaw , Bing Wang , Subhabrata Sen , Lixin Gao , Jim Kurose , Prashant Shenoy , Don Towsley, Periodic broadcast and patching services - implementation, measurement and analysis in an internet streaming video testbed, Multimedia Systems, v.9 n.1, p.78-93, July
+Jason Gait, Optimizing Unix Database File Operations, IEEE Software, v.11 n.3, p.48-56, May 1994
+Richard Staehli , Jonathan Walpole, Constrained-Latency Storage Access, Computer, v.26 n.3, p.44-53, March 1993
+Andreas Vogel , Brigitte Kerherv , Gregor v. Bochmann , Jan Gecsei, Distributed multimedia applications and quality of service: a survey, Proceedings of the 1994 conference of the Centre for Advanced Studies on Collaborative research, p.71, October 31-November 03, 1994, Toronto, Ontario, Canada

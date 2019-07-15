@@ -1,0 +1,1044 @@
+--T
+Compiler-optimized simulation of large-scale applications on high performance architectures.
+--A
+In this paper, we propose and evaluate practical, automatic techniques that exploit compiler analysis to facilitate simulation of very large message-passing systems. We use compiler techniques and a compiler-synthesized static task graph model to identify the subset of the computations whose values have no significant effect on the performance of the program, and to generate symbolic estimates of the execution times of these computations. For programs with regular computation and communication patterns, this information allows us to avoid executing or simulating large portions of the computational code during the simulation. It also allows us to avoid performing some of the message data transfers, while still simulating the message performance in detail. We have used these techniques to integrate the MPI-Sim parallel simulator at UCLA with the Rice dHPF compiler infrastructure. We evaluate the accuracy and benefits of these techniques for three standard message-passing benchmarks on a wide range of problem and system sizes. The optimized simulator has errors of less than 16% compared with direct program measurement in all the cases we studied, and typically much smaller errors. Furthermore, it requires factors of 5 to 2000 less memory and up to a factor of 10 less time to execute than the original simulator. These dramatic savings allow us to simulate regular message-passing programs on systems and problem sizes 10 to 100 times larger than is possible with the original simulator, or other current state-of-the-art simulators.
+--B
+Introduction
+Predicting parallel application performance is an essential step in developing large applications on highly scalable
+parallel architectures, in sizing the system configurations necessary for large problem sizes, or in analyzing
+alternative architectures for such systems. Considerable research is being done on both analytical and simulation
+models for performance prediction of complex, scalable systems. Analytical methods typically require custom
+solutions for each problem and may not be tractable for complex interconnection networks or detailed modeling
+scenarios; simulation models are likely to be the primary choices for general-purpose performance prediction. As
+is well known, however, detailed simulations of large systems can be very computation-intensive and their long
+execution times can be a significant deterrent to their widespread use.
+The current generation of parallel program simulators use two techniques to reduce model execution times: direct
+execution and parallel simulation. In direct execution, the simulator uses the available system resources to
+directly execute portions of the program. Parallel simulation distributes the computational workload among
+multiple processors, while using appropriate synchronization algorithms to ensure that execution of the model
+produces the same result as if all events in the model were executed in their causal order. However, the current
+state of the art is such that even using direct execution and parallel simulations, the simulation of large
+applications designed for architectures with thousands of processors can run many orders of magnitude slower
+than their physical counterparts.
+In this paper, we propose, implement, and evaluate practical, automatic optimizations that exploit compiler
+support to enable efficient simulation of very large message-passing parallel programs. Our goal is to enable the
+simulation of target systems with thousands of processors, and realistic problem sizes expected on such large
+platforms. The key idea underlying our work is to use compiler analysis to isolate fragments of local
+computations and message data whose values do not affect the performance of the program. For example,
+computations that determine loop bounds, control flow, or message patterns and volumes all have an effect on
+performance, whereas computations of many array values have no significant effect on performance. These
+computations can be abstracted away while simulating the rest of the program in detail to predict the performance
+characteristics of the application. Similarly, it is also possible to avoid performing data transfers for many
+messages whose values do not affect performance, while simulating the performance of the messages in detail.
+There are two major aspects to the compiler analysis required to accomplish this optimization: identifying the
+values within the program that could affect program performance, and isolating the computations and
+communications that determine these values. To perform the first step, we use a compiler-synthesized static task
+graph model [4, 5], an abstract representation that identifies the sequential computations (tasks), the parallel
+structure of the program (task scheduling, precedences, and explicit communication), and the control-flow that
+determines the parallel structure. The symbolic expressions in the task graph for control flow conditions,
+communication patterns and volumes, and scaling expressions for sequential task execution times directly capture
+all the values (i.e., the references within those expressions) that impact program performance. The second step
+uses a compiler technique called program slicing [21] to identify the portions of the computation that determine
+these values. The compiler can then emit simplified MPI code that contains exactly the computations that must be
+actually executed during the simulation (in addition to the communication), while the remaining code fragments
+are abstracted away. The compiler also needs to estimate the execution time of the abstracted code by using
+parameterized by direct measurement. In addition to reducing simulation times, these
+optimizations can dramatically reduce the memory requirements for the simulation (if major program arrays are
+only referenced in redundant computations, they do not have to be allocated at all during the simulation). The
+memory savings can potentially allow much larger problem sizes and architectures to be studied than would
+otherwise be feasible.
+In order to demonstrate the impact of these optimizations, we have combined the MPI-Sim parallel simulator [6,
+25-27] with the dHPF compiler infrastructure [2], to develop a program simulation framework that incorporates
+the new techniques described above. The original MPI-Sim simulator used both direct execution and parallel
+simulation to achieve substantial reductions in the simulation time of parallel programs. dHPF, in normal usage,
+compiles an HPF program to MPI (or to a variety of shared memory systems), and provides extensive parallel
+program analysis capabilities. The integrated tool can allow us to evaluate the impact of the preceding
+optimizations with existing MPI and HPF programs without requiring any changes to the source code. In
+previous work, we modified the dHPF compiler to automatically synthesize the static task graph model and
+symbolic task time estimates for MPI programs compiled from HPF source programs. 1 In this work, we use the
+static task graph plus program slicing to perform the simulation optimizations described above. We have also
+extended MPI-Sim to exploit the information from the compiler, and avoid executing significant portions of the
+computational code. The hypothesis is that this will significantly reduce the memory and time requirements of the
+simulation and therefore enable us to simulate much larger systems and problem sizes than were previously
+possible.
+We use a number of widely used benchmarks to evaluate the utility of the integrated framework: Sweep3D [1], a
+benchmark; SP from the NPB benchmark suite [8] and Tomcatv, a SPEC92 benchmark. The
+simulation models of each application were validated against measurements over a range of problem sizes and
+numbers of processors. The errors in the predicted execution times, compared with direct measurement, were at
+1 In the future, we plan to synthesize this information for existing MPI codes as well. The dHPF infrastructure supports very general
+computation partitioning, communication analysis, and symbolic analysis capabilities that make this feasible for a wide class of MPI
+programs.
+most 16% in all cases we studied, and often were substantially less. The validation has been done for the
+distributed memory IBM SP architecture, as well as the shared memory SGI Origin 2000 (note, that MPI-Sim
+simulates the MPI communication, not the communications via shared memory). The optimizations had a
+significant impact on the performance of the simulators: the total memory usage of the simulator using the
+compiler synthesized model was a factor of 5 to 2000 less than the original simulator, and the simulation time was
+typically lower by a factor of 5-10. These dramatic savings allow us to simulate systems or problem sizes that are
+10-100 times larger than is possible with the original simulator, without significant reductions in the accuracy of
+the simulator. For example, we were successful in simulating the execution of a configuration of Sweep3D for a
+target system with 10,000 processors! In many cases, the simulation time was faster than the original program.
+The remainder of the paper proceeds as follows. Section 2 first describes the state of the art of parallel program
+simulation, to set the stage for our work. Section 3 provides a brief overview of MPI-Sim and the static task
+graph model. Section 4 describes the optimization strategy and the compiler and simulator extensions required to
+implement the strategy. Section 5 describes our experimental results, and Section 6 presents our main
+conclusions.
+Related Work
+Because analytical performance prediction can be intractable for complex applications, program simulations are
+commonly used for such studies. It is well known that simulations of large systems tend to be slow. To improve
+the simulators, direct-execution has been used [20, 26, 28]. Direct execution simulators make use of available
+system resources to directly execute portions of the application code and simulate architectural features that are of
+specific interest, or are unavailable. For example, simulators can be used to study various architectural
+components such as the memory subsystem or the interconnection network. Specifically, if one is interested in
+determining if a faster communication fabric for a network of workstations is of value for a given set of
+applications, one can run the application on the currently available machines and only simulate the projected
+network's behavior. The benefits of this direct-execution simulation are obvious: first, one can estimate the value
+of the new hardware without the expense of purchasing it; second, one can do the simulation fast-there is no
+need to simulate the workstation's behavior (for example down to the level of memory references) since that part
+of the hardware is readily available.
+Many of the early simulators were designed for sequential execution [9, 13, 14]. However, even with the use of
+abstract models and direct execution, sequential program simulators tended to be slow with slowdown factors
+ranging from 2 to 35 for each process in the simulated program [9]. Several recent efforts have been exploring
+the use of parallel execution [10, 16, 17, 23, 24, 27, 28] to reduce the model execution times, with varying degrees
+of success. In order to have multiple simulation processes and maintain accuracy, simulations use protocols to
+synchronize the processes. One of the widely used protocols is the Quantum protocol, which lets the processes
+compute for a given quantum before synchronizing them. In general, synchronous simulators that use the
+quantum protocol must trade-off simulation accuracy with speed-frequent synchronizations slowdown the
+simulation, but synchronizing less frequently introduces errors, by possibly executing statements out-of-order.
+Both LAPSE [16, 17] and Parallel Proteus use some form of program analysis to increase the simulation window
+beyond a fixed quantum. MPI-Sim uses parallel discrete event simulation with the conservative protocol [24, 27].
+Supported protocols include the Null Message Protocol (NMP) [11], the Conditional Event Protocol (CEP) [12],
+and a new protocol, which is a combination of the two [22]. As discussed in the next section, MPI-Sim exploits
+the determinism present in the communication pattern of the application to reduce, and in many cases, completely
+eliminate synchronization overheads.
+Although simulation protocol optimizations have reduced simulation times, the resulting improvements are still
+inadequate to simulate the very large problems that are of interest to high-end users. For instance, Sweep3D is a
+kernel application of the ASCI benchmark suite released by the US Department of Energy. In its largest
+configuration, it requires computations on a grid with one billion elements. The memory requirements and
+execution time of such a configuration makes it impractical to simulate, even when running the simulations on
+high performance computers with hundreds of processors.
+To overcome this computational intractability, researchers have used abstract simulations, which avoid execution
+of the computational code entirely [18, 19]. However, this leads to major limitations that make the approach
+inapplicable to many real world applications. The main problem with abstracting away all of the code is that the
+model is essentially independent of program control flow, even though the control flow may affect both the
+communication pattern as well as the sequential task times. Also, the preceding solution requires significant user
+modifications to the source program (in the form of a special input language) in order to express required
+information about abstracted sequential tasks and communication patterns. This makes it difficult to apply such a
+tool to existing programs written with widely used standards such as Message Passing Interface (MPI) or High
+Performance Fortran (HPF).
+3 Background and Goals
+3.1 MPI-SIM: Parallel Simulation of MPI programs using Direct Execution
+The starting point for our work is MPI-Sim, a direct-execution parallel simulator for performance prediction of
+MPI programs. MPI-Sim simulates an MPI application running on a parallel system (referred to as the target
+program and system respectively). The machine on which the simulator is executed (the host machine) may be
+either a sequential or a parallel machine. In general, the number of processors in the host machine will be less than
+the number of processors in the target architecture being simulated, so the simulator must support multi-threading.
+The simulation kernel on each processor schedules the threads and ensures that events on host processors are
+executed in their correct timestamp order. A target thread is simulated as follows. The local code is simulated by
+directly executing it on the host processor. Communication commands are trapped by the simulator, which uses
+an appropriate model to predict the execution time for the corresponding communication activity on the target
+architecture.
+supports most of the commonly used MPI communication routines, such as point-to-point and collective
+communications. In the simulator, all collective communication functions are implemented in terms of point-to-
+point communication functions, and all point-to-point communication functions are implemented using a set of
+core non-blocking MPI functions.
+In general, the host architecture will have fewer processors than the target machine (for sequential simulation, the
+host machine has only one processor); this requires that the simulator provide the capability for multithreaded
+execution. Since MPI programs execute as a collection of single threaded processes, it was necessary to provide a
+capability for multithreaded execution of MPI programs in MPI-Sim. Further, memory and execution time
+constraints of sequential simulation led to the development of parallel implementations of MPI-Sim. MPI-Sim
+has been ported to multiple parallel architectures including a distributed memory IBM SP2 as well as a shared-memory
+SGI Origin 2000.
+The simulation kernel provides support for sequential and parallel execution of the simulator. Parallel execution is
+supported via a set of conservative parallel simulation protocols [26], which typically work as follows: Each
+2 In the future, we plan to synthesize this information for existing MPI codes as well. The dHPF infrastructure supports very general
+computation partitioning, communication analysis, and symbolic analysis capabilities that make this feasible for a wide class of MPI
+programs.
+application process in the simulation is modeled by a Logical Processes (LP) 3 . Each LP can execute
+independently, without synchronizing with other LPs, until it executes a wait operation (such as an MPI-Recv,
+MPI-Barrier etc.); a synchronization protocol is used to decide when such an LP can proceed. We briefly
+describe the default protocol used by MPI-SIM. Each LP in the model computes local quantities called Earliest
+Output Time (EOT) and Earliest Input Time (EIT) [7]. The EOT represents the earliest future time at which the
+LP will send a message to any other LP in the model; similarly the EIT represents a lower bound on the receive
+timestamp of future messages that the LP may receive. Upon executing a wait statement, an LP can safely select
+a matching message (if any) from its input buffer, that has a receive timestamp less than its EIT. Different
+asynchronous protocols differ only in their method for computing EIT. Our implementation supports a variety of
+such protocols as mentioned previously. The primary overhead in implementing parallel conservative protocols is
+due to the communications to compute EIT and the blocking suffered by an LP that has not been able to advance
+its EIT. We have suggested and implemented a number of optimizations to significantly reduce the frequency and
+strength of synchronization in the parallel simulator thus reducing unnecessary blocking in its execution [26, 27].
+Our optimizations were geared towards exploiting determinism in applications. For instance, consider an LP that
+is blocked at a receive statement and its input buffer contains a single message. In general, the LP cannot proceed
+by removing that message from the buffer as it might be possible that another message destined for this LP is in
+transit, and that message has a lower timestamp. However, if the receive statement is known by the process to be
+deterministic, it follows that there must exist a unique message that matches the receive statement. As soon as the
+LP receives this message, it can proceed without the need for any synchronizations with other LPs in the model.
+In the best case, if every receive statement in the model is known to be deterministic, no synchronization
+messages will be generated in the model and the parallel simulation can be extremely efficient.
+The preceding optimizations have two limitations: first, it works only with communications statements that are a
+priori known to be deterministic. Second, the use of direct execution in the simulator implies that the memory and
+computation requirements of the simulator are at least as large as that of the target application, which restricts the
+target systems and application problem sizes that can be studied even using parallel host machines. The compiler-directed
+optimizations discussed in the next section are primarily aimed at alleviating these restrictions.
+3.2 The Static Task Graph Representation
+As will be seen in the next section, the compiler analysis to be performed can be greatly facilitated by exploiting
+an appropriate abstract representation for the parallel behavior of the program. As part of the POEMS project [3,
+15], we have developed an abstract program representation called the static task graph (STG) that captures
+extensive static information about a parallel program [5]. The STG is designed to be computed automatically by a
+parallelizing compiler. It is a compact, symbolic representation of the parallel structure of a program,
+independent of specific program input values or the number of processors. Each node of the STG represents a set
+of possible parallel tasks, typically one per process, identified by a symbolic set of integer process identifiers. To
+illustrate, the STG for the example MPI program is shown in Figure 1. The compute node for the loop nest
+represents a set of tasks, one per process, denoted by the symbolic set of process ids }0
+p . Each
+node also includes markers describing the corresponding region of source code of the original program (for now,
+each node must represent a contiguous region of code). Each edge of the graph represents a set of edges
+connecting pairs of parallel tasks described by a symbolic integer mapping. For example, the communication edge
+in the figure is labeled with a mapping indicating that each process p ( 1
+sends to process
+nodes fall into one of three categories: control-flow, computation and communication. Each computational
+node includes a symbolic scaling function that captures how the number of loop iterations (if any) in the task
+3 In general, an LP can be used to simulate multiple application processes.
+scales as a function of arbitrary program variables. Each communication node includes additional symbolic
+information describing the pattern and volume of communication.
+Overall, the STG serves as a general, language- and architecture-independent representation of message-passing
+programs. In previous work, we extended the dHPF compiler to synthesize static (and dynamic) task graphs for
+MPI programs generated by the dHPF compiler from HPF source programs [4]. In the future, we will extract task
+graphs directly from existing MPI codes. This compiler support is extremely valuable because it enables the
+techniques developed in this paper to be applied fully automatically, i.e., without user intervention, for efficient
+simulation of parallel programs.
+Compiler-Supported Techniques for Efficient Large-Scale Simulation
+This section begins by motivating the overall strategy we use to address the key restriction on simulation
+scalability identified above, namely, the time and cost required for simulating the detailed computations of the
+target program. We then describe more specifically how this strategy is accomplished.
+4.1 Optimization Strategy and Challenges
+Parallel program simulators used for performance evaluation execute or simulate the actual computations of the
+target program for two purposes: (a) to determine the execution time of the computations, and (b) to determine the
+impact of computational results on the performance of the program, due to artifacts like communication patterns,
+loop bounds, and control-flow. For many parallel programs, however, a sophisticated compiler can extract
+extensive information from the target program statically. In particular, we identify two types of relevant
+information often available at compile-time:
+1. The parallel structure of the program, including the sequential portions of the computation (tasks), the
+mapping of tasks to threads, and the communication and synchronization patterns between threads.
+2. Symbolic estimates for the execution time of isolated sequential portions of the computation.
+If this information can be provided to the simulator directly, it may be possible to avoid executing substantial
+portions of the computational code during simulation, and therefore reduce the execution time and memory
+requirements of the simulation.
+To illustrate this goal, consider the simple example MPI code fragment in Figure 1. The code performs a "shift"
+communication operation on the array D, where every processor sends its boundary values to its left neighbor, and
+then the code executes a simple computational loop nest. In this simple example, the communication pattern and
+the number of iterations of the loop nest depend on the values of the block size per processor (b), the array size
+(N), the number of processors (P), and the local processor identifier (myid). Therefore, the computation of these
+values must be executed or simulated during the simulation. However, the communication pattern and loop
+iteration counts do not depend on the values stored in the arrays A and D, which are computed and used in the
+computational loop nest (or earlier). We refer to these latter values as redundant computations (from the point of
+view of performance estimation). If we can estimate the performance of the computational loop nest analytically,
+we could avoid simulating the code of this loop nest, while still simulating the communication behavior in detail.
+We could achieve this optimization by using the compiler to generate the simplified code shown on the right in
+the figure. In this code, we have replaced the loop nest with a call to a special simulator-provided delay function.
+We have extended MPI-Sim to provide such a function, which simply forwards the simulation clock on the
+double precision A(NMAX, 1
+double precision
+call mpi_comm_size(MPI_COMM_WORLD, P, ierr)
+call mpi_comm_rank(MPI_COMM_WORLD, myid, ierr)
+read(*, N)
+if (myid .gt.
+<SEND D(2:N-1, myid*b+1) to processor myid-1>
+endif
+if (myid .lt. P) then
+<RECV D(2:N-1, (myid+1)*b+1) from processor myid+1>
+endif
+do
+do
+endif
+integer, allocatable :: dummy_buf
+call mpi_comm_size(MPI_COMM_WORLD, P, ierr)
+call mpi_comm_rank(MPI_COMM_WORLD, myid, ierr)
+call read_and_broadcast(w_1)
+read(*, N)
+allocate dummy_buf((N-2)*2)
+if (myid .gt.
+<SEND dummy_buf(:) to processor myid-1>
+endif
+if (myid .lt. P) then
+<RECV dummy_buf(:) from processor myid+1>
+endif
+call delay((N-2) * (min(N,myid*b+b) -
+
+Figure
+
+1: Example to illustrate (a) a simple MPI program, (b) task-graph for MPI program, and
+(c) simplified MPI program for efficient simulation.
+(a) Original MPI Code (c) Simplified MPI Code
+(b) Task Graph for
+Original MPI Code
+Task Pairs: {[p] - [q]:
+DO
+Compute
+DO I
+Control-flow edge
+C Communication edge
+Compute
+Tasks:
+simulation thread by a specified amount. The compiler estimates the cost of the loop nest in the form of a simple
+scaling function shown as the argument to the delay call. This function describes how the computational cost
+varies with the retained variables (b, N, P and myid), plus a parameter w 1 representing the cost of a single loop
+iteration. We currently obtain the value of w 1 by direct measurement for one or a few selected problem sizes and
+number of processors, and use the scaling function to compute the required delay value for other problem sizes
+and number of processors. Note in the example that the compiler has avoided allocating the arrays A and D,
+which significantly reduces the memory required to simulate the program.
+As an additional optimization, if the compiler can prove that the data transferred in the message is also
+"redundant", the simulator can also avoid performing an actual data transfer, although it will simulate the message
+operation in detail. It can also avoid allocating any memory for the message buffer. This message optimization
+can lead to further savings in simulation time and memory usage.
+This paper develops automatic compiler-based techniques to perform the optimizations described above, and
+evaluates the potential benefits of these techniques. In particular, our goal is to use the compiler-generated static
+task graph (plus additional compiler analysis) to avoid simulating or executing substantial portions of the
+computational code of the target program and sending unnecessary data. We use the task graph to identify the
+computational tasks that are candidates for elimination, to compute the scaling expressions for those delay
+functions, and (most importantly) to identify which values computed in the program have an impact on
+performance. We use additional compiler analysis to distinguish the computations that compute such values, i.e.,
+those that are not redundant as defined above.
+More specifically, there are four major challenges we must address in achieving the above goals, of which the first
+three have not been addressed in any previous system known to us:
+a) We must transform the original parallel program into a simplified but legal MPI program that can be
+simulated by MPI-Sim. The simplified program must include only the computation and communication code
+that needs to be executed by the simulator. It must yield the same performance estimates as the original
+program for total execution time (for each individual process), total communication and computation times, as
+well as more detailed metrics of the communication behavior.
+b) We must be able to abstract away as much of the local computation within each task as feasible and eliminate
+as many data structures of the original program as possible, by isolating the redundant computations in the
+program.
+c) We must identify the messages whose contents do not directly affect the computation at the receiver, and
+exploit this information to reduce simulation time and memory usage.
+d) We must estimate the execution times of the abstracted computational tasks for a given program size and
+number of processors. Accurate performance prediction for sequential code is a challenging problem that has
+been widely studied in the literature. We use a fairly straightforward approach described in Section 4.5.
+Refining this approach is part of our ongoing work in the POEMS project.
+The following subsections describe the techniques we use to address these challenges, and their implementation in
+dHPF and MPI-Sim. We first describe the basic process of using the task graph to generate the simplified MPI
+program, then describe the compiler analysis needed to identify redundant computations, and finally discuss the
+approach we use to estimate the performance of the eliminated code.
+4.2 Translating the static task graph into a simplified MPI program
+The STG directly identifies the local (sequential) computational tasks, control flow, and communication tasks and
+patterns of the parallel program. By using the compiler-generated STG as the basis for our analysis, we can avoid
+having to perform a complex, ad hoc analysis to identify these components.
+Given this information, the first step is to identify contiguous regions of computational tasks and/or control-flow
+in the STG that can be collapsed into a single condensed (or collapsed) task, such as the loop nest of Figure 1.
+Note that this is simply a transformation of the STG for simplifying further analysis and does not directly imply
+any changes to the parallel program itself. We refer to the task graph resulting from this transformation as the
+condensed task graph. In later analysis, we can consider only a single computational task or a single collapsed
+task at a time for deciding how to simplify the code (we refer to either as a single sequential task).
+The criteria for collapsing tasks depend on the goals of the performance study. First, as a general rule, a collapsed
+region must not include any branches that exit the region, i.e., there should be only a single exit at the end of the
+region. Second, for the current work, a collapsed region must contain no communication tasks because we aim to
+simulate communication precisely. Finally, deciding whether to collapse conditional branches involves a difficult
+tradeoff: it is important to eliminate control-flow that references large arrays in order to achieve the savings in
+memory and time we desire, but it is difficult to estimate the performance of code containing such control-flow.
+We have found, however, that there are typically few branches that involve large arrays that do have a significant
+impact on program performance. For example, one minor conditional branch in a loop nest of Sweep3D depends
+on intermediate values of large 3D arrays. The impact of this branch on execution time is relatively negligible,
+but detecting this fact, in general, can be difficult within the compiler because it may depend on expected problem
+sizes and computation times. Therefore, there are two possible approaches we can take. The more precise
+approach is to allow the user to specify through directives that specific branches can be eliminated and treated
+analytically for program simulation. A simpler but more approximate approach is to eliminate any conditional
+branches inside a collapsible loop nest, and rely on the statistical average execution time of each iteration to
+provide a good basis for estimating total execution time of the loop nest. With either approach, we can use
+profiling to estimate the branching probabilities of eliminated branches We have currently taken the second
+approach, but the first one is not difficult to implement and could provide more precise performance estimates.
+While condensing the task graph, we also compute a scaling expression for each collapsed task that describes how
+the number of computational operations scales as a function of program variables. We introduce time variables
+that represent the execution time of a sequence of statements in a single loop iteration (denoted w i for task i). The
+approach we use to estimate the overall execution time of each sequential task is described in Section 4.5.
+Based on the condensed task graph (and assuming for now that the compiler analysis of Section 4.3 is not
+needed), we generate the simplified MPI program as follows. We retain any control-flow (loops and branches) of
+the original MPI code that is retained in the condensed task graph, i.e., the control-flow that is not collapsed.
+Second, we retain the communication code of the original program, in particular only the calls to the underlying
+message-passing library. If a program array that is otherwise unused is referenced in any communication call, we
+replace that array reference with a reference to a single dummy buffer used for all the communication. (Note that
+without the message optimization described later in this section, the simulator must still perform the actual data
+transfer between processes when simulating the message. The message optimization attempts to eliminate this
+data transfer itself.) We use a buffer size that is the maximum of the message sizes of all communication calls in
+the program and allocate the buffer statically or dynamically (potentially multiple times), depending on when the
+required message sizes are known. Third, we replace the code sequence for each sequential task of the task graph
+by a call to the MPI-Sim delay function, and pass in an argument describing the estimated execution time of the
+task. We insert a sequence of calls to a runtime function, one per w i parameter, at the start of the program to read
+in the value of the parameter from a file and broadcast it to all processors. Finally, we eliminate all the data
+variables not referenced in the simplified program.
+4.3 Program slicing for identifying redundant computations and data
+The major challenge in performing the transformations mentioned earlier correctly and effectively is to identify
+the redundant computations, i.e., the ones that can be safely eliminated. The solution we propose is to use
+program slicing to retain those parts of the computational code (and the associated data structures) that affect the
+program execution time. Given a variable referenced in some statement, program slicing finds and isolates a
+subset of the program computation and data that can affect the value of that variable [21]. The subset has to be
+conservative, limited by the precision of static program analysis, and therefore may not be minimal.
+The key requirement in applying program slicing is to identify the variable values that affect the execution time of
+the program. Once again, the compiler-generated static task graph captures this information directly and
+precisely, allowing us to avoid a complicated and ad hoc analysis of the entire source code. In particular, the
+values that affect performance are exactly the variable references that appear in the retained control-flow of the
+condensed graph, in the scaling functions of the sequential tasks and communication events, and in the source and
+destination expressions of the communication descriptors (or the communication calls themselves).
+Once these values are identified, program slicing can be used to isolate the computations and data that affect those
+variable values. Program slicing is essentially a reachability analysis on the dependence graph of the program,
+including both data and control dependences. In particular, given a particular target reference, we use a
+reachability analysis to identify the statements in the program that can affect the value of that reference through
+some chain of dependences (i.e., through some feasible path in the dependence graph). Because this is a well-known
+compiler technique, we omit the details here. A state-of-the-art algorithm for program slicing is described
+in [21] and was used as the basis for our implementation. Applying this technique, however, requires that the
+target reference be part of the program so that it appears in the program dependence graph computed by the
+compiler. Some of the expressions of the static task graph are not directly derived from corresponding
+expressions in the program, and therefore cannot be used as starting points for program slicing. For such
+expressions, we introduce dummy procedure call statements at appropriate points in the target program, passing
+those expressions as arguments, and then rebuild the program dependence graph. Now, these expressions can be
+used as starting points for slicing. The dummy procedure calls can later be eliminated.
+Obtaining the memory and time savings we desire requires full interprocedural program slicing, so that we
+completely eliminate the uses of as many large arrays as possible. General interprocedural slicing is a challenging
+but feasible compiler technique that is not currently available in the dHPF infrastructure. For now, we take limited
+interprocedural side effects into account, in order to correctly handle calls to runtime library routines (including
+communication calls and runtime routines of the dHPF compiler's runtime library). In particular, we assume that
+these routines can modify any arguments passed by reference but cannot modify any global (i.e., common block)
+variables of the MPI program. This is necessary and sufficient to support single-procedure benchmarks. We
+expect to incorporate full interprocedural slicing in the future, to support continuing work in POEMS.
+The final output of the slicing analysis is the set of computations that must be retained in the simplified MPI code,
+while the remaining computations of the program (except for I/O statements and communication calls) can be
+considered redundant. The code generation for the simplified MPI program (described in the previous section) is
+modified slightly to use this information. For each sequential task, the non-redundant computations are retained
+in the generated program, while the rest of the task is replaced with a single call to the simulator delay function.
+For precise performance prediction, the simulator delay calls should not include the time for the retained
+computations since those will be simulated (and their time accounted for) explicitly. The execution time
+estimates computed above, however, apply to the entire task. In practice, we have found that the amount of non-redundant
+code is very small for most tasks and therefore we do not adjust the execution time estimates to account
+for this retained code.
+4.4 Message optimization for simulating redundant messages
+As noted in the previous Section, the data transferred in some of the messages may also be "redundant" from the
+point of view of performance. If such cases can be identified, we can avoid performing the data transfers during
+the simulation, potentially leading to additional time and memory savings. Although this is conceptually similar
+to redundant computations, we discuss this "message optimization" separately because the mechanism for
+achieving this optimization is somewhat different, as explained below.
+First, the compiler can identify redundant messages as a direct result of the program slicing analysis described
+above. In particular, the technique described above to account for interprocedural side-effects during slicing
+directly identifies those message receive calls that receive redundant values. The corresponding message send
+calls are already known to the compiler. The compiler provides this information to the simulator by flagging the
+MPI calls that are redundant. The buffers used by these messages are not allocated in the resulting simplified MPI
+program.
+The actual message optimization is as follows. If a call is not flagged, MPI-Sim simulates the call in detail (by
+sending the necessary protocol messages and predicting the end-to-end latency for the messages) and sends the
+data to the receiving simulation thread, so that the actual data is available to the simulated application. However,
+if the call is flagged by the compiler as "redundant", then MPI-Sim still simulates the call in the detail with
+respect to the MPI communication protocol, but sends only an empty message to the receiving simulation thread.
+Since "redundant" receives are also flagged, the receiver does not copy the data in the buffer. The messages need
+to be present in the simulated application because they provide information about the synchronization in the
+program. Although this optimization does not reduce the number of messages sent, the size of the messages is
+reduced, and the memory used by the messages does not need to be allocated. This results in lower latencies
+incurred by the messages that are sent between processors as well as smaller communication overheads due to
+copying the data enclosed in the messages into/from the communication buffers. It also results in lower memory
+usage by the simulator.
+4.5 Estimating task execution times
+The main approximation in our approach is to estimate sequential task execution times without direct execution.
+Analytical prediction of sequential execution times is an extremely challenging problem, particularly with modern
+superscalar processors and cache hierarchies. There are a variety of possible approaches with different tradeoffs
+between cost, complexity, and accuracy.
+The simplest approach, and the one we use in this paper, is to measure task times (specifically, the w i ) for one or a
+few selected problem sizes and number of processors, and then use the symbolic scaling functions derived by the
+compiler to estimate the delay values for other problem sizes and number of processors. Our current scaling
+functions are symbolic functions of the number of loop iterations, and do not incorporate any dependence of
+cache working sets on problem sizes. We believe extensions to the scaling function approach that capture the non-linear
+behavior caused by the memory hierarchy are possible.
+Performance
+Estimates
+Measured
+task times
+Simplified
+MPI code
+MPI code
+with timers
+Parallel
+Program dHPF
+Parallel
+System
+
+Figure
+
+2: Compilation, parameter measurement and simulation for a parallel program.
+Two alternatives to direct measurement of the task time parameters are (a) to use compiler support for estimating
+sequential task execution times analytically, and (b) to use separate offline simulation of sequential task execution
+times [15]. In both cases, the need for scaling functions remains, including the issues mentioned above, because it
+is important to amortize the cost estimating these parameters over many prediction experiments.
+The scaling functions for the tasks can depend on intermediate computational results, in addition to program
+inputs. Even if this is not the case, they may appear to do so to the compiler. For example, in the NAS benchmark
+SP, the grid sizes for each processor are computed and stored in an array, which is then used in most loop bounds.
+The use of an array makes forward propagation of the symbolic expressions infeasible, and therefore completely
+obscures the relationship between the loop bounds and program input variables. We simply retain the executable
+scaling expressions, including references to such arrays, in the simplified code and evaluate them at
+execution time.
+We have been able to automate fully the modeling process for a given HPF application compiled to MPI. The
+modified dHPF compiler automatically generates two versions of the MPI program. One is the simplified MPI
+code with delays calls described previously. The second is the full MPI code with timer calls inserted to perform
+the measurements of the w parameters. The output of the timer version can be directly provided as input to the
+delay version of the code. This complete process is illustrated in Figure 2.
+We performed a detailed experimental evaluation of the compiler-based simulation approach. We studied three
+issues in these experiments:
+1. The accuracy of the optimized simulator that uses the compiler-generated information, compared with both
+the original simulator and direct measurements of the target program.
+2. The reduction in memory usage achieved by the optimized simulator compared with the original and the
+resulting improvements in the overall scalability of the simulator in terms of system sizes and problem sizes
+that can be simulated.
+3. The performance of the optimized simulator compared with the original, in terms of both absolute simulation
+times and in terms of relative speedup as compared to sequential model execution, when simulating a large
+number of target processors.
+Results in each of the above categories are presented for both types of the optimizations considered in this paper:
+elimination of local computations and elimination of data contents from large messages.
+We begin with a description of our experimental methodology and then describe the results for each of these
+issues in turn.
+5.1 Experimental Methodology
+We used three real-world benchmarks (Tomcatv, Sweep3D and NAS SP) and one synthetic communication
+kernel (SAMPLE) in this study. Tomcatv is a SPEC92 floating-point benchmark, and we studied an HPF version
+of this benchmark compiled to MPI by the dHPF compiler. Sweep3D, a Department of Energy ASCI benchmark
+[1], and SP, a NAS Parallel Benchmark from the NPB2.3b2 benchmark suite [8], are MPI benchmarks written in
+Fortran 77. Finally, we designed the synthetic kernel benchmark, SAMPLE, to evaluate the impact of the
+compiler-directed optimizations on programs with varying computation granularity and message communication
+patterns that are commonly used in parallel applications.
+For Tomcatv, the dHPF compiler automatically generates three versions of the output MPI code: (a) the normal
+MPI code generated by dHPF for this benchmark, where the key arrays of the HPF code are distributed across the
+processors in contiguous blocks in the second dimension (i.e., using the HPF distribution (*,BLOCK)); (b) the
+simplified MPI code with the calls to the MPI-Sim delay function, making full use of the techniques described in
+Section 4; and (c) the normal MPI code with timer calls inserted to measure the task time parameters, as described
+in Section 4.5. Since dHPF only parses and emits Fortran and MPI-Sim only supports C, we use f2C to translate
+each version of the generated code to C and run it on MPI-Sim. For the other two benchmarks, Sweep3D and
+NAS SP, we manually modified the existing MPI code to generate the simplified MPI and the MPI code with
+timers for each case (since the task graph synthesis for MPI codes is not implemented yet). These codes serve to
+show that the compiler techniques we developed can be applied to a large range of codes with good results.
+For each application, we measured the task times (values of w i ) on 16 processors. These measured values were
+then used in experiments with the same problem size on different numbers of processors. The only exception was
+NAS SP, where we measured the task only for a single problem size (on 16 processors), and used the same task
+times for other problem sizes as well. Recall that the scaling functions we use currently do not account for cache
+working sets and cache performance. Changing either the problem size or the number of processors affects the
+working set size per process and, therefore, the cache performance of the application. Nevertheless, the above
+measurement approach provided very accurate predictions from the optimized simulator, as shown in the next
+subsection.
+All benchmarks, except SAMPLE, were evaluated for the distributed memory IBM SP (with up to 128
+processors); the SAMPLE experiments were conducted on the shared memory SGI Origin 2000 (with up to 8
+processors).
+5.2 Validation
+The original MPI-Sim was successfully validated on a number of benchmarks and architectures [6, 26, 27]. The
+new techniques described in Section 4, however, introduce additional approximations in the modeling process.
+The key new approximation is in estimating the sequential execution times of portions of the computational code
+(tasks) that have been abstracted away. Our aim in this section is to evaluate the accuracy of MPI-Sim when
+applying these techniques.
+For each application, the optimized simulator (henceforth denoted as MPI-SIM-TG) was validated against direct
+measurements of the application execution time and also compared with the predictions from the original
+simulator. We studied multiple configurations (problem size and number of processors) for each application. In all
+cases MPI-SIM-TG is validated against the measured system. 4
+We begin with Tomcatv, which is handled fully automatically through the steps of compilation, task
+measurements, and simulation shown in Figure 2. The size of Tomcatv used for the validation was 2048-2048.
+
+Figure
+
+3 shows the results from 4 to 64 processors. Even though MPI-Sim with the analytical model (MPI-SIM-
+TG) is not as accurate as MPI-Sim with direct execution (MPI-SIM-DE), the error in the performance predicted
+by MPI-SIM-TG was below 16% with an average error of 11.3% against the measured system.
+4 The message optimizations further introduced do not modify the underlying communication model and thus do
+not affect validation.
+Validation of MPI-SIM for Tomcatv2060100140
+number of processors
+runtime
+(in
+sec)
+measured
+
+Figure
+
+3: Validation of MPI-Sim for (2048-2048) Tomcatv (on the IBM SP).
+
+Figure
+
+4 shows the execution time of the model for Sweep3D with a total problem size of 150-150-150 grid cells
+as predicted using MPI-SIM-TG, MPI-SIM-DE, as well as the measured values, all for up to 64 processors. The
+predicted and measured values are again very close and differ by at most 9.8%. On average, MPI_SIM_DE
+differed from the measured value by 3.7% and MPI-SIM-TG by 7.2%.
+number of processors
+runtime
+(in
+sec)
+measured
+
+Figure
+
+4: Validation of Sweep3D on the IBM SP, Fixed total Problem Size.
+Finally, we validated MPI-SIM-TG on the NAS SP benchmark. The task times were obtained from the 16
+processor run of the class A, the smallest of the three built-in sizes (A, B and C) of the benchmark, and used for
+experiments with all problem sizes. Figures 5 and 6 show the validation for class A and the largest size, class C.
+The validation for class A is good (the errors are less than 7%). The validation for class C is also good with an
+average error of 4%, even though the task times were obtained from class A. This result is particularly interesting
+because, for programs of the same size, class C on average runs 16.6 times longer than class A. This demonstrates
+that the compiler-optimized simulator is capable of accurate projections across a wide range of scaling factors.
+Furthermore, cache effects do not appear to play a great role in this code or the other two applications we have
+examined. This is illustrated by the fact that the errors do not increase noticeably when the task times obtained on
+a small number of processors were used for a larger number of processors.
+Validation for SP Class A100300500700
+number of processors
+runtime
+(in
+sec)
+measured
+
+Figure
+
+5: Validation for NAS SP, class A on the IBM SP.
+Validation for SP class C5001500250016 36 64 100
+number of processors
+runtime
+in
+seconds measured
+
+Figure
+
+Validation for NAS SP, class C on the IBM SP.
+
+Figure
+
+7 summarizes the errors that MPI-SIM-TG incurred when simulating the three applications. All the errors
+are within 16%. The figure emphasizes that the compiler-supported approach combining analytical model and
+simulation is very accurate for a range of benchmarks, system sizes, and problem sizes.
+It is hard to explore these errors further without detailed analysis of each application. Therefore, to better quantify
+what errors can be expected from the optimized simulator, we used our SAMPLE benchmark, which allows us to
+vary the computation to communication ratio as well as the communication patterns.
+%Error between MPI-SIM-TG Predictions and the
+Measured
+number of processors
+Tomcatv
+Sweep3D(150cubed)
+
+Figure
+
+7: Percent Error Incurred by MPI-SIM-TG when Predicting Application Performance.
+was validated on the Origin 2000. Two common communication patterns were selected: wavefront and
+nearest neighbor. For each pattern, the communication to computation ratio was varied from 1 to 100 to a ratio of
+1 to 1.
+
+Figure
+
+8 plots the total execution time for the program and MPI-SIM-TG prediction. In order to
+demonstrate better the impact of computation granularity on the validation, Figure 8 plots the percentage variation
+in the predicted time as compared with the measured values. As can be seen from the figure, the predictions are
+very accurate when the ratio of computation to communication is large, which is typical of many real-world
+applications. As the amount of computation granularity in the program decreases, the simulator incurs larger
+errors. This can expected because both measurement errors and task time estimation errors can become relatively
+more significant. Nevertheless, the graph shows that the predicted values differ by at most 15% from the
+measured values, even for small communication to computation ratios.
+Validation of SAMPLE Measured vs.
+Predicted with Optimization on Origin 2K50015000.01 0.0125 0.0167 0.025
+Communication to Computation Ratio
+Time
+in
+seconds Wvfrnt-Measured
+NN-Measured
+
+Figure
+
+8: Validation of SAMPLE on the Origin 2000.
+Percent variation of measured time
+from predicted time5150.01 0.03 0.10 0.30 0.50 0.70 0.90
+Communication to Computation ratio
+Difference wvfrnt nn
+
+Figure
+
+9: Effect of Communication to Computation Ratio on Predictions.
+The accuracy of MPI-SIM-TG for large computation to communication ratio (below 5% error) indicates that the
+slightly higher errors we observed for Tomcatv, Sweep3D and NAS SP must be due to the presence of small
+computation to communication ratios.
+5.3 Expanding the simulator to larger systems and problem sizes.
+The main benefit of using the compiler-generated code is that we can decrease the memory requirements of the
+simplified application code. Since the simulator uses at least as much memory as the application, decreasing the
+amount of memory for the application decreases the simulator's memory requirements, thus allowing us to
+simulate large problem sizes and systems.
+Number of
+processors
+total memory use
+total
+memory use
+Memory Reduction
+Factor
+Sweep 3D, 4-4-255
+per Proc. Problem Size 4900 2884MB 30MB 96
+Sweep 3D, 6-6-1000
+per Proc. Problem Size 6400 215GB 122MB 1762
+Tomcatv, 2048-2048 4 236MB 118.4KB 1993
+
+Table
+
+1: Memory Usage in MPI-SIM-DE and MPI-SIM-TG for the benchmarks.
+
+Table
+
+1 shows the total amount of memory needed by MPI-Sim when using the analytical (MPI-SIM-TG) and
+direct execution (MPI-SIM-DE) models. For Sweep3D, with 4900 target processors, the analytical models reduce
+memory requirements by two orders of magnitude for the 4-4-255 per processor problem size. Similarly, for the
+6-6-1000 problem size, the memory requirements for the target configuration with 6400 processors are reduced
+by three orders of magnitude! Three orders of magnitude reduction is also achieved for Tomcatv, while smaller
+reductions are achieved for SP. This dramatic reduction in the memory requirements of the model allows us to (a)
+simulate much larger target architectures, and (b) show significant improvements in execution time of the
+simulator.
+To illustrate the improved scalability achieved in the simulator with the compiler-derived analytical models, we
+consider Sweep3D. In this paper, we study a small subset of problems that are of interest to application
+developers. They are represented by the 20 million cell total problem size, which can be divided into 4-4-255,
+7-7-255, and 28-28-255 per processor problem sizes which need to run on 4,900, 1,600 and 100 processors,
+respectively.
+The scalability of the simulator for the 4-4-255 problem size can be seen in Figure 10. The memory requirements
+of the direct execution model restricted the largest target architecture that could be simulated to 2500 processors.
+With the analytical model, it was possible to simulate a target architecture with 10,000 processors. Since the
+application's predicted runtime for 10,000 processors is 11.0955 seconds and the runtime of the simulator for that
+configuration is 148.118 seconds, the simulator's slowdown is only 13.35! Note that instead of scaling the system
+size, we could scale the problem size instead (for the same increase in memory requirements per process), in order
+to simulate much larger problems.
+Validation and Scalability of Sweep3D (4x4x255/proc)26101 10 100 1000 10000
+number of processors
+runtime
+(in
+sec)
+Measured
+
+Figure
+
+10: Scalability of Sweep3D for the 4-4-255 per Processor Size (IBM SP).
+5.4 Performance of MPI-Sim
+The benefits of compiler-optimized simulation are not only evident in memory reduction but also in improved
+performance. We characterize the performance of the simulator in four ways:
+1. performance gains when using the message optimization (MPI-SIM-TGMO) and MPI-SIM-TG as compared
+to MPI-SIM-DE,
+2. absolute performance (i.e., total simulation time) of MPI-SIM-TG vs. MPI-SIM-DE and vs. the application,
+3. parallel performance of MPI-SIM-TG, in terms of both absolute and relative speedups, and
+4. performance of MPI-SIM-TG when simulating large systems on a given parallel host system.
+Effect of Optimizations on Simulator's Performance
+To illustrate the performance improvements between MPI-SIM-DE, MPI-SIM-TG, which takes advantage of only
+the local optimizations and MPI-SIM-TGMO, which additionally optimizes the messages being sent, we
+conducted experiments on the three benchmarks. In case of Sweep3D we compared the performance of the three
+versions of the simulator when each had a given number of host processors available. The problem size per
+processor was fixed, and the number of target processors in the experiment was increased. This study
+demonstrates the ability of each simulator to efficiently simulate large problem sizes.
+For NAS SP, since the problem size of the application is given (here class C), we fixed the number of target
+processors and varied the number of host processors available to the simulator. This study illustrates not only the
+relative performance of the simulators, but also their ability to use computational resources.
+
+Figures
+
+11, 12 and 13 show the performance of MPI-SIM-TGMO, MPI-SIM-TG and MPI-SIM-DE when
+simulating Sweep3D for three sizes per processor sizes: 7-7-255, 14-14-255 and 28-28-255. All simulators use
+host processors to simulate up to 4,900 target processors. The improvements in performance between MPI-
+SIM-DE and MPI-SIM-TG for the above sizes are on the average 39.7%, 67.28% and 88.07% respectively. As
+the problem size per processor grows larger, the amount of computation per processor increases thus the amount
+of computation abstracted away increases resulting in runtime savings.
+7x7x255 Per Processor Size, 64 Host Processors20060010 100 1000 10000
+target processors
+runtime
+in
+sec. MPI-SIM-TGMO
+
+Figure
+
+11: Sweep3D, 7x7x255 Per Processor Size, (MPI-SIM-TGMO is MPI-SIM-TG+ the message
+optimization).
+14x14x255 Per Processor Size, 64 Hosts2006001000
+target processors
+runtime
+in
+sec
+MPI-SIM-TGMO
+
+Figure
+
+12: Sweep3D, 14-14-255 Per Processor Size.
+28x28x255 Per Processor Size, 64 host procs200600100010 100 1000 10000
+target procs
+runtime
+in
+sec
+MPI-SIM-TGMO
+
+Figure
+
+13: Sweep3D, 28-28-255 Per Processor Size.
+Although the biggest performance gain is in the computation optimization, reducing the size of the messages sent,
+where possible, is beneficial. The simulation, MPI-SIM-TGMO, runs faster than the simulation, which just
+optimizes the computation (MPI-SIM-TG). The improvements for the sizes 7-7-255, 14-14-255 and 28-28-255
+are 28.04%, 31.23% and 13.9% respectively. The benefits of the message optimizations are limited for the
+Sweep3D application, because it uses a large number of barrier synchronizations as well as collective operations
+such as (MPI_Allreduce). These operations either take no data or only single data items.
+We also observed great performance improvements for the NAS SP benchmark, class C, the largest size available
+in the suite. Figures 14 and 15 show the performance of MPI-SIM-TG and MPI-SIM-TGMO for two target
+processor configurations: 16 and 64. The simulations were run on a variety of host processors from 1 to 64. First,
+both MPI-SIM-TG and MPI-SIM-TGMO ran faster than the actual application. The measured runtime of the
+application executing on 16 processors is 2623.38 seconds, whereas running on 64 processors it is 790.67
+seconds.
+Additionally, Figures 14 and 15 illustrate that the simulation can run an order of magnitude faster than MPI-SIM-
+when the message optimization is used. In Figure 14, the jump in runtime for MPI-SIM-TG (from 1 to 2 host
+processors) is due to the large communication costs. The size of the messages sent between processors is 605,161
+doubles. Therefore the cost of sending these messages increases considerably when more than one processor is
+used. When only 2 host processors are used this increased cost is not compensated by the increased computational
+power. However, as the number of host processors increases, better performance is achieved. Since the size of
+these large messages can be reduced to 0 in the MPI-SIM-TGMO simulation, this communication overhead is
+significantly reduced and the simulator performs substantially better than MPI-SIM-TG. As the number of target
+processors increases (to 64 in Figure 15), the size of the messages in the simulation is reduced (to 370,441 for the
+target processor code.) Still, using the message optimization results in an order of magnitude decrease in the
+simulator's runtime.
+Absolute Performance, Local Code Optimization Only
+To compare the absolute performance of MPI-Sim, we gave the simulator as many processors as were available to
+the application (#host processors = # target processors).
+class C2006001000
+host processors
+runtime
+in
+sec.
+MP I-S IM-TG
+MP I-S IM-TGMO
+
+Figure
+
+14: A 16 Target Processor Simulation of NAS SP, Class C Running on Various Number of Host
+Processors.
+Processors , NAS SP C lass C100300500700
+host Processors
+runtime
+in
+seconds MP I-S IM-TG
+MP I-S IM-TGMO
+
+Figure
+
+15: A 64 Target Processor Simulation of NAS SP, Class C Running on Various Number of Host
+Processors.
+
+Figure
+
+shows the absolute performance for Sweep3D with a total problem size of 150 3 . MPI-SIM-DE is on the
+average 2.8 times slower than the actual application (Measured in the Figure). However, MPI-SIM-TG is initially
+faster then the measured application starting at 13 times faster when running on 4 processors, gradually becoming
+only 2.2 times faster for processors and finally being twice as slow as the application running on 64 processors.
+Message optimizations present in MPI-SIM-TGMO further decrease the simulators' runtime by on the average
+18% as compared to MPI-SIM-TG. Both MPI-SIM-TG and MPI-SIM-TGMO are always faster (on the average
+and 18.5 times faster respectively) than MPI-SIM-DE, showing the clear benefits of compiler optimizations.
+However, as the number of processors increases the amount of communication relative to the computation
+increases thus exposing the overhead of simulating the communications and making MPI-SIM-TG and MPI-SIM-
+TGMO slower than the application.
+cubed Sweep3D, Total Problem Size1010000
+number of processors
+Runtime
+in
+seconds
+Measured
+MPI-SIM-TGMO
+
+Figure
+
+Absolute Performance of MPI-Sim for Fixed Total Problem Size Sweep3D. (Vertical Scale is
+Logarithmic)
+
+Figure
+
+17 shows the runtime of the application and the measured runtime of the two versions of the simulator
+running NAS SP class A. We observe that MPI-SIM-DE is running about twice slower than the application it is
+predicting. However, MPI-SIM-TG is able to run much faster than the application, even though detailed
+simulation of the communication is still performed. In the best case (for 36 processors), it runs 2.5 times faster.
+For 100 processors, it runs 1.5 times faster. The relative performance of MPI-SIM-TG decreases as the number of
+processors increases because the amount of computation in the application decreases with increased number of
+processors and thus the savings from abstracting the computation are decreased.
+Absolute Performance of MPI-Sim for NAS SP206010014030 50 70 90
+Number of processors
+Runtime
+in
+Seconds Measured
+
+Figure
+
+17: Absolute Performance of MPI-Sim for the NAS SP Benchmark, class A.
+Even more dramatic results were obtained with Tomcatv, where the runtime of MPI-SIM-TG does not exceed 2
+seconds for all processor configurations as compared to the runtime of the application which ranges from 130 to
+seconds (Figure 18). This is due to the ability of the compiler to abstract away most of the computation. All
+that the simulator needs to directly execute is the skeleton code that controls the flow of the computation and
+communication patterns.
+Absolute Performance of MPI-Sim for Tomcatv20601001400
+number of processors
+runtime
+(in
+seconds) application
+
+Figure
+
+Absolute Performance of MPI-Sim for Tomcatv (2048x2048).
+Parallel Performance
+To evaluate the parallel performance of the simulator, we study how well can it take advantage of increasing
+system resources (her processors) to solve a given problem (fixed total problem size). Figures 14 and 15
+indirectly demonstrate the performance of the simulator; to illustrate the performance better, the speedup achieved
+for the 16 target configuration is depicted in Figure 19. Although MPI-SIM-TGMO, has a smaller runtime than
+MPI-SIM-TG, it scales well for only up to 8 host processors. This is because, as the number of host processors
+increases, the communication overhead between the host begins to dominate the runtime. On the other hand, MPI-
+SIM-TG, which had to send large messages, suffers most when more than one host is used, but then is able to
+distribute that overhead among more processors.
+16Target NAS SP, Class C0.51.52.53.5
+number of host processors
+MPI-SIM-TGMO
+
+Figure
+
+19: Speedup of MPI-Sim for NAS SP.
+Clearly, the performance of the simulator is better when larger systems are simulated. For the 64-target processor
+case (
+
+Figure
+
+15), the runtime decreases steadily as the number of processors is increased. However, using more
+than host processors actually increases the simulator's runtime. (64 Target Class C could not be run on a single
+processor due to memory constraints, so direct speedup comparisons are not possible.)
+Better scalability is seen for the Sweep3D application. Figure 20 shows the performance of MPI-SIM-TG and
+MPI-SIM-DE simulating the 150 3 Sweep3D running on 64 target processors when the number of host processors
+is varied from 1 to 64. The data for the single processor MPI-SIM-DE simulation is not available because the
+simulation exceeds the available memory. Clearly, both MPI-SIM-DE and MPI-SIM-TG scale well. The speedup
+of MPI-SIM-TG is also shown in Figure 21. The steep slope of the curve for up to 8 processors indicates good
+parallel efficiency. For more than 8 processors the speedup is not as impressive, reaching about 15 for 64
+processors. This is due to the decreased computation to communication ratio in the application. Still, the runtime
+of MPI-SIM-TG is on the average 5.4 times faster than that of MPI-SIM-DE.
+Runtime of S imu lator Vs. Application (150x150x150 Sweep3d ,
+64Target proc)100300500700
+number host processors
+runtime
+(in
+sec)
+MP I-SIM -DE
+MP I-SIM -TG
+Measured
+
+Figure
+
+20: Parallel Performance of MPI-Sim.
+Speedup of MPI-SIM-TG (150cubed Sweep3D, 64
+Target Processors)515
+berofprocessors
+speedup MPI-SIM-TG
+
+Figure
+
+21: Speedup of MPI-SIM-TG for Sweep3D.
+Performance for Large Systems
+To quantify further the performance improvement for MPI-SIM-TG, we have compared the running time of the
+simulators when predicting the performance of a large system; in this case we want to simulate a billion-cell
+problem for Sweep3D. This application's developers envision this problem to utilize 20,000 processors, which
+corresponds to a 6-6-1000 per processor problem size. Figure 22 shows the running time of the simulators as a
+function of the number of target processors, when 64 host processors are used. The problem size is fixed per
+processor, so the problem size increases with the increased number of processors. The figure clearly shows the
+benefits of the optimizations. In the best case, when the performance of 1,600 processors is simulated
+(corresponding to the 57.6 million problem size) the runtime of the optimized simulator is nearly half the runtime
+of the original simulator. However, even with the optimizations, the memory requirements are still too large to be
+able to simulate the desired target system.
+MPI-SIM runtime for the 6x6x1000 per processor size
+host processors)20060010000 500 1000 1500 2000 2500 3000
+number of target host processors
+runtime
+in
+seconds
+
+Figure
+
+22: Performance of MPI-SIM when Simulating Sweep3D on Large Systems.
+6 Conclusions
+This work has developed a scalable approach to detailed performance evaluation of communication behavior in
+Message Passing Interface (MPI) and High Performance Fortran (HPF) programs. Our approach is based on
+using compiler analysis to identify portions of the computation whose results do not have a significant impact on
+program performance, and therefore do not have to be simulated in detail. The compiler builds an intermediate
+static task graph representation of the program which enables it to identify program values that have an impact on
+performance, and also enables it to derive scaling functions for computational tasks. The compiler then uses
+program slicing to determine what portions of the computations are not needed in determining performance.
+Finally, the compiler abstracts away those parts of the computational code (and corresponding data structures),
+replacing them with simple, analytical performance estimates. It also flags messages for which the data transfer
+does not have to be performed within the simulation. All of the communication code is retained by the compiler,
+and is simulated in detail by MPI-Sim.
+Our experimental evaluation shows that this approach introduces relatively small errors into the prediction of
+program execution times. The benefit we achieve is significantly reduced simulation times (typically more than a
+factor of 2) and greatly reduced memory usage (by two to three orders of magnitude). This gives us the ability to
+accurately simulate detailed performance behavior of systems and problem sizes that are 10-100 times larger than
+is possible with current state-of-the-art simulation techniques.
+In our current work, we are also exploring a number of alternative combinations of modeling techniques. For
+example, we can use detailed simulation for the sequential tasks, instead of analytical modeling and measurement.
+This will not only allow to get accurate estimates of task execution times, but also enable us to study the
+application's performance on a processor and memory architecture different from the currently available
+platforms. Within POEMS, we aim to support any combination of analytical modeling, simulation modeling and
+measurement for the sequential tasks and the communication code. The static task graph provides a convenient
+program representation to support such a flexible modeling environment [5].
+One potential limitation of our work is that the benefits would not be as large for applications where the
+parallelism and communication patterns depend extensively on intermediate results of the computations. In
+particular, so-called irregular applications may have this property. Evaluating the benefits for such applications
+requires further research, and perhaps a refinement of the techniques developed here.
+Another interesting direction is whether the techniques described here can be extended to other types of
+distributed applications (i.e., non-scientific applications) that use network communication intensively. If very fast
+simulation techniques could be developed for such applications, they could prove extremely valuable in
+controlling runtime optimization decisions such as object migration, load balancing, or adaptation for quality-of-
+service requirements, which are critical decisions for many distributed applications.
+
+Acknowledgements
+
+This work was supported by DARPA/ITO under Contract N66001-97-C-8533, "End-to-End Performance
+Modeling of Large Heterogeneous Adaptive Parallel/Distributed Computer/Communication Systems,"
+(http://www.cs.utexas.edu/users/poems/). The work was also supported in part by the ASCI ASAP program
+under DOE/LLNL Subcontract B347884, and by DARPA and Rome Laboratory, Air Force Materiel Command,
+USAF, under agreement number F30602-96-1-0159. We wish to thank all the members of the POEMS project
+for their valuable contributions. We would also like to thank the Lawrence Livermore National Laboratory for the
+use of their IBM SP. This work was performed while Adve and Sakellariou were with the Computer Science
+Department at Rice University.
+
+
+
+--R
+
+"The ASCI Sweep3D Benchmark Code,"
+"Using integer sets for data-parallel program analysis and optimization.,"
+"POEMS: End-to-end Performance Design of Large Parallel Adaptive Computational Systems,"
+"Compiler Synthesis of Task Graphs for a Parallel System Performance Modeling Environment.,"
+"Application Representations for a Multi-Paradigm Performance Modeling Environment for Parallel Systems,"
+"Performance Prediction of Large Parallel Applications using Parallel Simulations,"
+"Parsec: a parallel simulation environment for complex systems,"
+"The NAS Parallel Benchmarks 2.0,"
+"PROTEUS: a high-performance parallel-architecture simulator,"
+"Optimistic simulation of parallel architectures using program executables,"
+"Distributed simulation: a case study in design and verification of distributed programs,"
+"The Conditional Event Approach to Distributed Simulation,"
+"The Rice parallel processing testbed,"
+"Multiprocessor Simulation and Tracing using Tango.,"
+"POEMS: End-to-end Performance Design of Large Parallel Adaptive Computational Systems.,"
+"A Distributed Memory LAPSE: Parallel Simulation of Message-Passing Programs,"
+"Parallelized direct execution simulation of message-passing parallel programs,"
+"FAST: a functional algorithm simulation testbed,"
+"Functional Algorithm Simulation of the Fast Multipole Method: Architectural Implications,"
+"Improving the Accuracy vs. Speed Tradeoff for Simulating Shared-Memory Multiprocessors with ILP Processors,"
+"Interprocedural slicing using dependence graphs,"
+"Transparent implementation of conservative algorithms in parallel simulation languages,"
+"Reducing Synchronization Overhead in Parallel Simulation,"
+"An adaptive synchronization method for unpredictable communication patterns in dataparallel programs,"
+"Parallel Simulation of Data Parallel Programs,"
+"MPI-SIM: using parallel simulation to evaluate MPI programs,"
+"Asynchronous Parallel Simulation of Parallel Programs,"
+"The Wisconsin Wind Tunnel: VIrtual Prototyping of Parallel Computers,"
+--TR
+The rice parallel processing testbed
+Interprocedural slicing using dependence graphs
+PROTEUS: a high-performance parallel-architecture simulator
+The Wisconsin Wind Tunnel
+A distributed memory LAPSE
+Reducing synchronization overhead in parallel simulation
+Optimistic simulation of parallel architectures using program executables
+Parallelized Direct Execution Simulation of Message-Passing Parallel Programs
+Transparent implementation of conservative algorithms in parallel simulation languages
+Using integer sets for data-parallel program analysis and optimization
+Poems
+MPI-SIM
+Performance prediction of large parallel applications using parallel simulations
+Asynchronous Parallel Simulation of Parallel Programs
+Improving lookahead in parallel discrete event simulations of large-scale applications using compiler analysis
+Parsec
+POEMS
+An adaptive synchronization method for unpredictable communication patterns in dataparallel programs
+Compiler Synthesis of Task Graphs for Parallel Program Performance Prediction
+Parallel Simulation of Data Parallel Programs
+FAST
+Improving the Accuracy vs. Speed Tradeoff for Simulating Shared-Memory Multiprocessors with ILP Processors
+
+--CTR
+Yasuharu Mizutani , Fumihiko Ino , Kenichi Hagihara, Fast performance prediction of master-slave programs by partial task execution, Proceedings of the 4th WSEAS International Conference on Software Engineering, Parallel & Distributed Systems, p.1-7, February 13-15, 2005, Salzburg, Austria

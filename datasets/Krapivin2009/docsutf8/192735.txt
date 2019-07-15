@@ -1,0 +1,528 @@
+--T
+Reducing memory traffic with CRegs.
+--A
+Array and pointer references are often ambiguous in that compile time analysis cannot always determine if distinct references are to the same object. Ambiguously aliased objects are not allocated to registers by conventional compilers due to the cost of the loads and stores required to keep register copies consistent with memory and each other. There are several hardware and software strategies that can be used to solve the ambiguous alias problem: we have implemented one such scheme called CRegs in a compiler and instruction level simulator. We present a modification to Briggs' Optimistic Coloring Algorithm that allows us to allocate local and parameter arrays to CRegs. The CRegs register file operation and instruction set modifications required to implement this scheme are discussed. Underlying hardware issues such as pipeline impact and chip area are briefly discussed. Several benchmarks are compared in terms of dynamic instructions executed for two CReg set sizes. The measured reduction in memory operations is significant, averaging 23% for the benchmarks shown.
+--B
+Introduction
+In most programs, memory references are a significant fraction of both the total number of
+instructions executed and the total run time. A recent study of the SPEC benchmark suite showed
+that an average of one-third of the dynamic instructions executed were loads and stores [BYP91]. In
+this paper, we show how a simple hardware scheme combined with small changes to current compiler
+technology can improve performance by reducing memory traffic. We show how these techniques
+can be cleanly integrated into a current instruction set architecture and implementation, retaining
+object-code compatibility while providing a register file to which aliased objects can be efficiently
+allocated.
+An ambiguous alias occurs when two names may or may not refer to the same memory location.
+In the example shown in Figure 1, if the relationship between i and j is not known at compile
+time or varies (denoted i ? j), the references may depend on each other and the load in line 3 is
+required. If the relationship between i and j can be determined a load can be
+load r2/a[i] load r2/a[i] load r2/a[i]
+store a[j]/r3 store a[j]/r3 store a[j]/r3
+load r4/a[i] use r2 use r3
+
+Figure
+
+1: Ambiguous Alias Example
+eliminated because a[i] can be allocated to a register. In general, ambiguously aliased objects are
+not allocated to the register file because of the loads and stores required to maintain correctness.
+CRegs is a hardware scheme that performs a run time consistency check of effective addresses 1 ,
+in this manner aliases are detected and values are propagated to ambiguously aliased objects in
+other CRegs [DiC88]. With CReg hardware maintaining addresses in the register file, the compiler
+can allocate pointer values and arrays to CRegs safely without fear of using stale data, reaping
+the benefits of fast local memory for these objects. A performance gain is expected due to the
+associated reduction in memory bandwidth.
+A CReg is a register that has an additional address field used to perform associative matches
+with other CRegs and that is capable of updating other CRegs under certain circumstances. The
+datum
+address
+name:
+
+Figure
+
+2: CReg
+scope of the associativity is limited by the CReg set size; the underlying hardware must be capable
+of writing the value fields of the matching CRegs in the set simultaneously. Values in different sets
+are not updated even if their addresses match.
+Alias sets are used to group live ranges for allocation to CReg sets. An alias set is composed of
+live ranges that are ambiguously aliased at some point in their live range [ASU86]. It is assumed
+Virtual addresses are used if virtual memory is supported.
+that names that are always aliased have been appropriately renamed and that objects that are
+never aliased are placed in different alias sets. Formal parameters are analyzed for aliasing and
+placed into alias sets using an algorithm developed by Cooper [Coo85].
+There are many solutions to the ambiguous alias problem [HSS94, DGS93, Chi91, CCK90,
+HeS90, Nic89, ChD89] but we focus only on CReg hardware and compiler techniques in this paper.
+The remainder of the paper covers CReg instruction set modifications and hardware design (Section
+2), CReg compilation techniques (Section 3), experimental results and analysis (Section 4), and a
+summary (Section 5).
+In this section we explain basic CReg operation and propose modifications to a typical
+load/store instruction set architecture to support CRegs. In addition, we show how it can be
+integrated into an existing superscalar microprocessor design.
+All CReg address matching and value update occurs in loads and stores; these instructions
+are the primary means for maintaining the mapping between memory and registers. Non-memory
+instructions clear the address field of their destination CReg. An address is only bound to the value
+once the value is loaded or stored with a CReg load or store.
+The range of address matching is limited to a CReg set. Each set is responsible for propagating
+values between CRegs whose addresses match. To give the coloring algorithm the most freedom
+and allow efficient allocation, the sets should be as large as possible, ideally the size of the register
+file. We call this a maximal CReg set.
+2.1 Instruction Set Architecture
+In this section we detail the changes to an instruction set architecture necessary to support
+CRegs. We focus on a load/store instruction set typical of current RISC microprocessors.
+2.1.1 Original Instruction Set
+The original load and store instructions remain unchanged except that they now clear the
+address field of the CReg they are loading or storing. Hence, a compiler that is unaware of CRegs
+can safely use existing loads and stores effectively treating CRegs as registers. Our compiler uses
+these instructions when address matching and value update is not required, e.g. when saving and
+restoring registers at subroutine boundaries.
+2.1.2 CReg Matching Instructions
+A load and match address instruction is added to the instruction set to load aliased objects
+into CRegs. It calculates the effective address as a normal load does, but performs an associative
+search with other CReg addresses within the set. If a match is found, the memory operation is
+"squashed" (i.e. not performed) and a copy from the matching CReg is made. The load still takes
+time in the processor pipeline but no memory operation is initiated.
+A store and match address instruction complements the CReg load. It calculates the effective
+address and associatively searches for other CRegs with the same address. If it finds some, it copies
+the value to be stored to the other CRegs. Unlike the load, the store always performs a memory
+operation, keeping objects in memory updated with the current value. Multiple writes can occur
+within the register file; potentially all the CRegs in the set may need to be written. In practice
+there are rarely more that two CRegs updated within the set. When a live range is defined, it
+creates a new value in a register. If the object is spilled or ambiguously aliased, a store and match
+follows to update memory with the new value. The store is required to keep memory consistent
+with the value(s) currently in CRegs in case some of the ambiguously aliased objects do not fit into
+the CReg set.
+There are two variants on the store and match address instruction. The first updates matching
+CRegs but does not write the address of the CReg being stored. Our compiler uses this when the
+left hand side of an assignment statement is aliased and spilled therefore the store address should
+not be written to the source register. The second form of the store updates the address of the CReg
+being stored as well as the values of matching CRegs. This overwrites any address that was there,
+effectively allocating the object to the CReg. Our compiler uses this after a DEF to start the live
+range of an aliased object allocated to a CReg.
+2.1.3 Address Clear Instructions
+Care must be taken when live ranges are live across subroutine boundaries. We identify
+two cases. In the first case, CRegs containing values from one subroutine's stack frame could
+cause inadvertent squashed loads in following subroutines if their stack frames occupy the same
+memory space (at different times). The second case involves an object that may not be involved
+in the subroutine call, but the CReg it is allocated to (or another in the same set) is used by the
+subroutine. We force a break in the live range for these objects and clear their address fields. This
+isolates the caller and callee by making the ambiguously aliased objects reload at the first USE
+following the subroutine call. Alternatively, both the address and value field could be saved and
+restored at the subroutine boundary.
+2.1.4 Context Switching
+More aggressive register isolation is required for context switches, exceptions, and interrupts.
+The CReg register file must contain the same contents after the event as before. This is accomplished
+with special stores and loads that move both the value and address field of the CReg to and from
+memory. Context switching is not represented in the data presented in this paper, however operating
+system overhead for system calls is included.
+2.1.5 Code Size Effects
+The static code size for CRegs is often smaller than that generated for a conventional register
+file. With CRegs, more objects are allocated resulting in a reduction in spill loads. However, more
+loads and stores are required to provide isolation at subroutine boundaries simply because more
+CRegs are utilized. In our experience, only in small routines with large numbers of array references
+was the increased amount of subroutine isolation code significant. In a production compiler, these
+routines could be candidates for in-lining.
+2.2 Example
+
+Figures
+
+3 and 4 illustrate CReg operation. Values in CRegs or memory are referred to by name
+(r5, a[i]); addresses are referred to with an "&" prefix (&r5, &a[i]). The address field of CReg f4
+is written as &f4. Loads and stores involving CReg updates and memory operations are depicted
+.
+
+Figure
+
+3: Simple Code Example
+copy r4 to CRegs matching &a[i] store
+store r4 to &a[i]
+.
+(no load of a[i], it's allocated to r4)
+else load r5 from &a[k] load
+copy r6 to CRegs matching &a[j] CReg
+store r6 to &a[j] store
+
+Figure
+
+4: Underlying Operations
+as a box surrounding the operations they perform. For this example, i and j are not known at
+compile time, the array references are ambiguously aliased. Assume that the live ranges for a[i]
+and a[k] are allocated and that the live range for a[j] is spilled. Furthermore, assume the live
+range for a[k] starts with the USE in line 4.
+Line 2 of the example shows a DEF of an array element; the store that follows this DEF allocates
+a[i] to r4 by writing the address of a[i] into the address field of r4. It also copies the value of
+r4 to any CRegs in the same set with matching addresses and writes the value to memory. There
+is no load required for a[i] in line 4. Note that if code in line 3 changed the value of a[i], r4
+would be updated via CRegs address matching. The load of a[k] in line 4 is necessary to start the
+live range for a[k] and may or may not result in a memory operation. If the effective address of
+a[k] matches the address field of a CReg in the same set, the value will be copied from that CReg
+instead of being loaded from memory. For example, if i and k were equal and r4 and r5 were in
+the same CReg set, the value of r4 would be copied to r5. If no address match is found, a memory
+read occurs. Finally, the store to a[j] writes the new value in r6 to memory and to other CRegs
+with the same address but does not update the address field of r6. The address field of r6 remains
+null (it was set to null by the add instruction in line because a[j] is spilled.
+2.3 CRegs Implementation
+In this section, we illustrate how CRegs may be integrated into a pipelined, superscalar processor
+implementation. An earlier study showed that CRegs could be integrated into a simple RISC
+processor pipeline using cache-like circuitry with a small chip area increase and no clock cycle time
+impact [NoO92]. Here we sketch the implementation for the DEC Alpha 21064, a deeply-pipelined
+superscalar processor.
+The pipeline stages for the Alpha 21064 are shown in Figure 5. Unlike some other RISC micro-
+processors, the integer pipeline is further divided into two pipelines: one dedicated to loads/stores
+and the other to integer ALU operations. The operation of the pipeline stages and their respective
+Fetch Swap Decode Issue A B Write
+
+Figure
+
+5: Alpha 21064 Pipeline Stages
+CReg operations are as follows (note that the fetch, swap, decode, and issue stages are unchanged
+for
+Fetch The instruction cache is accessed and two instructions are fetched.
+Swap The two instructions are inspected to see if they require the integer or floating-point
+pipeline; branches are predicted.
+Decode The instructions are decoded.
+Issue The instructions are issued, all operands are read.
+A Stage one (integer) computes the effective address for load and store instructions.
+For loads the address is written to the destination CReg address field. For stores
+the address is written to the source CReg address field if the object being stored
+is to be allocated to that CReg 2 .
+Stage two (integer) reads the data cache tags and cache data. For loads and
+stores the hardware checks if there is an address match between the effective
+address and other CRegs in the same set. If there is a match and the instruction
+is a load, the matching CReg is read and a memory read is not performed. The
+value is then sent to the write stage. For stores, the source value is sent to the
+stage.
+Write Write the result to the register file. For loads, write the value from the matching
+CRegs if the load was squashed, or the memory read 3 if the load was not squashed.
+For stores, write the source value to matching CRegs and to the write buffer.
+The pipeline operation is unchanged if no CReg match occurs. Dual issue is possible in the
+21064; with CRegs, one additional dual issue restriction is necessary: integer CReg stores cannot
+be dual-issued with a following integer ALU operation since the store may write a source register
+for the integer ALU instruction. The latter instruction must wait to issue until the store instruction
+clock ticks). However, if the source register resides in a CReg set different from
+that of the store source register, the instructions may be dual-issued. Other dual issue conditions
+are unaffected because they consist of floating-point and integer instruction pairs and these register
+files are split.
+Additional forwarding logic is needed from pipeline stage B to A. For example, a load followed
+by a store of the same CReg needs the loaded value so it can write it to memory without stalling.
+recovery schemes such as reorder and history buffers [SmP88] can be modified
+without undue overhead to allow CRegs implementation.
+This decision is made by the compiler when it chooses the store instruction to use.
+3 The read is from the first level cache on a hit, otherwise the second level cache or main memory.
+A CReg implementation will require some additional hazard detection and register file read
+ports. In addition, each CReg requires an address field and a mask field, approximately doubling
+the size of the register file. Given increasing chip sizes and the small area required for registers
+relative to caches, functional units, and the rest of the data path, the increased chip area may not
+be a problem.
+Allocating Objects to CRegs
+Graph coloring register allocators use nodes to represent live ranges of values and arcs between
+nodes to specify that the two live ranges cannot be allocated to the same register. The nodes of the
+interference graph are colored representing an allocation of live ranges to specific registers. This
+section describes the live range construction and alias analysis our compiler performs when building
+the interference graph. We then describe the changes to Briggs' optimistic coloring algorithm that
+allow ambiguously aliased objects to be allocated to CRegs.
+3.1 Live Range Construction
+A variety of objects are eligible for allocation to CRegs. The following simple rules describe
+our live range strategy. We first organize the local and formal parameter array references according
+to the name of the array and the index calculation involved. Any variables in the index calculation
+are encoded with their value number to annotate the reference uniquely. Live ranges are built for
+array elements in the same manner as scalars, treating each unique index for a given array as a
+different element. When these live ranges are combined with the alias analysis described next, these
+live ranges allow the coloring algorithm to correctly allocate ambiguously aliased object to CRegs.
+Globals are not allocated and so are "pre-spilled" which means that for each USE/DEF there
+is spill code responsible for loading/storing the value. Live ranges for scalar locals and formal
+parameters are created as described by Briggs' [Bri92].
+3.2 Alias Analysis
+This section describes how we group objects into alias sets in preparation for allocating them
+to CReg sets. If ambiguously aliased objects were not grouped in alias sets, they might be allocated
+across multiple CReg sets and stale data could occur in some CRegs.
+The alias analysis we use for local variables is minimally simple [ASU86]. If an object A is
+ambiguously aliased with object B at some point in the program, we put both A and B in the same
+alias set. If another object C is aliased with B at a later point, it is also placed in the alias set. The
+set implies that A and C are aliased; this may or may not be true but is conservatively assumed to
+be true. Obviously there is room for improvement in the construction of these sets; note however
+that A, B, and C all must be allocated to the same CReg set and so enhanced alias analysis may
+not improve the allocation process.
+An alias set is represented in the interference graph as a circularly linked list of live range nodes.
+For local arrays, the alias set consists of all the live ranges for the elements of that array 4 . For
+formal parameter arrays, interprocedural alias analysis is used to group the live ranges into alias
+sets [Coo85]. Scalars have a null pointer for their alias set.
+4 This is conservative; if two local array live ranges do not conflict, they can be placed in different alias sets.
+Two basic operations on alias sets find the range of CRegs that are allowed during color selection.
+If an alias set has a member that has been colored to a CReg set, the remaining alias set members
+are limited to colors within the CReg set. If no members of the alias set have colors, a CReg set is
+chosen in a round-robin manner. The first operation is finding the color of any member of an alias
+set given an uncolored member of the set (find alias color(node)). If no members of the set
+have been colored yet, a color from a CReg set is chosen in a round-robin manner. If the node is not
+a member of an alias set, an illegal color is returned. The second basic operation uses the resulting
+color and finds the first and last CReg in the corresponding CReg set (find first last(color)).
+If the color given is not a valid color, it returns the first and last CReg of the entire register file.
+If the target architecture supports a maximal CReg set, find first last(color) always returns
+the entire register file as the range.
+3.3 Modifications to Briggs' Optimistic Coloring Algorithm
+This section illustrates the changes to Briggs' optimistic coloring algorithm [BCK89] to enable
+it to color an interference graph augmented with alias sets. For a maximal CReg set, the find
+routines described above cause the allocator to revert to Briggs' original algorithm.
+Briggs' optimistic algorithm delays spill decisions until it knows there are no colors available
+in the color selection phase. We control the selection of colors such that nodes in an alias set are
+limited to CRegs in one CReg set. The color selection stage scans through the range of colors,
+checking them against the colors of the node's neighbors. This loop is originally limited to the
+available colors, we further limit it based on the CReg set to which the node should be colored.
+For scalar objects, the limits remain the entire register file. If the node cannot be colored within
+the range of colors specified, spill code is inserted and the algorithm iterates.
+During color selection, we originally found that several alias sets frequently had one member
+allocated to a single CReg set. The remaining members of the alias sets often were not allocated
+because the CReg set was full. This is why find alias color(node) returns colors from CReg
+sets in a round-robin manner if the alias set is not fixed to a CReg set yet. This allows alias sets
+a better chance to be completely allocated to a CReg set. Multiple alias sets can still be allocated
+to one CReg set if they will fit.
+Our augmentation to Briggs' optimistic coloring is independent of the cost function making it
+compatible with other improvements [BGG89].
+Chaitin-style allocators (including Briggs') have heuristics that limit the insertion of spill code.
+For example, if all the USEs of the live range are "close" 5 to the DEF, the live range will not have
+spill code inserted. We override this in the case of DEFs of ambiguously aliased objects where a
+store always follows to keep memory updated.
+For small register files or where register pressure is high, more spill code may be generated in
+some cases with CRegs because different spill decisions are made. The interference graph has more
+nodes and edges than before due to the array live ranges. The heuristic coloring algorithm may
+make different decisions based on the interference graph topology and weights.
+3.4 Dependence and Pointer Analysis
+CReg hardware is complementary to compile time techniques to reduce ambiguous aliasing
+such as dependence and pointer analysis. These techniques are powerful but cannot always succeed
+5 Two mentions of a live range are "close" if no other live range goes dead between them [Cha82].
+in disambiguating all relevant references. When static techniques fail, CReg hardware provides a
+mechanism to detect aliasing at run time, retaining the advantages of register storage for aliased
+objects. For this study, no dependence or pointer analysis was implemented. For a maximal CReg
+set, pointer values can be allocated without analysis. If the CRegs are divided into sets, the analysis
+is required to group references into alias sets.
+4 Experimental Results
+4.1 Test
+Our test suite consists of several floating point SPEC '89 and '92 benchmarks, Livermore Loops,
+and a hydrodynamics code 6 . The benchmarks shown in Figure 6 are used to compare dynamic
+Maximal CReg Set Set Size 4
+Benchmark Subr. lines % loads % stores % instrs. % loads % stores % instrs.
+tomcatv 200 21.06 0.00 7.11 19.24 0.00 6.09
+doduc debico1 220 47.56 -0.31 2.90 49.02 -0.38 2.86
+doduc debico2 220 74.44 -0.12 13.75 75.33 -0.12 13.49
+doduc dcoera 287 9.00 0.00 -0.61 4.38 -1.79 -1.51
+doduc dyeh 253 4.21 0.00 0.00 1.05 0.00 0.00
+doduc yeh 372 11.22 -0.03 0.00 4.08 0.00 0.00
+Livermore Loops 862 8.39 -0.02 1.45 7.92 -0.07 1.23
+ppm 1096 21.17 -1.42 4.45 19.65 -1.57 4.29
+
+Figure
+
+Percent Reduction Summary for Register File Size of
+instruction counts for the allocation of objects to a conventional register file against allocating
+objects to a CReg register file. The compiler generates code for both the conventional and CReg
+register files; the simulator can simulate a conventional register file and CReg register file.
+The optimizing compiler, known as ccc, was developed at the University of Minnesota. The
+simulator can support a conventional or CReg register file for the Alpha architecture [DEC92,
+DEC93]. It is an instruction level simulator capable of giving dynamic instructions counts, but
+does not simulate the processor pipeline or cache and so cannot give actual cycle counts.
+To calculate the number of loads reduced by CRegs, two compilations and simulations are performed
+for each set of criteria being tested. The first compilation is targeted toward a conventional
+register file. When this is simulated on a conventional architecture, a certain number of instructions
+are executed and counted in categories (loads/stores/all instructions) as a baseline for comparison.
+The second compile allocates objects to CRegs and then is simulated with a CReg register file.
+The dynamic instruction counts are compared to get the reduction percentage.
+The x-axis of the plots is the number of registers available to the coloring algorithm for user
+variables in each of the register files (floating-point and integer). If the number of registers in the
+simulated machine is not an integer multiple of the CReg set size, the last CReg set will have fewer
+6 The ppm code was obtained from Dr. Paul Woodward at the University of Minnesota.
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+7: vpenta, maximal CReg set
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+8: vpenta, set size 451525
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+9: tomcatv, maximal CReg set51525
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+10: tomcatv, set size 4
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+11: L. Loops, maximal CReg set
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+12: L. Loops, set size 4
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+13: ppm, maximal CReg set
+reduction
+registers
+Dynamic Instruction Reduction
+loads
+stores
+instrs
+
+Figure
+
+14: ppm, set size 4
+members. Two plots are shown for each benchmark: one for a maximal CReg set and one for a
+CReg set size of four.
+4.2 Analysis
+We observed the following for the benchmarks shown:
+ffl The dynamic load reduction ranged from 0 to 75%.
+ffl The average reduction in memory operations with CRegs was 23.38%.
+ffl Small CReg sets cause only a slight increase in memory operations compared to a maximal
+CReg set.
+ffl The dynamic instruction count reduction varied from -0.6% to 13.75%.
+Increased register pressure presents fewer opportunities to reduce loads.
+Dynamic load reduction is due to squashed loads and direct removal of spill loads. For squashed
+loads, the memory operation does not occur (i.e. it is not counted as a load), but the instruction
+still counts in the total instructions executed. Fewer loads occur in the CReg code because more
+objects are allocated.
+The data shows that having a maximal CReg set gives a slightly better reduction in loads. The
+reduction in total instructions executed is slightly positive meaning that the reduction in loads for
+objects allocated to CRegs more than offsets the increased subroutine isolation code.
+Data for CReg set sizes of eight and sixteen is similar to size four and is not shown; the similarity
+is due to the low number of simultaneously live ambiguously aliased objects [Ste86]. The maximum
+number of writes and matches was measured by the simulator for all test cases. It never exceeded
+two for the benchmarks shown but theoretically it could be as large as the set size.
+Register pressure can be artificially increased by the compiler/simulator system by reducing
+the number of registers available. The effect of register pressure is shown in the graphs. Generally,
+more CRegs allow a larger percentage of loads to be removed. Obviously this effect levels out once
+all scalar and aliased objects have been allocated (Figure 7).
+As an example of how the program path and CRegs performance results are affected by input
+data, we ran debico for two different data sets. The results in Figure 6 show that this subroutine
+has frequent re-use of array values in CRegs accounting for the large load reduction in both data
+sets.
+The performance improvement due to CRegs depends on the cache hit and miss penalties, cache
+miss rates, and whether the memory operations removed hit or miss in the cache. For squashed
+and removed loads, the data is available earlier in the pipeline reducing the effective access latency.
+With a CRegs implementation, execution time is reduced for the following reasons:
+ffl There are generally fewer instructions executed.
+ffl There are fewer memory operations executed.
+ffl Overall data access latencies are reduced since more references are directly to registers.
+5 Summary and Future Work
+A register file composed of CRegs is one solution to the ambiguous alias problem. We have
+shown an instruction level implementation and explained the operation of the memory operations
+involved. Our CReg compiler works in conjunction with the CReg hardware to produce code
+that contains fewer load instructions and squashes some memory references dynamically. Live
+ranges are constructed for local and formal parameter array elements similar to those for scalars.
+These live ranges are grouped into alias sets using interprocedural alias analysis and local alias
+information. A simple modification to Briggs' optimistic coloring algorithm allows an interference
+graph augmented with alias information to be allocated to CRegs. The change involves limiting
+which colors are available to a node during the color selection phase of the algorithm. A round-robin
+scheme helps distribute alias sets among the CReg sets and averts deadlock situations which
+spill alias set members.
+This combined hardware and compiler strategy can significantly reduce dynamic instruction
+counts and memory traffic. This is becoming increasingly important as the gap between processor
+and memory speed increases. As processor clock speeds increase and memory accesses complete
+later in the pipeline, CRegs provides a mechanism to reduce the data access latency.
+We are currently exploring how CReg hardware can be integrated with implementation features
+such as register renaming and wide instruction issue (VLIW and superscalar). We intend to add
+pipeline and cache behavior to our simulator so that the effect of CRegs on execution time may be
+measured directly.
+In the future, we will be implementing better alias analysis; more aggressive algorithms will keep
+the alias set size small so that pointer values can be allocated without causing significant increases
+in spill code. The complexity of pointer analysis may limit this solution to an architecture with a
+maximal CReg set. One way to do this would be to add alias edges to the interference graph; an
+alias edge is present between two nodes if the nodes must be allocated to CRegs in the same CReg
+set.
+We are experimenting with the criteria that Briggs' algorithm uses for choosing trivially colorable
+nodes, namely degree ! k where k is the number of colors available. With a CReg set size
+of c, it may make sense to add the term degree A ! c to this criteria where degree A is the number
+of neighboring nodes in the same alias set (zero for scalars). We also intend to improve our spill
+code heuristic to remove stores under certain circumstances when all members of an alias set are
+allocated.
+
+Acknowledgments
+
+We would like to thank John Mejia for help with our Alpha simulator, Terence Parr for
+assistance with the PCCTS compiler construction tool, Peter Bergner for his help with the graph
+coloring algorithms and live range analysis, and James Smith from Cray Research for feedback on
+an early draft of this paper.
+
+
+
+--R
+
+
+Coloring heuristics for register allo- cation
+Spill code minimization techniques for optimizing compilers.
+Register Allocation via Graph Coloring.
+Single instruction stream parallelism is greater than two.
+Improving register allocation for subscripted vari- ables
+Register allocation and spilling via graph coloring.
+Unified management of registers and cache using liveness and cache bypass.
+An integrated memory management scheme for dynamic alias resolution.
+Analyzing aliases of reference formal parameters.
+
+
+A practical data flow framework for array reference analysis and its use in optimizations.
+CRegs: A new kind of memory for referencing arrays and pointers.
+Architectural support for register allocation in the presence of aliasing.
+Speculative disambiguation: A compilation technique for dynamic memory disambiguation.
+
+A CRegs implementation study based on the MIPS-X RISC microprocessor
+Implementing precise interrupts in pipelined processors.
+Refined C compiler status report.
+--TR
+Compilers: principles, techniques, and tools
+CRegs: a new kind of memory for referencing arrays and pointers
+Spill code minimization techniques for optimizing compliers
+Coloring heuristics for register allocation
+Unified management of registers and cache using liveness and cache bypass
+Architectural support for register allocation in the presence of aliasing
+An integrated memory management scheme for dynamic alias resolution
+Register allocation via graph coloring
+Analyzing aliases of reference formal parameters
+A CRegs Implementation Study Based on the MIPS-X RISC Processor
+Register allocation MYAMPERSANDamp; spilling via graph coloring
+
+--CTR
+Gary S. Tyson , Todd M. Austin, Improving the accuracy and performance of memory communication through renaming, Proceedings of the 30th annual ACM/IEEE international symposium on Microarchitecture, p.218-227, December 01-03, 1997, Research Triangle Park, North Carolina, United States
+Gary S. Tyson , Todd M. Austin, Memory Renaming: Fast, Early and Accurate Processing of Memory Communication, International Journal of Parallel Programming, v.27 n.5, p.357-380, Oct. 1999
+Jin Lin , Tong Chen , Wei-Chung Hsu , Pen-Chung Yew, Speculative register promotion using Advanced Load Address Table (ALAT), Proceedings of the international symposium on Code generation and optimization: feedback-directed and runtime optimization, March 23-26, 2003, San Francisco, California
+Matthew Postiff , David Greene , Trevor Mudge, The store-load address table and speculative register promotion, Proceedings of the 33rd annual ACM/IEEE international symposium on Microarchitecture, p.235-244, December 2000, Monterey, California, United States

@@ -1,0 +1,787 @@
+An expressive aspect language for system applications with Arachne
+ABSTRACT
+C applications, in particular those using operating system
+level services, frequently comprise multiple crosscutting concerns
+: network protocols and security are typical examples
+of such concerns. While these concerns can partially be addressed
+during design and implementation of an application,
+they frequently become an issue at runtime, e.g., to avoid
+server downtime. A deployed network protocol might not be
+efficient enough and may thus need to be replaced. Buffer
+overflows might be discovered that imply critical breaches in
+the security model of an application. A prefetching strategy
+may be required to enhance performance.
+While aspect-oriented programming seems attractive in
+this context, none of the current aspect systems is expressive
+and efficient enough to address such concerns. This
+paper presents a new aspect system to provide a solution to
+this problem. While efficiency considerations have played
+an important part in the design of the aspect language, the
+language allows aspects to be expressed more concisely than
+previous approaches. In particular, it allows aspect programmers
+to quantify over sequences of execution points as
+well as over accesses through variable aliases. We show how
+the former can be used to modularize the replacement of network
+protocols and the latter to prevent buffer overflows.
+We also present an implementation of the language as an
+extension of Arachne, a dynamic weaver for C applications.
+Finally, we present performance evaluations supporting that
+Arachne is fast enough to extend high performance applications
+, such as the Squid web cache.
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for profit or commercial advantage and that copies
+bear this notice and the full citation on the first page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior specific
+permission and/or a fee.
+AOSD 05 Chicago Illinois USA
+Copyright 2005 ACM
+1-59593-042-6/05/03 ...
+$
+5.00.
+INTRODUCTION
+Real-world applications typically comprise multiple crosscutting
+concerns. This applies, in particular, to C applications
+using operating system level services. We have exam-ined
+three concerns which are typical for this domain in the
+context of a large application, the open source web cache
+Squid [36]. More concretely, we have considered translation
+of network protocols (which may be necessary for efficiency
+reasons), insertion of checks for buffer overflows (which are
+at the heart of many of today's security issues), and introduction
+of prefetching strategies within the cache (which
+can be used to enhance efficiency of the web cache). We
+have found that all these concerns are scattered over large
+portions of the code of Squid.
+Hence, the three concerns are crosscutting in the sense
+of Aspect-Oriented Programming (AOP) [24] and aspects
+should therefore be a means of choice for their modularization
+. The concerns have three important characteristics.
+First, they must frequently be applied at runtime, e.g., in
+order to rapidly fix a buffer overflow and thus prevent security
+breaches without incurring server downtime. A dynamic
+aspect weaver is therefore needed. Second, they expose intricate
+relationships between execution points, e.g., network
+protocols are most concisely expressed in terms of sequences
+of execution points, not individual ones. The aspect system
+must therefore support expressive means for the definition of
+aspects, in particular pointcuts. Third, efficiency is crucial
+in the application domain we consider.
+To our knowledge, none of the current aspect systems for
+C meet these three requirements and is suitable for the modularization
+of such concerns. Moreover, requirements for
+dynamic weaving and efficiency often trade off with expressivity
+. Squid should be as efficient as possible and therefore
+exploit any suitable operating system and hardware particularity
+. Its code base is therefore difficult to understand and
+manipulate, thus hindering in particular modularization efforts
+. It is therefore highly questionable that the considered
+modularization problems can be solved without aspects.
+In this paper we propose a solution to the aspectization of
+such concerns of C applications. More concretely, we provide
+three main contributions. First, we provide a new expressive
+aspect language featuring a construct for quantification over
+sequences of execution points as well as over accesses to local
+aliases of global variables. We show how this aspect lan-27
+guage permits concise expression of the considered concerns
+as aspects. Second, we present how the aspect language can
+be implemented efficiently through runtime weaving into binary
+code. Concretely, this is done by integrating the aspect
+language into our tool Arachne, a dynamic weaver for C applications
+. Furthermore, we present how Arachne improves
+on our previous work µDyner [32]. Finally, we give evidence
+that our approach meets strong efficiency requirements by
+showing performance evaluations in the context of Squid.
+The paper is structured as follows. Section 2 presents the
+motivating concerns we identified within Squid. Section 3
+shows how to modularize these concerns as aspects and defines
+our aspect language. Section 4 describes its implementation
+within Arachne. Section 5 assesses the performance
+of our implementation. Section 6 describes related work.
+Section 7 concludes and suggests futures work.
+MOTIVATIONS
+Legacy C applications involve multiple crosscutting concerns
+. Many of them remain challenging, both in terms
+of expressiveness required to handle them properly in an
+aspect-oriented language and in terms of constraints posed
+on the weaver. This section describes three such concerns
+in C applications: switching the network protocol, buffer
+overflows and prefetching. The network protocol concern is
+typically scattered through the entire application. It is an
+issue when administrators discover at runtime that the retained
+protocol is not efficient enough. Likewise the security
+threats posed by buffer overflows is a real concrete problem
+for administrators. While guarding all buffers against overflows
+might decrease performance considerably, administrators
+are left with no other option than accepting the trade-off
+between security and performance chosen at application's
+design time. Prefetching is another well-known crosscutting
+concern [12]. Since prefetching aims at increasing performance
+, prefetching aspects make only sense with an efficient
+weaver. Yet, it is still difficult to modularize these three concerns
+in today's aspect-oriented language. In this section,
+we first describe the context in which the concerns arise before
+showing their crosscutting nature and finally explaining
+the lack in current aspect-oriented languages to handle them
+properly.
+2.1
+TCP to UDP protocol
+HTTP was essentially designed as a file transfer protocol
+running on top of TCP, a connection-oriented protocol
+ensuring communication reliability. While the average Web
+page size does not exceed 8 KB [4], the cost of retrieving
+a Web page is often dominated by data exchanged for control
+purposes of TCP rather than by the page content itself.
+This is not a new problem, many researches have already
+pointed out that TCP is not suitable for short-lived connections
+. While HTTP 1.1 has introduced persistent connections
+allowing a client to retrieve multiple pages from the
+same server through the same TCP connection, the number
+of simultaneous TCP connections is limited by operating
+systems. Servers have a strong incentive to close HTTP
+connections as soon as possible. Hence, despite the persistent
+connection mechanism, many studies conclude that
+TCP should be replaced by UDP to retrieve short pages [10,
+29, 7]. In spite of its performance improvements, the number
+of legacy Web applications has prevented a wide adoption
+of this solution. Typical legacy Web applications have to be
+listen
+accept
+read
+write
+close
+write
+read
+close
+connect
+socket
+Server
+Client
+TCP Protocol
+socket
+bind
+close
+close
+socket
+Server
+Client
+UDP Protocol
+recvfrom
+sendto
+recvfrom
+socket
+bind
+Network
+Network
+sendto
+Time
+Figure 1: Typical usage of the TCP and UDP APIs.
+stopped to switch the protocol. The traditional approach
+to avoid depriving a subnetwork from Internet connectivity
+while stopping the cache is to swap the application between
+different machines. This approach is not only expensive in
+terms of hardware, it complicates the administrative task of
+the Web cache administrator and poses the problem of con-sistently
+transferring the runtime state of the application
+before restarting it. Stopping an e-commerce Web server
+means a loss of money and many small companies can not
+afford the cost of redundant servers. For a wide acceptance,
+a HTTP dialect using UDP as transport protocol should
+thus be deployable on demand at runtime.
+In addition, replacing TCP by UDP in an application is
+relatively difficult. The choice of a transport protocol is
+usually based on standards believed to be ever-lasting and
+made at an early design stage. Hence no particular effort is
+made to localize this design decision in a single piece of code.
+For example, despite a modularization effort, the TCP API
+provided by the operating system is used directly in 7 of the
+104 ".c" source files of the Squid Web cache.
+As shown in Fig. 1, the TCP API is built around a set of
+C functions to be invoked sequentially by the application. In
+a properly written program, TCP functions are first used to
+establish the connection (typically with socket, connect,
+bind and listen), exchange data through the connection
+(typically with read and write) and then close it (typically
+close). UDP uses similar but less functions. UDP applications
+first direct the operating system to dedicate the appropriate
+resources to exchange data (typically with socket and
+bind), then exchange data through these resources (typically
+with sendto and recvfrom) before releasing them (typically
+with close). Hence, the problem is not only difficult because
+TCP-related function invocations are scattered but
+because the relative order of each invocation is important in
+order to map it onto the appropriate UDP function.
+This example is typical of protocol based APIs. When
+such an API is used in an undisciplined way, it becomes
+quickly impossible to replace it by another one. Today,
+aspect-oriented systems lack an appropriate sequencing construct
+in their language. Moreover, many do not provide the
+ability to weave aspects dynamically.
+2.2
+Buffer overflows
+In C, the size of an array is fixed at allocation time. According
+to ISO and ANSI standards [2], an invalid array
+access does not result in an immediate error but leads to
+an implementation-dependent behavior. Such behavior is
+increasingly exploited by hackers to circumvent security re-28
+strictions [37]. It is therefore crucial for C programmers to
+ensure every access to an array to be valid. On the other
+hand, bound checking code is error prone: it is easy to forget
+to check an access and even when the access is checked,
+it is easy to compare the index locating the access with an
+inappropriate bound. Therefore, researchers have proposed
+to make compilers responsible for enforcing proper array access
+[22, 31]. The problem is that even the most efficient
+system (CRED [31]) slows down an application up to 130%.
+Moreover, most frequently used compilers like gcc do not
+support bound checking.
+Today, administrators discovering a buffer overflow in production
+software are left with no other option than stopping
+the application and restarting a bug free version. This was
+the solution chosen when a buffer overflow was discovered
+in Squid in [6]. While widely used, this solution suffers from
+three major drawbacks. First, it does not enforce continuous
+servicing since the service delivered by the application is not
+available during the update. Second, this solution entails an
+important information loss: an administrator has no means
+to learn whether the buffer overflow has been exploited by
+a hacker or not. Third, it misunderstands the performance
+trade-off, i.e. it is not necessary to check every array access,
+it is only necessary to perform enough checking to discourage
+hackers. Therefore, bound checking code should only
+run when an environment becomes hostile [23].
+Bound checking code tends to crosscut the entire application
+. For example, properly written C functions accepting
+an array argument commonly take a second argument holding
+the array size: the first one allows the function to access
+the array while the second is used to ensure correctness of
+accesses. In Squid, bound checking code can be found in
+any of the 104 ".c" files of its source code. On the 57635
+lines composing these ".c" files, at least 485 check bounds.
+This problem fails to be handled properly in current aspect
+languages as they lack the ability to trigger advices
+upon access made through the alias of a variable. Again,
+many aspect-oriented systems offer only static weaving capabilities
+preventing the administrator to choose the trade-off
+security/performance suiting his needs.
+2.3
+From fetching to prefetching
+Operations like retrieving a file on a local disk or over the
+Web can be sped up if the underlying software anticipates
+user requests and start to fetch documents beforehand. Such
+prefetching schemes distinguish themselves from each other
+in the way they predict future user requests. These "ora-cles"
+actually prevent a clean encapsulation of prefetching
+in a single module communicating with the rest of the application
+through well-defined interfaces since predictions are
+based on information meant to be private to other modules.
+In addition, it is very likely that there is no universal perfect
+oracle [19]. A statically linked prefetching module is
+therefore inappropriate, but prefetching modules along with
+the necessary oracles should be loaded and unloaded on the
+fly. Due to their crosscutting nature, prefetching modules
+including such oracles are better written with aspects [32].
+Coady et al. have already pointed out the crosscutting
+nature of prefetching in the FreeBSD OS [12]. In our previous
+work considering the Squid Web cache, we reached a
+similar conclusion [32]. We have previously shown that this
+concern can be addressed with cflow-like constructs.
+Despite potential performance improvements, prefetching
+also increases resource consumption (e.g. network prefetching
+consumes local storage and bandwidth). When the pressure
+on resources is too high, prefetching computation competes
+for them against regular user requests, and slows down
+their treatment instead of speeding it up. In such cases,
+prefetching should therefore be, temporarily, disabled. Squid
+essentially manages file descriptors, a resource only available
+in a limited quantity. A file descriptor is used between the
+underlying operating system and applications to describe a
+network connection or a file on the disk. Squid's file descriptor
+management is based on a global variable that tracks the
+number of file descriptors currently in use. By comparing
+its value with the maximum number of file descriptors allowed
+by the operating system, it is possible to estimate that
+prefetching should be disabled or resumed.
+For this problem of file descriptor consumption, the current
+practice of checking if prefetching should be disabled or
+not within the advice, is a bad practice that impedes both
+readability and maintainability. A mechanism is needed
+within the aspect language to restraint the advice execution
+at times where the pressure on resources is too high.
+This problem were not addressed in our previous work.
+AN EXPRESSIVE ASPECT LANGUAGE FOR SYSTEM PROGRAMMING IN C
+While AOP seems to be the obvious choice to tackle the
+crosscutting concerns introduced above, none of the existing
+AO systems provides explicit support for some of their essential
+elements, in particular, join point sequences for protocols
+, and references to aliases which are local to a function.
+In this section we introduce a new aspect language for
+system programming in C that allows such crosscutting concerns
+to be expressed concisely. In order to make this point,
+we first revisit the examples by concisely aspectizing them
+using our language. (Note that our aspect language is expressive
+in the sense of enabling the concise definition of certain
+types of aspects, especially compared to other tools for
+system-level manipulations, but not necessarily more expressive
+than existing approaches in a language-theoretic sense.)
+We then define the join point model underlying our language
+precisely, followed by the definition of its syntax and informal
+semantics. Finally, we illustrate how its semantics can
+be formally defined in terms of a small-step operational semantics
+using the framework introduced in [14].
+3.1
+Example crosscutting concerns revisited
+We now revisit the concerns discussed in section 2 in order
+to show our language in action and give evidence that it
+allows such concerns to be concisely modularized.
+The aspect shown in Fig. 2 translates transport protocols
+from TCP to UDP. A protocol defines a sequence of function
+calls, so the top-level operator of this aspect is seq.
+The sequence aspect syntactically consists of a list of pairs
+of pointcut and advice (separated by then). In the example
+, the TCP protocol starts with a call to socket() with
+three constant arguments: AF INET, SOCK STREAM and
+0. When such a call is matched, the second parameter is
+replaced by SOCK DGRAM as required by the UDP protocol
+. The result of this transformed call, the file descriptor,
+is bound to fd by return(fd). Then the next call to connect
+() with the same file descriptor fd as its first parameter
+is matched. In this case the values of the other parameters
+29
+seq( call(int socket(int, int, int)) && args(AF INET, SOCK STREAM, 0) && return(fd)
+then socket(AF INET, SOCK DGRAM, 0);
+call(int connect(int, struct socketaddr, socklen t)) && args(fd, address, length)
+then returnZero();
+// where int returnZero() { return 0; }
+( call(size t read(int, void, size t)) && args(fd, readBuffer, readLength)
+then recvfrom(fd, readBuffer, readLength, 0, address, length);
+|| call(size t write(int, void, size t)) && args(fd, writeBuffer, writeLength)
+then sendto(fd, writeBuffer, writeLength, 0, address, length); )
+call(int close(int)) && args(fd) ; )
+Figure 2: An Aspect for Switching Transport Protocols, from TCP to UDP
+seq( call(void  malloc(size t))
+&& args(allocatedSize) && return(buffer) ;
+write(buf f er) && size(writtenSize)
+&& if(writtenSize &gt; allocatedSize)
+then reportOverflow ();
+call(void free(void)) )
+Figure 3: An Aspect for Detecting Buffer Overflow
+are bound to arguments address and length, and the original
+call is replaced by returnZero(). Indeed, there is no connect
+step in the UDP protocol. After that, calls to read() and
+write() (using the `or' on aspects: ||) on the same file descriptor
+fd are translated to UDP recvfrom() and sendto(),
+respectively. Note that sequences of such access are potentially
+translated (due to use of the repetition operator ).
+Finally, a call to close() on fd terminates the TCP protocol
+as well as the UDP protocol and thus is not modified (i.e.,
+there is no then clause). This last step is required to free
+the variables used in the sequence (here, fd, address and
+length). Indeed, this aspect can use numerous (instances of
+these) variables when it deals with interleaved sequences, as
+each call to socket() creates a new instance of the sequence.
+The aspect shown in Fig. 3 detects buffer overflows. The
+corresponding sequence starts when the function malloc()
+returns the buffer address which is then bound to buffer.
+Then, each time this address is accessed (through a global
+variable or a local alias) the size of the data to be written is
+compared with the size of the initially allocated memory. If
+the former exceeds the latter, an overflow is indicated. The
+sequence ends when the memory is deallocated using free().
+The aspect in Fig. 4 introduces prefetching in a web cache.
+The first controlflow phrase initializes prefetching when
+an HTTP response is built (clientBuildReply()) within the
+control flow of a client request (clientSendMoreData()). The
+until clause stops prefetching when the number of connection
+becomes too large, a situation where prefetching would
+effectively degrade performance. The second controlflow
+phrase analyzes hyperlinks in a page being transmitted (i.e.,
+when comm write mbuf() is called within the control flow
+of clientSendMoreData()). Finally, the last call phrase pre-fetches
+hyperlinks analyzed by the second aspect. It does so
+by replacing the method call to clientWriteComplete() with
+retrieveHyperlinks(). Finally, note that the two require
+clauses at the top of the aspect declare the types of the
+global variables of the base program used in the aspects.
+3.2
+Join points
+A join point model defines the points in the execution
+of the base program to which pointcuts may refer. In our
+JP
+::= callJP(val funId(val
+))
+|
+readGlobalJP(varId, val)
+|
+readJP(@, val)
+|
+writeGlobalJP(varId, val, size)
+|
+writeJP(@, val, size)
+|
+controlflowJP(---f
+unId, cfEnd)
+|
+controlflowstarJP(---f
+unId, cfEnd)
+cf End ::= callJP(val funId(val
+))
+|
+readGlobalJP(varId, val)
+|
+writeGlobalJP(varId, val, size)
+val
+::= 0 | 1 | 2 | ...
+// int
+|
+@0 | @1 | @2 | ... // int*
+|
+... // values of other C types
+Figure 5: Join point model
+case, join points are defined by JP in the grammar shown
+in Fig. 5. A join point is either:
+· A call of a function callJP(v
+1
+funId(
+v
+2
+)) with function
+name funId, return value v
+1
+and a vector of arguments 
+v
+2
+.
+· A
+read
+access
+which
+comes
+in
+two
+variants:
+readGlobalJP(varId, v) denotes reading a global variable
+with name varId holding the value v ; readJP(@, v)
+denotes reading a global variable or a local alias with
+address @ holding the value v .
+· Write access which also comes in two variants:
+writeGlobalJP(varId, v, size) denotes assignment to a global
+variable with name varId of the value v of size size.
+writeJP(@, v, size) denotes assignment to a global variable
+or a local alias with address @ of the value v of size size.
+· A cflow expression controlflowJP(---f
+unId, c), where
+---f
+unId = [funId
+1
+, .., funId
+n
+] is a stack of function names, and
+c (either a function call or an access to a global variable) occurs
+within the body of function f unId
+n
+. Such a join point
+requires a call to f unId
+i+1
+within the body of f unId
+i
+.
+· A cflow expression controlflowstarJP(---f
+unId, c), where
+---f
+unId = [funId
+1
+, .., funId
+n
+] is a partial stack of function
+names, and c (either a function call or an access to a global
+variable) occurs within the control flow of function f unId
+n
+.
+Such a join point requires a call to f unId
+i+1
+within the
+control flow of (i.e., not necessarily in the body of) f unId
+i
+.
+Two features of this join point model may be surprising
+at first sight: distinction of accesses to aliases from those to
+global variables and explicit representation of control flow
+30
+require N umber Of F d as int;
+require Squid M axF d as int;
+controlflow(call(void clientSendMoreData(void, char, size t)),
+call(HttpReply  clientBuildReply(clientHttpRequest, char, size t))
+&& args( request, buf f er, buf f erSize ))
+then startPrefetching(request, buffer, bufferSize);
+&& until(writeGlobal(int  N umber Of F d) && if((N umber Of F d)  100/(Squid M axF d)  75) ; )
+controlflow( call(void clientSendMoreData(void, char, size t)),
+call(void comm write mbuf(int, MemBuf, void, void))
+&& args(fd, mb, handler, handlerData) && if(! isP ref etch(handler)) )
+then parseHyperlinks(fd, mb, handler, handlerData);
+call(void clientWriteComplete(int, char, size t, int, void))
+&& args(fd, buf, size, error, data) && if(! isP ref etch(handler))
+then retrieveHyperlinks(fd, buf, size, error, data);
+Figure 4: An Aspect for Prefetching
+expressions. Both are motivated by our quest for efficiency
+and are grounded in strong implementation constraints in
+the context of dynamic weaving of binary C code: an access
+to a local alias is several magnitudes slower than that to a
+global variable and matching of control flow join points can
+be done using an atomic test on the implementation level.
+3.3
+Pointcuts
+We now present a pointcut language (see Fig. 6) that provides
+constructs to match individual join points.
+Primitive pointcuts are defined by PPrim and comprise
+three basic pointcuts matching calls, global variable accesses,
+and control flow join points. Primitive pointcuts can also be
+combined using a logical "or" noted ||.
+A call pointcut PCall selects all function call join points
+callJP(val funId(val
+)), i.e., all calls to a function matching
+the signature type funId(-type
+), where the arguments of the
+function can be bound to pointcut variables using argument
+binder args( ----pattern
+) and the return value can be bound to
+a pointcut variable using a return clause return( pattern ).
+The two constructs args( ----pattern
+) and return( pattern )
+can also provide pattern matching by using values (or already
+bound pointcut variables) in pattern. Pointcuts can
+also depend on a boolean condition using the if-constructor.
+A global access pointcut PAccGlobal selects either all read
+join points readGlobalJP(varId, val) or all write join points
+writeGlobalJP(varId, val, size) on the global base program
+variable varId. In these cases, the read or written value can
+be bound to a variable using value(pattern); in addition, the
+size of the written value can be bound with size(varName).
+Pattern matching can also be used for variable access.
+A control flow pointcut PCf of the form controlflow(
+PCallSig
+1
+, ..., PCallSig
+n
+, PCfEnd) matches all join points
+of the form controlflowJP(funId
+1
+, ..., funId
+n
+, cfEnd), where
+the function identifier in P CallSig
+i
+is f unId
+i
+. Similarly, a
+control flow pointcut may match a global variable access
+for a given stack configuration. The pointcuts of the form
+controlflowstar(. . . ) select calls or global variable accesses
+in a stack context allowing for calls that are not directly
+nested within one another.
+Finally, P Acc, an access pointcut for a global variable or
+all of its local aliases, matches all join points of the form
+readJP or writeJP.
+Asp
+::= AspP rim [ && until( AspP rim ) ]
+|
+AspSeq [ && until( AspP rim ) ]
+AspP rim
+::= P P rim Advice
+AspSeq
+::= seq( AspP rim
+AspSeqElts
+AspSeqElt )
+AspSeqElts ::= [AspSeqElts] AspSeqElt [  ]
+AspSeqElt ::= AspP rim
+|
+P Acc Advice
+|
+(AspSeqElt || AspSeqElt)
+Advice
+::= [ then f unId(----pattern
+) ] ;
+Figure 7: Aspect language
+3.4
+Aspect Language
+The aspect language we propose is defined in Fig. 7. Aspects
+Asp are either primitive AspP rim, or sequences of
+primitive aspects AspSeq.
+A primitive aspect AspPrim combines a primitive pointcut
+with an advice that will be applied to all join points
+selected by the pointcut. If the primitive pointcut has the
+form p
+1
+|| p
+2
+, then all variables used in the advice have to
+be bound in both, p
+1
+and p
+2
+.
+An advice (Advice) is a C function call that replaces a join
+point in the base program execution (similarly to around in
+AspectJ). It must have the same return type as the join
+point it replaces: the type of the global variable in case of a
+read access, void for a write access and the return type of
+the function for a call. When the advice is empty (no then
+clause), the original join point is executed. The original join
+point can be skipped by calling an empty C function.
+A sequence aspect is composed of a sequence of primitive
+aspects. A sequence starts when the first primitive aspect
+matches. Then the second primitive aspect becomes active
+instead of the first one. When it matches, the third aspect
+becomes active instead of the second one. And so on, until
+the last primitive aspect in the sequence. All but the first
+and last primitive aspects can be repeated zero or multiple
+times by using : in this case, the primitive aspect is ac-31
+P P rim
+::= P Call
+|
+P AccGlobal
+|
+P Cf
+|
+P P rim || P P rim
+P Call
+::= P CallSig [ && args( ----pattern
+) ] [ && return( pattern ) ] [ && P If ]
+P CallSig
+::= call( type f unId(-type
+) )
+P If
+::= if( expr ) [ && P If ]
+P AccGlobal
+::= readGlobal( type varId ) [ && value( pattern ) ] [ && P If ]
+|
+writeGlobal( type varId ) [ && value( pattern ) ] [ && size( pattern ) ] [ && P If ]
+P Cf
+::= controlflow( P CallSigList, P Cf End )
+|
+controlflowstar( P CallSigList, P Cf End )
+P CallSigList ::= P CallSig [ , P CallSigList ]
+P Cf End
+::= P Call | P AccGlobal
+P Acc
+::= read( var ) [ && value( pattern ) ] [ && P If ]
+|
+write( var ) [ && value( pattern ) ] [ && size( pattern ) ] [ && P If ]
+pattern
+::= var | val
+Figure 6: Pointcut language
+A
+::= A
+|
+A || A
+; parallelism
+A
+::= µa.A
+; recursive definition (a  Rec)
+|
+C £ I; A
+; prefixing
+|
+C £ I; a
+; end of sequence (a  Rec)
+|
+C £ I; STOP ; halting aspect
+|
+A P A
+; choice
+Figure 8: Tiny aspect language
+tive as long as the following one in the sequence does not
+match. Branching, i.e., a logical `or' between two primitive
+aspects, can be introduced in a sequence by the operator ||.
+An element of the sequence can also match a global variable
+of the base program and accesses to its local aliases, as
+soon as its address is known (i.e., a previous primitive pointcut
+has already bound its address to a pointcut variable).
+Hence, an aspect matching accesses cannot start a sequence.
+Every join point matching the first primitive pointcut of a
+sequence starts a new instance of the sequence. The different
+instances are matched in parallel.
+A primitive or a sequence aspect a can be used in combination
+with an expression until(a
+1
+), to restrict its scope. In
+this case, once a join point has been matched by a, the execution
+of a proceeds as previously described until a
+1
+matches.
+To conclude the presentation of our language, note that it
+does not include some features, such as named pointcuts as
+arguments to controlflows and conjunctive terms, which
+are not necessary for the examples we considered but which
+could easily be added. (As an aside, note that such extensions
+of the pointcut language may affect the computability
+of advanced algorithmic problems, such as whether a pointcut
+matches some part of any base program [25].)
+3.5
+Towards a formal semantics for expressive
+aspects
+In the previous sections, we have given an informal semantics
+of our aspect language. We now illustrate how the
+aspect language could be formally defined by translating one
+of the example aspects into formal aspect language by extension
+of that used in the formal framework of [14].
+The original formal language must be extended in order to
+deal with halting aspects, an unbounded number of sequential
+aspects and arbitrary join point predicates. The grammar
+of the extension, our tiny aspect language, is defined in
+Figure 8. In this language, aspect expressions A consists of
+parallel combinations of aspects, C is a join point predicate
+(similar to our pointcut language) expressed as a conjunction
+of a term pattern and possibly an expression from the
+constraint logic programming language CLP(R) [20].
+An aspect A is either:
+· A recursive definition.
+· A sequence formed using the prefix operation C £ I ; X,
+where X is an aspect or a recursion variable and I a piece
+of code (i.e., an advice).
+· A choice construction A
+1
+P A
+2
+which chooses the first
+aspect that matches a join point (the other is thrown away).
+If both match the same join point, A
+1
+is chosen.
+· A parallel composition of two aspects A
+1
+||
+A
+2
+that
+cannot occur in choice construction.
+· A halting aspect STOP.
+The semantics of the protocol translation aspect (from
+TCP to UDP) is given in Fig. 9. A sequence can have several
+instances. This is translated into the language A by the
+expression a
+1
+|| ... which starts a new sequence a
+1
+once
+the first join point has been matched and continue to match
+the rest of the sequence in progress. The repetition operator
+ is translated into recursion on variable the a
+2
+. The
+branching operator || is translated into the choice operator
+32
+µa
+1
+. callJP(fd socket(AF INET, SOCK STREAM, 0)) £ socket(AF INET, SOCK DGRAM, 0);
+a
+1
+|| ( callJP(a connect(fd, address, length)) £ returnZero();
+µa
+2
+. callJP(b close(fd)) £ skip; STOP
+P callJP(c read(fd, readBuffer, readLength)) £ recvfrom(fd, readBuffer, readLength, 0, address, length); a
+2
+P callJP(d write(fd, writeBuffer, writeLength)) £ recvfrom(fd, writeBuffer, writeLength, 0, address, length); a
+2
+Figure 9: De

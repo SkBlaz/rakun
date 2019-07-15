@@ -1,0 +1,559 @@
+--T
+Parallel Hierarchical Solvers and Preconditioners for Boundary Element Methods.
+--A
+The method of moments is an important tool for solving boundary integral equations arising in a variety of applications. It transforms the physical problem into a dense linear system. Due to the large number of variables and the associated computational requirements, these systems are solved iteratively using methods such as GMRES and CG and its variants. The core operation of these iterative solvers is the application of the system matrix to a vector. This requires $\theta(n^2)$ operations and memory using accurate dense methods. The computational complexity can be reduced to $O(n \log n)$ and the memory requirement to $\Theta(n)$ using hierarchical approximation techniques. The algorithmic speedup from approximation can be combined with parallelism to yield very fast dense solvers. In this paper, we present efficient parallel formulations of dense iterative solvers based on hierarchical approximations for solving potential integral equations of the first kind. We study the impact of various parameters on the accuracy and performance of the parallel solver. We demonstrate that our parallel formulation incurs minimal parallel processing overhead and scales up to a large number of processors. We present two preconditioning techniques for accelerating the convergence of the iterative solver. These techniques are based on an inner-outer scheme and a block-diagonal scheme based on a truncated Green's function. We present detailed experimental results on up to 256 processors of a Cray T3D. Our code achieves raw computational speeds of over 5 GFLOPS. When compared to the accurate solver, this corresponds to a speed of approximately 776 GFLOPS.
+--B
+Introduction
+The method of moments [12] is a popular method for solving integral equations. It has
+extensive applications in computational electromagnetics, wave propagation, and heat
+transfer [22, 21, 3, 11]. It transforms a physical problem defined as an integral equation
+into a dense linear system. The integral equation is termed a volume or a boundary integral
+equation depending on whether the variables are defined on the volume or the surface of
+the modeled object. In this paper, we address the solution of boundary integral equations
+over complex 3-D objects.
+Modeling arbitrarily complex 3-D objects may require a large number of boundary el-
+ements. For such objects, the boundary element method results in dense linear systems
+with hundreds of thousands of unknowns. The memory and computational requirements
+of solving these systems are formidable. Iterative solution techniques such as Generalized
+Minimal Residual (GMRES) [18] are the method of choice. The memory and computational
+requirements of these solvers grow as \Theta(n 2 ) per iteration. Solving systems with
+10K variables in this manner can challenge most current supercomputers. The memory
+requirements of these methods can be reduced by not forming the coefficient matrix ex-
+plicitly. In addition, hierarchical algorithms such as the Fast Multipole Method (FMM) and
+related particle dynamics methods allow us to reduce the computational complexity of each
+iteration.
+Approximate hierarchical techniques have received a lot of attention in the context of
+particle simulations. Given a system with n particles, if each particle influences every
+other particle in the system, a total of n 2 interactions must be computed. However, in most
+physical systems, the influence of a particle on another diminishes with the distance. In
+such systems, it is possible to aggregate into a single expression, the impact of several
+particles on another distant particle. Using this approach, the total number of interactions
+in the system can be reduced significantly. This forms the basis of hierarchical methods.
+These methods provide systematic ways of aggregating entities and computing interactions
+while controlling the overall error in modeling. Algorithms based on hierarchical techniques
+include Barnes-Hut [2], Fast Multipole [10], and Appel's [1] algorithms. Approximating long
+range interactions in this manner reduces the sequential complexity of typical simulations
+involving n particles from O(n 2 ) to O(n log n) or O(n).
+Clearly, the reduced computational complexity of hierarchical methods represents a
+significant reduction in the time for solving the system. However, modeling hundreds of
+thousands of boundary elements still take an inordinately large amount of time on conventional
+serial computers. Parallel processing offers a tool for effectively speeding up this
+computation. It enables us to solve problems with a large number of elements and to increase
+the accuracy of simulation by incorporating a higher precision into the approximate
+hierarchical mat-vec. Parallel formulations of hierarchical methods involve partitioning the
+domain among various processors with the combined objectives of optimizing communication
+and balancing load. If particle densities are uniform across the domain, these
+objectives are easily met [4, 25, 13, 19, 9]. For irregular distributions, these objectives are
+hard to achieve because of the highly unstructured nature of both computation and commu-
+nication. Singh et al. [20] and Warren and Salmon [24, 23] presented schemes for irregular
+distributions that try to meet these objectives. In [6, 8, 5] we presented alternate schemes
+for irregular distributions that improve on the performance of the earlier schemes. In [7, 5],
+we used parallel hierarchical techniques for computing dense matrix-vector products and
+studied the impact of various parameters on accuracy and performance.
+An important aspect of using iterative solvers for solving large systems is the use of
+effective preconditioning techniques for accelerating the convergence. The use of hierarchical
+methods for computing matrix-vector products and parallel processing has significant
+implications on the choice of preconditioners. Since the system matrix is never explicitly
+constructed, preconditioners must be derived from the hierarchical domain representation.
+Furthermore, the preconditioning strategies must be highly parallelizable.
+Since the early work of Rokhlin[16], relatively little work has been done on dense
+hierarchical solvers even in the serial context [14, 17, 22, 3]. In this paper, we investigate
+the accuracy and convergence of a GMRES solver built around a parallel hierarchical
+matrix-vector product. We investigate the impact of various parameters on accuracy and
+performance. We propose two preconditioning strategies for accelerating the convergence
+of the solver. These preconditioners are based on an inner-outer scheme and a truncated
+Green's function. We demonstrate the excellent parallel efficiency and performance of our
+solver on a 256 processor Cray T3D.
+The rest of the paper is organized as follows: Section 2 presents a brief overview of
+hierarchical methods and their use in solving integral equations; Section 3 describes parallel
+formulations of hierarchical methods; Section 4 describes preconditioning techniques;
+Section 5 presents experimental results on a Cray T3D; and Section 6 draws conclusions
+and outlines ongoing research.
+Hierarchical Methods for Solving Integral Equations
+Boundary Element Methods (BEM) solve integral equations using potential theory. These
+methods discretize the boundary of the domain into panels. Using the associated Green's
+function, the potential at each panel is represented as a sum of contributions of every
+other panel. Applying the Dirichlet boundary conditions yields a large scale linear system
+of equations. For an n basis boundary discretization, the n \Theta n linear system arising from
+this approach is dense. Iterative solution of this system requires the application of the
+system matrix on a vector in each iteration. This process is facilitated by the fact that
+the coupling coefficient between any two boundary elements (the Green's function of the
+integral equation) is a diminishing function of the distance r between the elements. For
+instance, for the Laplace equation, the Green's function is 1=r in three dimensions and
+log(r) in two dimensions. Both of these functions are decreasing functions of distance
+r. This allows us to aggregate the impact of several boundary elements into a single
+expression and apply them in constant time. This is similar in principle to a single iteration
+of the n-body algorithm[5].
+The integrals over boundary elements are performed using Gaussian quadrature. For
+nearby elements, a higher number of Gauss points have to be used for desired accuracy.
+For computing coupling coefficients between distant basis functions, fewer Gauss points
+may be used. In the simplest scenario, the far field is evaluated using a single Gauss
+point. Assuming triangular surface elements, this process involves computing the mean
+of basis functions of the triangle and scaling it with the area of the triangle. Computing a
+matrix-vector product in this manner involves the following steps:
+1. Construct a hierarchical representation of the domain: In the particle simulation
+method, particles are injected into an empty domain. Every time the number of
+particles in a subdomain exceeds a preset constant, it is partitioned into eight octs.
+In this manner an oct tree structure is computed. In the boundary element method,
+the element centers correspond to particle coordinates. The oct-tree is therefore
+constructed based on element centers. Each node in the tree stores the extremities
+along the x, y, and z dimensions of the subdomain corresponding to the node.
+2. The number of particles in the tree corresponding to the boundary element method is
+equal to the product of the number of boundary elements and the number of Gauss
+points in the far field. In the case of a single Gauss point in the far field, the multipole
+expansions are computed with the center of the triangle as the particle coordinate
+and the mean of basis functions scaled by triangle area as the charge. (In addition to
+a single Gauss point, our code also supports three Gauss points in the far field).
+3. For computing the matrix-vector product, we need to compute the potential at each
+of the n basis functions. This is done using a variant of the Barnes-Hut method.
+The hierarchical tree is traversed for each of the boundary elements. If a boundary
+element falls within the near field of the observation element, integration is performed
+using direct Gaussian quadrature. The code provides support for integrations using
+3 to 13 Gauss points for the near field. These can be invoked based on the distance
+between the source and the observation elements. The contribution to the basis
+functions of the observation element are accrued. The far-field contributions are
+computed using the multipole expansions. The ff criterion of the Barnes-Hut method
+is slightly modified. The size of the subdomain is now defined by the extremities of all
+boundary elements corresponding to the node in the tree. This is unlike the original
+Barnes-Hut method which uses the size of the oct for computing the ff criterion.
+3 Parallel GMRES Using Hierarchical Matrix-Vector Products
+We implement a parallel formulation of a restart GMRES [18] algorithm. The critical
+components of the algorithm are: product of the system matrix A with vector x n
+, and dot
+products. All vectors are distributed across the processors with the first n=p elements
+of each vector going to processor P 0
+, the next n=p to processor P 1
+and so on. The
+matrix-vector product is computed using the parallel hierarchical treecode. The parallel
+treecode comprises of two major steps: tree construction (the hierarchical representation
+of the domain) and tree traversal. Starting from a distribution of the panels to processors,
+each processor constructs its local tree. The set of nodes at the highest level in the tree
+describing exclusive subdomains assigned to processors are referred to as branch nodes.
+Processors communicate the branch nodes in the tree to form a globally consistent image
+of the tree.
+Each processor now proceeds to compute the potential at the panels assigned to it by
+traversing the tree. On encountering a node that is not locally available, there are two possible
+scenarios: the panel coordinates can be communicated to the remote processor that
+evaluates the interaction; or the node can be communicated to the requesting processor.
+We refer to the former as function shipping and the latter as data shipping. Our parallel
+formulations are based on the function shipping paradigm. We discuss the advantages of
+function shipping in [5, 7].
+The load-balancing technique is an efficient implementation of the costzones scheme
+on message-passing computers. Each node in the tree contains a variable that stores the
+number of boundary elements it interacted with in computing a previous mat-vec. After
+computing the first mat-vec, this variable is summed up along the tree. The value of load
+at each node now stores the number of interactions with all nodes rooted at the subtree.
+The load is balanced by an in-order traversal of the tree, assigning equal load to each
+processor. Figure 1 illustrates the parallel formulation of the Barnes-Hut method. Since
+the discretization is assumed to be static, the load needs to be balanced just once.
+The parallel formulation assigns boundary elements (and the associated basis func-
+tions) to processors. This has two implications: multiple processors may be contributing
+to the same element of the matrix-vector product; and, the mapping of basis functions to
+processors may not match the partitioning assumed for the GMRES algorithm. Both of
+these problems are solved by hashing the vector elements to the processor designated by
+the GMRES partitioning. The destination processor has the job of accruing all the vector
+elements (adding them when necessary). The communication is performed using a single
+all-to-all personalized communication with variable message sizes[15].
+(all-to-all broadcast)
+Insert branch nodes and
+recompute top part
+Traverse local tree and
+where needed insert into
+remote processor buffer
+Send buffer to corresponding
+Broadcast branch nodes
+processors when full
+messages and process them
+Force
+computation
+Tree
+construction
+Aggregate loads up
+local tree
+periodically check for pending
+branch nodes
+Broadcast loads of
+nodes in local tree
+Aggregate top-level loads
+(After this, the root node
+at each processor has total
+load W)
+Within each processor's domain,
+locate nodes that correspond to
+load W/p, 2W/p and so on
+from the left
+From this, determine destination
+of each point
+Communicate points using
+all-to-all personalized
+communication
+Insert loads of branch
+Assume an initial particle distribution
+Construct local trees
+branch nodes
+Balance load and move particles
+(b) Balancing load and communicating
+particles.
+For each particle
+(a) schematic of parallel algorithm
+
+Figure
+
+1: Schematic of the parallel treecode formulation and load balancing technique.
+Preconditioning Techniques for Iterative Solver
+In this section we present preconditioning techniques for the iterative solver. Since the
+coefficient matrix is never explicitly computed, preconditioners must be constructed from
+the hierarchical representation of the domain or the limited explicit representation of the
+coefficient matrix. This forms the basis for the two preconditioners.
+4.1 Inner-Outer Schemes
+The hierarchical representation of the domain provides us with a convenient approximation
+of the coefficient matrix. Increasing the accuracy of the matrix-vector product increases the
+number of direct interactions (and thus the runtime). Conversely, reducing the accuracy
+reduces the runtime. It is therefore possible to visualize a two level scheme in which the
+outer solve (to desired accuracy) is preconditioned by an inner solve based on a lower
+resolution matrix-vector product.
+The accuracy of the inner solve can be controlled by the ff criterion of the matrix-vector
+product or the multipole degree. Since the top few nodes in the tree are available to all
+the processors, these matrix-vector products require relatively little communication. The
+degree of diagonal dominance determines the method for controlling accuracy. When the
+coefficient matrix is highly diagonally dominant (as is the case with many applications), a
+high value of ff is desirable. This ensures minimum communication overheads. However,
+if the matrix is not very diagonally dominant, it is more desirable to use lower values of ff
+with correspondingly lower values of multipole degrees.
+It is in fact possible to improve the accuracy of the inner solve by increasing the multipole
+degree or reducing the value of ff in the inner solve as the solution converges. This can
+be used with a flexible preconditioning GMRES solver. However, in this paper, we present
+preconditioning results for a constant resolution inner solve.
+4.2 Truncated Green's Function
+A primary drawback of the two level scheme is that the inner iteration is still poorly condi-
+tioned. The diagonal dominance of many problems allows us to approximate the system by
+truncating the Green's function. For each leaf node in the hierarchical tree, the coefficient
+matrix is explicitly constructed assuming the truncated Green's function. This is done by
+using a criteria similar to the ff criterion of the Barnes-Hut method as follows: Let constant fi
+define the truncated spread of the Green's function. For each boundary element, traverse
+the Barnes-Hut tree applying the multipole acceptance criteria with constant fi to the nodes
+in the tree. Using this, determine the near field for the boundary element corresponding
+to the constant fi. Construct the coefficient matrix A 0 corresponding to the near field. The
+preconditioner is computed by direct inversion of the matrix A 0 . The approximate solve for
+the basis functions is computed as the dot-product of the specific rows of and the
+corresponding basis functions of near field elements.
+The number of elements in the near field is controlled by a preset constant k. The
+closest k elements in the near field are used for computing the inverse. If the number
+of elements in the near field is less than k, the corresponding matrix is assumed to be
+smaller. It is easy to see that this preconditioning strategy is a variant of the block diagonal
+preconditioner.
+A simplification of the above scheme can be derived as follows. Assume that each
+leaf node in the Barnes-Hut tree can hold up to s elements. The coefficient matrix corresponding
+to the s elements is explicitly computed. The inverse of this matrix can be used
+to precondition the solve. The performance of this preconditioner is however expected to
+be worse than the general scheme described above. On the other hand, computing the
+preconditioner does not require any communication since all data corresponding to a node
+is locally available.
+This paper reports on the performance of the general preconditioning technique based
+on truncated Green's function (and not its simplification).
+5 Experimental Results
+The objectives of this experimental study are as follows:
+ffl Study the error and parallel performance of iterative solvers based on hierarchical
+matrix-vector products.
+ffl Study the impact of the ff criterion and multipole degree on the accuracy and performance
+of the solver.
+ffl Study the impact of the number of Gauss points in the far field on the performance.
+ffl Study the preconditioning effect (iteration count and solution time) of the preconditioners
+and their impact on parallel performance.
+In this section, we report on the performance of the GMRES solver and the preconditioning
+techniques on a Cray T3D with up to 256 processors. A variety of test cases
+with highly irregular geometries were used to evaluate the performance. The solver and
+preconditioner were tested on a sphere with 24K unknowns and a bent plate with 105K
+unknowns.
+The experimental results are organized into three categories: performance (raw and
+parallel efficiency) of the solver, accuracy and stability of the solver, and preconditioning
+techniques.
+Problem
+Runtime Eff. MFLOPS Runtime Eff. MFLOPS
+pscan 3.74 0.93 1352 1.00 0.87 5056
+28060 0.53 0.89 1293 0.16 0.75 4357
+
+Table
+
+1: Runtimes (in seconds), efficiency, and computation rates of the T3D for different
+problems for
+5.1 Performance of Matrix-Vector Product
+The most computation intensive part of the GMRES method is the application of the
+coefficient matrix on a vector. The remaining dot products and other computations take a
+negligible amount of time. Therefore, the raw computation speed of a mat-vec is a good
+approximation of the overall speed of the solver. The two important aspects of performance
+are the raw computation speed (in terms of FLOP count), and the parallel efficiency. In
+addition, since hierarchical methods result in significant savings in computation for larger
+problems, it is useful to determine the computational speed of a dense solver (not using a
+hierarchical met-vec) required to solve the problem in the same time.
+We present parallel runtime, raw computation speed, and efficiency of four different
+problem instances. It is impossible to run these instances on a single processor because
+of their memory requirements. Therefore, we use the force evaluation rates of the serial
+and parallel versions to compute the efficiency. To compute the MFLOP ratings of our
+code, we count the number of floating point operations inside the force computation routine
+and in applying the MAC to internal nodes. Using this and the number of MACs and
+force computations, we determine the total number of floating point operations executed
+by the code. This is divided by the total time to obtain MFLOP rating of the code. Table 1
+presents the runtimes, efficiencies, and computation rates for four problems. The value of
+the ff parameter in each of these cases is 0.7, and the degree of the multipole expansion is
+9. The efficiencies were computed by determining the sequential time for each MAC and
+force computation. The sequential times for the larger problem instances were projected
+using these values and the efficiencies computed.
+The code achieves a peak performance of over 5 GFLOPS. Although this may not
+appear to be very high, it must be noted that the code has very little structure in data access
+resulting in poor cache performance. Furthermore, divide and square-root instructions
+take a significantly larger number of processor cycles. On the other hand, the performance
+achieved by the hierarchical code corresponds to over 770 GFLOPS for the dense matrix-vector
+product. Clearly, if the loss in accuracy is acceptable for the application, use of
+hierarchical methods results in over two orders of magnitude improvement in performance.
+Combined with a speedup of over 200 on 256 processors, our parallel treecode provides
+a very powerful tool for solving large dense systems.
+The loss in parallel efficiency results from communication overheads and residual load
+imbalances. There also exist minor variations in raw computation rates across different
+problem instances that have identical runtimes. This is because of different percentages
+of MAC computations, near field interactions, and far-field interactions being computed
+in these instances. The far-field interactions are computed using particle-series interac-
+tions. This involves evaluating a complex polynomial of length d 2 for a d degree multipole
+series. This computation has good locality properties and yields good FLOP counts on
+conventional RISC processors such as the Alpha. In contrast, near-field interactions and
+MAC computations do not exhibit good data locality and involve divide and square root
+instructions. This results in varying raw computation speeds across problem instances.
+Detailed studies of impact of various parameters on the accuracy of the matrix-vector
+product are presented by the authors in [5, 7].
+5.2 Parallel Performance of the Unpreconditioned GMRES Solver
+One of the important metrics for the performance of a code is the time to solution. We
+now investigate the solution time on different number of processors with different accuracy
+parameters. The objectives are as follows: to show that the speedup from fast mat-vecs
+translates to scalable solution times on large number of processors; and to study the impact
+of the ff criterion and multipole degree on the solution times. In each case, we assume
+that the desired solution is reached when the residual norm has been reduced by a factor
+of 10 \Gamma5 . The choice of this reduction in residual norm is because lower accuracy mat-vecs
+may become unstable beyond this point.
+In the first set of experiments, we study the impact of the ff criterion on solution time.
+The degree of multipole expansion is fixed at 7 and the parallel runtimes to reduce the
+residual norm by a factor of 10 \Gamma5 are noted. These times are presented in Table 2. (The
+was capped at 3600 seconds and therefore the one missing entry in the table.)
+A number of useful inferences can be drawn from the table.
+ffl In each of the cases, the relative speedup between 8 and 64 processors is around
+6 or more. This corresponds to a relative efficiency of over 74%. This demonstrates
+that our parallel solver is highly scalable.
+ffl For a given number of processors and multipole degree, increasing accuracy of
+mat-vec by reducing ff results in higher solution times and lower efficiencies. The
+former is because an increasing number of interactions are now computed as near-
+field, resulting in higher computational load. The loss in efficiency is because of an
+processors 8 64 8 64
+
+Table
+
+2: Time to reduce relative residual norm to 10 \Gamma5 . The degree of multipole expansion
+is fixed at 7. All times are in seconds.
+processors 8 64 8 64
+degree
+5 269.2 47.1 2010.3 329.6
+6 382.3 65.2 2729.6 441.2
+
+Table
+
+3: Time to reduce relative residual norm to 10 \Gamma5 . The value of ff is fixed at 0.667. All
+times are in seconds.
+increase in the communication overhead. An increasing number of interactions need
+to be performed lower down in the tree. Since these are not locally available, element
+coordinates need to be communicated to processors farther away. This is consistent
+with our observations while computing the mat-vec.
+We now study the impact of increasing multipole degree on solution time and parallel
+performance. The value of ff is fixed at 0.667 and the multipole degree is varied between
+5 and 7.
+
+Table
+
+3 records the solution time for reducing the residual norm by a factor of 10 \Gamma5
+for 8 and 64 processors. As expected, increasing multipole degree results in increasing
+solution times. Modulo the parallel processing overheads, the serial computation increases
+as the square of multipole degree. Since the communication overhead is not high, this
+trend is visible in the parallel runtimes also. Increasing multipole degree also results in
+better parallel efficiencies and raw computational speeds. This is because the communication
+overhead remains constant, but the computation increases. Furthermore, longer
+polynomial evaluations are more conducive to cache performance.
+This table leads us to believe that once a desirable accuracy point has been identified,
+it is better to use higher degree multipoles as opposed to tighter ff criterion to achieve this
+accuracy.
+Approx.
+Accur.
+
+Figure
+
+2: Relative residual norm of accurate and approximate iterative schemes.
+5.3 Accuracy of the GMRES Solver
+The use of approximate hierarchical mat-vecs has several implications for the iterative
+solver. The most important of course being the error in the solution. It is very often not
+possible to compute the accurate solution due to excessive memory and computational
+requirements. Therefore it is difficult to compute the error in the solution. However, the
+norm of (Ax\Gammab) is a good measure of how close the current solution is to the desired solution.
+Unfortunately, it is not possible to compute this since A is never explicitly assembled. What
+we can compute is corresponds to the approximate mat-vec. If the value
+of matches that of (Ax closely, we can say with a measure of confidence
+that the approximate solution mathes the real solution. We examine the norm of this vector
+with iterations to study the stability of unpreconditioned GMRES iterations.
+5.3.1 Convergence and Accuracy of Iterative Solver
+In this section, we demonstrate that it is possible to get near-accurate convergence with
+significant savings in computation time using hierarchical methods. We fix the value of
+ff and the multipole degree and compare the reduction in error norm with each iteration.
+
+Table
+
+4 presents the Log of relative residual norm for GMRES with various degrees of
+approximation executed on a 64 processor T3D.
+The following inferences can be drawn from the experimental data:
+ffl Iterative methods based on hierarchical mat-vecs are stable beyond a residual norm
+reduction of 10 \Gamma5 . This is also illustrated in Figure 2 which plots the reduction in
+residual norm with iterations for the accurate and the worst case (most inaccurate
+mat-vec). It can be seen that even for the worst case accuracy, the residual norms
+are in near agreement until a relative residual norm of 10 \Gamma5 . For many problems, such
+accuracies are adequate.
+ffl Increasing the accuracy of the mat-vec results in a closer agreement between accurate
+and hierarchical solvers. This is also accompanied by an increase in solution
+time. It is therefore desirable to operate in the desired accuracy range.
+ffl The parallel runtime indicates that hierarchical methods are capable of yielding significant
+savings in time at the expense of slight loss of accuracy.
+Iter Accurate
+Time 124.46 156.19 92.16 112.02
+
+Table
+
+4: Convergence (Log 10
+of Relative Error Norm) and runtime (in seconds) of the
+GMRES solver on a 64 processor Cray T3D. The problem consists of 24192 unknowns.
+5.3.2 Impact of Number of Gauss Points in Far Field
+While computing the far-field interactions, our code allows the flexibility of using either
+3-point Gaussian quadratures or single point Gaussian quadratures. Here, we investigate
+the impact of computing the far-field potentials using these on the overall runtime and error.
+
+Table
+
+5 presents the convergence of the solver for the two cases. In each case, the value of
+ff is fixed to 0.667 and the multipole degree is 7. The near point interactions are computed
+in an identical manner in either case. Depending on distances between the boundary
+elements, the code allows for 3 to 13 point Gaussian quadratures in the near-field.
+The following inferences can be drawn from the experimental results:
+ffl Using a larger number of Gauss points yields higher accuracy but also requires more
+computation. This is consistent with our understanding that for a fixed ff criterion, the
+computational complexity increases with the number of Gauss points in the far field.
+ffl Single Gauss point integrations for the far-field are extremely fast and are adequate
+for approximate solutions.
+Iter Gauss
+Time 112.02 68.9
+
+Table
+
+5: Convergence (Log 10
+of Relative Error Norm) and runtime (in seconds) of the
+GMRES solver on a 64 processor Cray T3D. The problem consists of 24192 unknowns.
+The value of ff is 0.667 and the multipole degree is 7.
+-5
+Unpreconditioned
+Block Diag.
+Inner-outer
+-5
+Block Diag.
+Inner-outer
+Unpreconditioned
+
+Figure
+
+3: Relative residual norm of accurate and approximate iterative schemes.
+5.4 Performance of Preconditioned GMRES
+In this section, we examine the effectiveness of the block-diagonal and inner-outer preconditioning
+schemes. We fix the value of ff at 0.5 and multipole degree at 7. The effectiveness
+of a preconditioner can now be judged by the number of iterations and the computation
+time to reduce the residual norm by a fixed factor. Although, certain preconditioners may
+yield excellent iteration counts, they may be difficult to compute and vice versa. A third,
+and perhaps equally important aspect is the parallel processing overhead incurred by the
+preconditioners.
+
+Table
+
+6 presents the reduction in error norm with iterations for the unpreconditioned,
+inner-outer and block-diagonal preconditioning schemes. Figure 3 illustrates the convergence
+of the two problems graphically. It is easy to see that the inner-outer scheme
+converges in a small number of (outer) iterations. However, the runtime is in fact more
+than that of the block diagonal scheme. This is because the number of inner iterations in
+the inner-outer scheme is relatively high. This is a drawback of the inner-outer scheme
+since it does not attempt to improve the conditioning of the inner solve. (We are currently
+investigating techniques for solving this.) On the other hand, since the block diagonal matrix
+is factored only once, and the communication overhead is not high, the block diagonal
+preconditioner provides an effective lightweight preconditioning technique. This is reflected
+in a slightly higher iteration count but lower solution times.
+Iter
+Unprecon. Inner-outer Block diag Unprecon. Inner-outer Block diag
+Time 156.19 125.40 103.61 709.78 584.77 511.06
+
+Table
+
+of Relative Error Norm) and runtime (in seconds) of the
+preconditioned GMRES solver on a 64 processor Cray T3D.
+6 Concluding Remarks
+In this paper, we presented a dense iterative solver based on an approximate hierarchical
+matrix-vector product. Using this solver, we demonstrate that it is possible to solve very
+large problems (hundreds of thousands of unknowns) extremely fast. Such problems
+cannot even be generated, let alone solved using traditional methods because of their
+memory and computational requirements. We show that it is possible to achieve scalable
+high performance from our solver both in terms of raw computation speeds and parallel
+efficiency for up to 256 processors of a Cray T3D. The combined improvements from the
+use of hierarchical techniques and parallelism represents a speedup of over four orders of
+magnitude in solution time for reasonable sized problems. We also examine the effect of
+various accuracy parameters on solution time, parallel efficiency and overall error.
+We presented two preconditioning techniques - the inner-outer scheme and the block-diagonal
+scheme. We have evaluated the performance of these preconditioners in terms
+of iteration counts and solution time. Although the inner-outer scheme requires fewer
+iterations, each iteration is an inner solve which may be more expensive. On the other
+hand, due to the diagonal dominance of many of these systems, the block-diagonal scheme
+provides us with an effective lightweight preconditioner.
+The treecode developed here is highly modular in nature and provides a general frame-work
+for solving a variety of dense linear systems. Even in the serial context, relatively
+little work has been done since the initial work of Rokhlin[16]. Other prominent pieces of
+work were in this area include [14, 17, 22, 3]. To the best of our knowledge, the treecode
+presented in this paper is among the first parallel multilevel solver-preconditioner toolkit.
+We are currently extending the hierarchical solver to scattering problems in electromagnetics
+[17, 16, 22, 21, 3]. The free-space Green's function for the Field Integral Equation
+depends on the wave number of incident radiation. At high wave numbers, the boundary
+discretizations must be very fine. This corresponds to a large number of unknowns. For
+such applications, hierarchical methods are particularly suitable because the desired level
+of accuracy is not very high.
+
+
+
+--R
+
+An efficient program for many-body simulation
+A hierarchical o(n log n) force calculation algorithm.
+Guidelines for using the fast multipole method to calculate the rcs of large objects.
+Accelerated molecular dynamics with the fast multipole algorithm.
+Efficient Parallel Formulations of Hierarchical Methods and their Applications.
+Scalable parallel formulations of the barnes-hut method for n-body simulations
+Parallel matrix-vector product using hierarchical methods
+
+A parallel version of the fast multipole method.
+A fast algorithm for particle simulations.
+Field Computation by Method of Moments.
+Matrix methods for field problems.
+Mapping the adaptive fast multipole algorithm into mimd systems.
+Multipole accelerated preconditioned iterative methods for three-dimensional potential integral equations of the first kind
+
+Rapid solution of integral equations of classical potential theory.
+Rapid solutions of integral equations of scattering theory in two dimensions.
+GMRES: A generalized minimal residual algorithm for solving non-symmetrical linear systems
+Implementing the fast multipole method in three dimen- sions
+Load balancing and data locality in hierarchical n-body methods
+Fast multipole method solution using parametric geometry.
+Multilevel fast multipole algorithm for solving combined field integral equation of electromagnetic scattering.
+Astrophysical n-body simulations using hierarchical tree data structures
+A parallel hashed oct tree n-body algorithm
+The parallel multipole method on the connection machine.
+--TR
+
+--CTR
+Vivek Sarin , Ananth Grama , Ahmed Sameh, Analyzing the error bounds of multipole-based treecodes, Proceedings of the 1998 ACM/IEEE conference on Supercomputing (CDROM), p.1-12, November 07-13, 1998, San Jose, CA
+Sreekanth R. Sambavaram , Vivek Sarin , Ahmed Sameh , Ananth Grama, Multipole-based preconditioners for large sparse linear systems, Parallel Computing, v.29 n.9, p.1261-1273, September
+Ananth Y. Grama , Vivek Sarin, Impact of far-field interactions on performance of multipole-based preconditioners for sparse linear systems, Proceedings of the 18th annual international conference on Supercomputing, June 26-July 01, 2004, Malo, France
+Hariharan , Srinivas Aluru , Balasubramaniam Shanker, A scalable parallel fast multipole method for analysis of scattering from perfect electrically conducting surfaces, Proceedings of the 2002 ACM/IEEE conference on Supercomputing, p.1-17, November 16, 2002, Baltimore, Maryland
+Qian Xi Wang, Variable order revised binary treecode, Journal of Computational Physics, v.200 n.1, p.192-210, 10 October 2004

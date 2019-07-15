@@ -1,0 +1,833 @@
+--T
+Loop Shifting for Loop Compaction.
+--A
+The idea of decomposed software pipelining is to decouple the software pipelining problem into a cyclic scheduling problem without resource constraints and an acyclic scheduling problem with resource constraints. In terms of loop transformation and code motion, the technique can be formulated as a combination of loop shifting and loop compaction. Loop shifting amounts to moving statements between iterations thereby changing some loop independent dependences into loop carried dependences and vice versa. Then, loop compaction schedules the body of the loop considering only loop independent dependences, but taking into account the details of the target architecture. In this paper, we show how loop shifting can be optimized so as to minimize both the length of the critical path and the number of dependences for loop compaction. The first problem is well-known and can be solved by an algorithm due to Leiserson and Saxe. We show that the second optimization (and the combination with the first one) is also polynomially solvable with a fast graph algorithm, variant of minimum-cost flow algorithms. Finally, we analyze the improvements obtained on loop compaction by experiments on random graphs.
+--B
+Introduction
+Modern computers now exploit parallelism at the instruction level in the microprocessor itself. A
+sequential microprocessor is not anymore a simple unit that processes instructions following a
+unique stream. The processor may have multiple independent functional units, some pipelined
+and possibly some other non-pipelined. To take advantage of these parallel functionalities in the
+processor, it is not sucient to exploit instruction-level parallelism only inside basic blocks. To feed
+the functional units, it may be necessary to consider, for the schedule, instructions from more than
+one basic block. Finding ways to extract more instruction-level parallelism (ILP) has led to a large
+amount of research from both a hardware and a software perspective (see for example [12, Chap. 4]
+for an overview).
+A hardware solution to this problem is to provide support for speculative execution on control
+as it is done on superscalar architectures and/or support for predicated execution as for example in
+the IA-64 architecture [8]. A software solution is to schedule statements across conditional branches
+whose behavior is fairly predictable. Loop unrolling and trace scheduling have this eect. This
+is also what the software pipelining technique does for loop branches: loops are scheduled so
+that each iteration in the software-pipelined code is made from instructions that belong to dierent
+iterations of the original loop.
+Software pipelining is a NP-hard problem when resource are limited. For this reason, a huge
+number of heuristic algorithms has been proposed, following various strategies. A comprehensive
+survey is available in the paper by Allan et al. [2]. They classify these algorithms roughly in three
+dierent categories: modulo scheduling [16, 24] and its variations ([23, 13, 18] to quote but a few),
+kernel recognition algorithms such as [1, 21], and move-then-schedule algorithms [14, 19, 5]. Briey
+speaking, the ideas of these dierent types of algorithms are the following. Modulo scheduling
+algorithms look for a solution with a cyclic allocation of resources: every  clock cycles, the resource
+usage will repeat. The algorithm thus looks for a schedule compatible with an allocation modulo
+, for a given  (called the initiation interval): the value  is incremented until a solution is
+found. Kernel recognition algorithms simulate loop unrolling and scheduling until a pattern
+appears, that means a point where the schedule would be cyclic. This pattern will form the kernel
+of the software-pipelined code. Move-then-schedule algorithms use an iterative scheme that
+alternatively schedules the body of the loop (loop compaction) and moves instructions across the
+back-edge of the loop as long as this improves the schedule.
+The goal of this paper is to explore more deeply the concept of move-then-schedule algorithms,
+in particular to see how moving instructions can help for loop compaction. As explained by B. Rau
+in [22], although such code motion can yield improvements in the schedule, it is not always clear
+which operations should be moved around the back edge, in which direction and how many times to
+get the best results.] How close it gets, in practice, to the optimal has not been studied, and,
+in fact, for this approach, even the notion of optimal has not been dened. Following the ideas
+developed in decomposed software pipelining [9, 27, 4], we show how we can nd directly in
+one pre-processing step a good 1 loop shifting (i.e. how to move statements across iterations) so
+that the loop compaction is more likely to be improved. The general idea of this two-step heuristic
+is the same as for decomposed software pipelining: we decouple the software pipelining problem
+into a cyclic scheduling problem without resource constraints (nding the loop shifting) and an
+acyclic scheduling problem with resource constraints (the loop compaction).
+The rest of the paper is organized as follows. In Section 2, we recall the software pipelining
+problem and well-known results such as problem complexity, lower bounds for the initiation interval,
+etc. In Section 3, we explain why combining loop shifting with loop compaction can give better
+performance than loop compaction alone. Loop shifting changes some loop independent dependences
+into loop carried dependences and vice versa. Then, loop compaction schedules the body of the
+loop considering only loop independent dependences, but taking into account the details of the
+target architecture. A rst optimization is to shift statements so as to minimize the critical path
+for loop compaction as it was done in [4] using an algorithm due to Leiserson and Saxe. A second
+optimization is to minimize the number of constraints for loop compaction, i.e. shift statements
+so that there remain as few loop independent edges as possible. This optimization is the main
+contribution of the paper and is presented with full details in Section 4. Section 5 discusses some
+limitations of our technique and how we think we could overcome them in the future.
+2 The software pipelining problem
+As mentioned in Section 1, our goal is to determine, in the context of move-then-schedule software
+pipelining algorithms, how to move statements so as to make loop compaction more ecient. We
+thus need to be able to discuss about optimality and about performances relative to an optimum.
+For that, we need a model for the loops we are considering and a model for the architecture we are
+targeting that are both simple enough so that optimality can be discussed. These simplied models
+are presented in Section 2.1. To summarize, from a theoretical point of view, we assume a simple
+loop (i.e. with no conditional branches 2 ), with constant dependence distances, and a nite number
+We put good in quotation marks because the technique remains of course a heuristic. Loop compaction itself
+is NP-complete in the case of resource constraints
+Optimality for arbitrary loops is in general not easy to discuss as shown by Schwiegelshohn et al. [25].
+of non pipelined homogeneous functional units.
+Despite this simplied model, our algorithm can still be used in practice for more sophisticated
+resource models (even if the theoretical guarantee that we give is no longer true). Indeed, the
+loop shifting technique that we develop is the rst phase of the process and does not depend on
+the architecture model but only on dependence constraints. It just shifts statements so that the
+critical path and the number of constraints for loop compaction are minimized. Resource constraints
+are taken into account only in the second phase of the algorithm, when compacting the loop, and
+a specic and aggressive instruction scheduler can be used for this task. Handling conditional
+branches however has not been considered yet, although move-then-schedule algorithms usually
+have this capability [19, 27]. We will thus explore in the future how this feature can be integrated in
+our shifting technique. We could also rely on predicated execution as modulo scheduling algorithms
+do.
+2.1 Problem formulation
+We consider the problem of scheduling a loop with a possibly very large number of iterations. The
+loop is represented by a nite, vertex-weighted, edge-weighted directed multigraph w).
+The vertices V model the statements of the loop body: each v 2 V represents a set of operations
+one for each iteration of the loop. Each statement v has a delay (or latency)
+. The directed edges E model dependence constraints: each edge
+weight w(e) 2 N, the dependence distance, that expresses the fact that the operation (u;
+instance of statement u at iteration k) must be completed before the execution of the operation
+(the instance of statement v at iteration k
+In terms of loops, an edge e corresponds to a loop independent dependence if
+to a loop carried dependence otherwise. A loop independent dependence is always directed from
+a statement u to a statement v that is textually after in the loop body. Thus, if G corresponds to
+a loop, it has no circuit C of zero weight (w(C) 6= 0).
+The goal is to determine a schedule for all operations (v; k), i.e. a function
+respects the dependence constraints
+and the resource constraints: if p non pipelined homogeneous resources are available, no more
+than p operations should be being processed at any clock cycle. The performance of a schedule
+is measured by its average cycle time  dened by:
+Among all schedules, schedules that exhibit a cyclic pattern are particularly interesting. A cyclic
+schedule  is a schedule such that (v; N. The schedule
+has period : the same pattern of computations occurs every  units of time. Within each period,
+one and only one instance of each statement is initiated:  is, for this reason, called the initiation
+interval in the literature. It is also equal to the average cycle time of the schedule.
+2.2 Lower bounds for the average cycle time and complexity results
+The average cycle time of any schedule (cyclic or not) is limited both by the resource and the
+dependence constraints. We denote by 1 (resp.  p ) the minimal average cycle time achievable by
+a schedule (cyclic or not) with innitely many resources (resp. p resources). Of course,  p  1 .
+For a circuit C, we denote by (C) the duration to distance ratio
+w(C) and we let
+We have the following well-known lower
+bounds:
+Dependence constraints: 1   max
+Resource constraints:  p
+resource constraints, the scheduling problem is polynomially solvable. Indeed,
+max and there is an optimal cyclic schedule (possibly with a fractional initiation interval if 1 is
+not integral). Such a schedule can be found with standard minimum ratio algorithms [10, pp. 636-
+641]. With d w(e), the complexity is O(jV jjEj log(jV j)),
+we look for  max , and we look for d max e. When d
+Karp's minimum mean-weight cycle algorithm [15] can be used with complexity O(jV jjEj).
+With resource constraints however, the decision problem associated to the problem of determining
+a schedule with minimal average cycle time is NP-hard. It is open whether it belongs to NP or
+not. When restricting to cyclic schedules, the problem is NP-complete. See [11] for an overview of
+the cyclic scheduling problem.
+3 Loop shifting and loop compaction
+In this section, we explain how loop shifting can be used to improve the performances of loop
+compaction. We rst formalize loop compaction and study the performances of cyclic schedules
+obtained by loop compaction alone.
+3.1 Performances of loop compaction alone
+Loop compaction consists in scheduling the body of the loop without trying to mix up iterations.
+The general principle is the following. We consider the directed graph A(G) that captures the
+dependences lying within the loop body, in other words the loop independent dependences. These
+correspond to edges e such that The graph A(G) is acyclic since G has no circuit C
+such that can thus be scheduled using techniques for directed acyclic graphs, for
+example list scheduling. Then, the new pattern built for the loop body is repeated to dene a cyclic
+schedule for the whole loop. Resource constraints and dependence constraints are respected inside
+the body by the list scheduling, while resource constraints and dependence constraints between
+dierent iterations are respected by the fact that the patterns do not overlap. The algorithm is the
+following.
+Algorithm 1 (Loop compaction)
+w) be a dependence graph.
+1. Dene 0g.
+2. Perform a list scheduling  a on A(G).
+3. Compute the makespan of  a :
+4. Dene the cyclic schedule  by: 8v 2 V; 8k 2 N; (v;
+Because of dependence constraints, loop compaction is limited by critical paths, i.e. paths P
+of maximal delay d(P ). We denote by (G) the maximal delay of a path in A(G). Whatever the
+schedule chosen for loop compaction, the cyclic schedule  satises    (G). Furthermore, if
+a list scheduling is used, Coman's technique [6] shows that there is a path P in A(G) such that
+How is this related to optimal initiation intervals 1 and  p ? We
+know that
+For the acyclic scheduling problem, (G) is a lower bound for the makespan of any schedule. Thus,
+list scheduling is a heuristic with a worst-case performance ratio 2 1=p. Here unfortunately, (G)
+has - a priori - nothing to do with the minimal average cycle time  p . This is the reason why loop
+compaction alone can be arbitrarily bad.
+Our goal is now to mix up iterations (through loop shifting, see the following section) so that
+the resulting acyclic graph A(G)  the subgraph of loop independent dependences  is more likely
+to be optimized by loop compaction.
+3.2 Loop shifting
+We rst dene loop shifting formally. Loop shifting consists in the following transformation. We
+dene for each statement v a shift r(v) that means that we delay operation (v; by r(v) iterations.
+In other words, instead of considering that the vertex in the graph G represents all the
+operations of the form (v; k), we consider that it represents all the operations of the form (v; k r(v)).
+The new dependence distance w r (e) for an edge
+since the dependence is from (u; k r(u)) to (v; k This denes
+a transformed graph G w r ). Note that the shift does not change the weight of circuits:
+for all circuits C,
+the two operations in dependence are computed in dierent iterations in
+the transformed code: if w r (e) > 0, the two operations are computed in the original order and
+the dependence is now a loop carried dependence. If w r both operations are computed in
+the same iteration, and we place the statement corresponding to u textually before the statement
+corresponding to v so as to preserve the dependence as a loop independent dependence. This
+reordering is always possible since the transformed graph G
+circuit (G and G r have the same circuit weights). If w r (e) < 0, the loop shifting is not legal.
+Note that G r and G are two representations of the same problem. Indeed, there is a one-to-one
+correspondence between the schedules for G and the schedules for G r :  r is a schedule for G r if
+and only if the function , dened by (v; r(v)), is a schedule for G. In other words,
+reasoning on G r is just a change of representation. It cannot prevent us to nd a schedule. The
+only dierence between the original code and the shifted code is due to loop bounds: the shifted
+code is typically a standard loop plus a prologue and an epilogue (see the example in Section 4.3).
+Such a function r is called a legal
+retiming in the context of synchronous VLSI circuits [17]. Each vertex v represents an operator,
+with a delay d(v). The weight w(e) of an edge e is interpreted as a number of registers. Retiming
+amounts to suppress r(u) registers to the weight of each edge leaving u and to add r(v) registers
+to each edge entering v. The constraint w(e) means that a negative number
+of registers is not allowed for a legal retiming. The graph A(G) that we used in loop compaction
+(Algorithm 1) is the graph of edges without register. What we called (G) is now the largest delay
+of a path without register, called the clock period of the circuit. This link between loop shifting
+and circuit retiming is not new. It has been used in several algorithms on loop transformations (see
+for example [5, 3, 4, 7]), including software pipelining.
+3.3 Selecting loop shifting for loop compaction
+How can we select a good shifting for loop compaction? Let us rst consider the strategies followed
+by the dierent move-then-schedule algorithms.
+Enhanced software pipelining and its extensions [19], circular software pipelining [14], and rotation
+software pipelining [5] use similar approaches: they do loop compaction, then they shift
+backwards (or forwards) the vertices that appear at the beginning (resp. end) of the loop body
+schedule. In other words, candidates for backwards shifting (i.e. are the sources of
+A(G) and candidates for forwards shifting (i.e. are the sinks of A(G). This rotation is
+performed as long as there are some benets for the schedule, but no guarantee is given for such a
+technique.
+In decomposed software pipelining, the principle is slightly dierent. The algorithm is not an iterative
+process that uses loop shifting and loop compaction alternately. Loop shifting is chosen once,
+following a mathematically well-dened objective, and then the loop is scheduled. Two intuitive
+objectives may be to shift statements so as to minimize:
+the maximal delay (G) of a path in A(G) since it is tightly linked to the guaranteed bound for
+the list scheduling. As shown in Section 3.1, it is a lower bound for the performances of loop
+compaction and reducing (G) reduces the performance upper bound when list scheduling is
+used.
+the number of edges in the acyclic graph A(G), so as to reduce the number of dependence
+constraints for loop compaction. Intuitively, the fewer constraints, the more freedom for
+exploiting resources.
+Until now, all eort has been put into the rst objective. In [9] and [27], the loop is rst software-
+pipelined assuming unlimited resources. The cyclic schedule obtained corresponds to a particular
+retiming r which is then used for compacting the loop. In can be shown that, with this technique,
+the maximal critical path in A(G r ) is less than d In [4], the shift is chosen so that
+the critical path for loop compaction is minimal, using the retiming algorithm due to Leiserson
+and Saxe [17] for clock-period minimization (see Algorithm 2 below). The derived retiming r is
+such that (G r opt the minimum achievable clock period for G. It can also be shown that
+Both techniques lead to similar guaranteed performances for non pipelined resources. Indeed,
+the performances of loop compaction (see Equation 2) now become:
+Unlike for loop compaction alone, the critical path in A(G r ) is now related to  p . The performances
+are not arbitrarily bad as for loop compaction alone.
+Both techniques however are limited by the fact that they optimize the retiming only in the
+critical parts of the graph (for an example of this situation, see Section 4.1). For this reason, they
+cannot address the second objective, trying to retime the graph so that as few dependences as
+possible are loop independent. In [4], an integer linear programming formulation is proposed to
+solve this problem. We show in the next section that a pure graph-theoretic approach is possible,
+as Calland et al. suspected.
+Before, let us recall the algorithm of Leiserson and Saxe. The technique is to use a binary search
+for determining the minimal achievable clock period  opt
+. To test whether each potential clock
+period  is feasible, the following O(jV jjEj) algorithm is used. It produces a legal retiming r of G
+such that G r is a synchronous circuit with clock period (G r )  , if such a retiming exists. The
+overall complexity is O(jV jjEj log jV j).
+Algorithm 2 (Feasible clock period)
+1. For each vertex set r(v) to 0.
+2. Repeat the following times:
+(a) Compute the graph G r with the existing values for r.
+(b) for any vertex v 2 V compute (v) the maximum sum d(P ) of vertex delays along any
+zero-weight directed path P in G r leading to v.
+(c) For each vertex v such that (v) > , set r(v) to r(v) + 1.
+3. Run the same algorithm used for Step (2b) to compute (G r ). If (G r ) >  then no feasible
+retiming exists. Otherwise, r is the desired retiming.
+4 Minimizing the number of dependence constraints for loop com-
+paction
+We now deal with the problem of nding a loop shifting such that the number of dependence constraints
+for loop compaction is minimized. We rst consider the particular case where all dependence
+constraints can be removed (Section 4.1): we give an algorithm that either nds such a retiming or
+proves that no such retiming exists. Section 4.2 is the heart of the paper: we give an algorithm that
+minimizes by retiming the number of zero-weight edges of a graph. Then, in Section 4.3, we run a
+complete example to illustrate our technique. Finally, in Section 4.4, we extend this algorithm to
+minimize the number of zero-weight edges without increasing the clock period over a given constant
+(that can be for instance the minimal clock period). This allows us to combine both objectives
+proposed in Section 3.3: applying loop shifting so as to minimize both the number of constraints
+and the critical path for loop compaction.
+4.1 A particular case: the fully parallel loop body
+We rst give an example that illustrates why minimizing the number of constraints for loop compaction
+may be useful. This example is also a case where all constraints can be removed.
+Example 1
+do i=1,n
+The dependence graph of this example is represented in Figure 1(a): we assume an execution time of
+two cycles for the loads, one cycle for the addition, and three cycles for the multiplication. Because
+of the multiplication, the minimal clock period cannot be less than 3. Figure 1(b) depicts the
+retimed graph with a clock period of 3 and the retiming values found if we run Leiserson and Saxe
+algorithm (Algorithm 2). Figure 1(c) represents the graph obtained when minimizing the number
+of zero-weight edges still with a clock period of 3.
+load
+load
+d=3(a)
+load
+load
+(b)
+load
+load
+*1+1(c)
+
+Figure
+
+1: (a) The dependence graph of Example 1, (b) After clock period minimization, (c) After
+loop-carried dependence minimization.
+(a) (b) (c)
+L/S ALU L/S ALU L/S ALU
+cycles
+load
+load
+
+load load
+
+load
+load
+
+Figure
+
+2: (a) The loop compaction for Example 1, (b) After clock period minimization, (c) After
+loop-carried dependence minimization.
+Following the principle of decomposed software pipelining, once the retiming (shift) is found,
+we schedule the subgraph generated by the zero-weight edges (compaction) in order to nd the
+pattern of the loop body. We assume some limits on the resources for our schedule: we are given
+one load/store unit and two ALUs.
+As we can see on Figure 2(a), the simple compaction without shift gives a very bad result (with
+initiation interval 8) since the constraints impose a sequential execution of the operations. After
+clock period minimization (Figure 2(b)), the multiplication has no longer to be executed after the
+addition and a signicant improvement is found, but we are still limited by the single load/store
+resource associated with the two loop independent dependences which constrain the addition to wait
+for the serial execution of the two loads (the initiation interval is 5). Finally with the minimization
+of the loop-carried dependences (Figure 2(c)), there are no more constraints for loop compaction
+(except resource constraints) and we get an optimal result with initiation interval equal to 4. This
+can not be improved because of the two loads and the single load/store resource. In this example,
+resources can be kept busy all the time.
+Note that if we assume pipelined resources which can fetch one instruction each cycle (with the
+same delays for latency), we get similar results (see Figure 3). The corresponding initiation interval
+are respectively 7, 5 and 3, if we do not try to initiate the next iteration before the complete end
+of the previous one, and 3, 4, 3 if we overlap patterns (see Section 5 for more about what we mean
+by overlapping).
+(a) (b) (c)
+L/S ALU L/S ALU L/S ALU
+load
+load
+
+
+load
+cycles
+load
+load
+load
+
+Figure
+
+3: (a) The loop compaction for Example 1 with pipelined resources, (b) After clock period
+minimization, (c) After loop-carried dependence minimization.
+Example 1 was an easy case to solve because it was possible to remove all constraints for loop
+compaction. After retiming, the loop body was fully parallel. In this case, the compaction phase is
+reduced to the problem of scheduling tasks without precedence constraints, which is, though NP-
+complete, easier: guaranteed heuristics with a better performance ratio than list scheduling exist.
+More formally, we say that the body of a loop is fully parallel when:
+When is it possible to shift the loop such that all dependences become loop carried? Let l(C) be
+the length (number of edges) of a circuit C in the graph G. The following proposition gives a simple
+and ecient way to nd a retiming that makes the body fully parallel.
+Proposition 1 Shifting a loop with dependence graph G into a loop with fully parallel body is possible
+if and only if w(C)  l(C) for all circuits C of G.
+Proof: Assume rst that G can be retimed so that the loop has a fully parallel body, then there
+exists a retiming r such that 8e 2 E, w r (e)  1. Summing up these inequalities on each circuit
+C of G, we get w r (C)  l(C), and since the weight of a circuit is unchanged by retiming, we get
+Conversely, assume that for all circuits C of G, w(C)  l(C). Then the graph G
+dened by 8e 2 E, w no circuit of negative weight. We can thus dene for
+each vertex u, (u) the minimal weight of a path leading to u. By construction,
+is the weight of a path leading to v. In other words,
+is the desired retiming.
+From Proposition 1, we can deduce an algorithm that nds a retiming of G such that the loop
+body is fully parallel, or answers that no such retiming can be found.
+Algorithm 3 (Fully parallel body)
+by adding a new source s to G, setting
+apply the Bellman-Ford algorithm on G 0 to nd the shortest path from s to any vertex in V .
+Two cases can occur:
+the Bellman-Ford algorithm nds a circuit of negative weight, in this case return FALSE.
+the Bellman-Ford algorithm nds some values (u) for each vertex u of G 0 , in this case
+set return TRUE.
+The complexity of this algorithm is dominated by the complexity of the Bellman-Ford algorithm,
+which is O(jV jjEj). We can also notice that if the graph is an acyclic directed graph it can always
+be retimed so that the loop has a fully parallel body since it does not contain any circuit (and
+consequently, there is no circuit of negative weight in G 0 ). In this case, the algorithm can be
+simplied into a simple graph traversal instead of the complete Bellman-Ford algorithm, leading to
+a
+4.2 Zero-weight edges minimization (general case)
+Since we cannot always make the loop body fully parallel, we must nd another solution to minimize
+the constraints for loop compaction. We give here a pure graph algorithm to nd a retiming for
+which as few edges as possible are edges with no register (i.e. as many dependences as possible are
+loop-carried after loop shifting). The algorithm is an adaptation of a minimal cost ow algorithm,
+known as the out-of-kilter method ([10, pp. 178-185]), proposed by Fulkerson in 1961.
+4.2.1 Problem analysis
+Given a dependence graph and a retiming r of G, we dene, as in the previous sections,
+the retimed graph G for each edge
+want to count the number of edges e such that w r For that, we dene the cost v r (e) of an
+edge e as follows:
+We dene the cost of the retiming r as
+the number of zero-weight edges in the retimed
+graph. We say that r is optimal when
+r (e) is minimal, i.e. when r minimizes the number
+of zero-weight edges of G. We will rst give a lower bound for the cost of any retiming, then we
+will show how we can nd a retiming that achieves this bound.
+We will use ows in G dened as functions f
+A nonnegative ow is a ow such that 8e 2 E, f(e)  0. A ow f corresponds to a union of cycle
+(a multi-cycle) C f that traverses f(e) times each edge e: when f(e) > 0 the edge is used forwards,
+when f(e) < 0 the edge is backwards. When the ow is nonnegative, the ow corresponds to a
+union of circuits (a multi-circuit) [10, p. 163].
+For a given legal retiming r and a given nonnegative ow f , we dene for each edge e 2 E its
+kilter index ki(e) by:
+It is easy to check that the kilter index is always nonnegative since v r
+and since the ow is nonnegative. We will show in Proposition 4 that, when all kilter indices are
+zero, we have found an optimal retiming. Before that, we need a independence property related
+to ows and retimings.
+We dene as
+the cost of a ow f for the graph G r . Of course, the cost of a ow
+depends on the edges of C f , i.e. the edges e such that f(e) 6= 0. The following proposition shows
+that the cost of a ow does not depend of the retiming, i.e. the cost of f for G and for G r are equal.
+Proposition 2
+Proof:
+f(e)A
+since f is a ow.
+We are now ready to give a lower bound for the cost of any retiming.
+Proposition 3 For any legal retiming r:
+nonnegative ow g:
+Proof:
+(1 f(e)w(e)) since 8e 2 E; v r (e)  0
+(v r because of Prop. 2
+0 since 8e 2 E; ki(e)  0:
+Proposition 4 Let r be a legal retiming. If there is a ow f such that 8e 2 E,
+is optimal.
+Proof: if for each edge of G, then
+(v r
+and by Proposition 3,
+Proposition 4 alone does not show that the lower bound can be achieved. It remains to show
+that we can nd a retiming and a ow such that all kilter indices are zero. We now study when this
+happens, by characterizing the edges in terms of their kilter index.
+4.2.2 Characterization of edges
+us represent the edges e by the pair (f(e); w r (e)): we get the diagram of Figure 4, called the
+kilter diagram. Edges e for which correspond to the black angled line. Below and above
+this line, ki(e) > 0. We call conformable the edges for which non conformable the
+edges for which ki(e) > 0. We assign a type to each edge e depending on the values w r (e) and f(e),
+as follows:
+Type 1: w r (e) > 1 and
+Type 3: w r
+Type 4: w r
+Type
+Type 7: w r
+conformable edges
+Type 2: w r (e) > 0 and f(e) > 1
+or w r (e) > 1 and f(e) > 0
+Type 5: w r
+non conformable edges
+If every edge is conformable, that is if for each edge e, then the optimal is reached.
+Furthermore, we can notice that for each conformable edge e, it is possible to modify by one unit,
+either w r (e) or f(e), while keeping it conformable, and for each non conformable edge, it is possible
+to decrease strictly its kilter index by changing either w r (e) or f(e) by one unit. More precisely, we
+have the following cases:
+if f(e) increases: edges of types 3, 6 and 7 become respectively of type 4, 7, and 7, and remain
+conformable. An edge of type 5 becomes conformable (of type 6). The kilter index of any
+other edge increases (strictly).
+if f(e) decreases: edges of type 4 and 7 become respectively of type 3 and 6 or 7, and remain
+conformable. An edge of type 2 becomes conformable (type 4 or 1) or its kilter index decreases
+(strictly). The kilter index of edges of type 6 increases (strictly).
+increases: the edges of type 1, 3 and 6 become respectively of type 1, 1 and 4, and
+remain conformable. An edge of type 5 becomes conformable (type 3). The kilter index of
+any other edge increases (strictly).
+decreases: the edges of type 1 and 4 become respectively of type 1 or 3 and 6, and
+remain conformable. An edge of type 2 becomes conformable (type 4 or 7) or its kilter index
+decreases (strictly). The kilter index of edges of type 3 increases (strictly).
+We are going to exploit these possibilities in order to converge towards an optimal solution, by
+successive modications of the retiming or of the ow.
+type 7
+type 6
+f(e)1r
+
+Figure
+
+4: Kilter diagram and edge types.
+Black
+Black
+Black
+Red
+Green
+Uncoloured
+Green
+
+Figure
+
+5: Coloration of the dierent
+types of edges.
+4.2.3 Algorithm
+The algorithm starts from a feasible initial solution and makes it evolve towards an optimal solution.
+The null retiming and the null ow are respectively a legal retiming and a feasible ow: for them
+we have for each edge e 2 E, which means a kilter index equal to 1 for a zero-weight
+edge and 0 for any other edge. Notice that for this solution any edge is of type 1, 3 or 5. Only the
+edges of type 5 are non conformable. The problem is then to make the kilter index of type 5 edges
+decrease without increasing the kilter index of any other edge. To realize that, we assign to each
+type of edge a color (see Figure 5) that expresses the degree of freedom it allows:
+black for the edges of type 3, 5 and 6: f(e) and w r (e) can only increase.
+green for the edges of type 2 and 4: f(e) and w r (e) can only decrease.
+red for the edges of type 7: f(e) can increase or decrease but w r (e) should be kept constant.
+uncoloured for the edges of type 1: f(e) cannot be changed while w r (e) can increase or decrease.
+Note: actually, during the algorithm, we will not have to take into account the green edges of
+longer. Indeed, if we start from a solution that does not involve such edges, and if we
+make the kilter index of black edges of type 5 decrease without increasing the kilter index of any
+other edge, we will never create any other non conformable edge. In particular no edge of type 2
+will be created.
+We can now use the painting lemma (due to Minty, 1966, see [10, pp. 163-165]) as in a standard
+out-of-kilter algorithm.
+(Painting lemma) Let E) be a graph whose edges are arbitrarily colored in
+black, green, and red. (Some edges may be uncoloured.) Assume that there exists at least one black
+edge e 0 . Then one and only one of the two following propositions is true:
+a) there is a cycle containing e 0 , without any uncoloured edge, with all black edges oriented in
+the same direction as e 0 , and all green edges oriented in the opposite direction.
+b) there is a cocycle containing e 0 , without any red edge, with all black edges oriented in the same
+direction as e 0 , and all green edges oriented in the opposite direction.
+R
+R
+G
+G
+Uncoloured
+G
+
+Figure
+
+The two cases of Minty's lemma
+Proof: The proof is a constructive proof based on a labeling process, see [10].
+We end up with the following algorithm:
+Algorithm 4 (Minimize the number of zero-weight edges)
+1. start with color the edges
+as explained above.
+2. if 8e 2 E,
+(a) then return: r is an optimal retiming.
+(b) else choose a non conformable edge e 0 (it is black) and apply the painting lemma:
+i. if a cycle is found, then add one (respectively subtract one) to the ow of any edge
+oriented in the cycle in the direction of e 0 (resp. in the opposite direction).
+ii. if a cocycle is found, this cocycle determines a partition of the vertices into two sets.
+Add one to the retiming of any vertex that belongs to the same set as the terminal
+vertex of e 0 .
+(c) update the color of edges and go back to Step 2.
+Proof: By denition of the edge colors that express what ow or retiming changes are possible,
+it is easy to check that at each step of the algorithm an edge, whose retiming or ow value changes,
+becomes conformable if it was not, and remains conformable otherwise. Furthermore the retiming
+remains legal (w r (e)  0) and the ow nonnegative (f(e)  0). So, after each application of the
+painting lemma, at least one non conformable edge becomes conformable. By repeating this operation
+(coloration, then variation of the ow or of the retiming) until all edges become conformable,
+we end up with an optimal retiming.
+4.2.4 Complexity
+Looking for the cycle or the cocycle in the painting lemma can be done by a marking procedure
+with complexity O(jEj) (see [10, pp. 164-165]). As, at each step, at least one non conformable edge
+becomes conformable, the total number of steps is less than or equal to the number of zero-weight
+edges in the initial graph, which is itself less than the total number of edges in the graph. Thus,
+the complexity of Algorithm 4 is O(jEj 2 ).
+Note: for the implementation, the algorithm can be optimized by rst considering each strongly
+connected component independently. Indeed, once each strongly connected component has been
+retimed, we can dene (as mentioned in Section 4.1) a retiming value for each strongly connected
+component such that all edges between dierent strongly connected components have now a positive
+weight. This can be done by a simple traversal of the directed acyclic graph dened by the strongly
+connected components.
+4.3 Applying the algorithm
+We now run a complete example for which minimizing the number of zero-weight edges gives some
+benet. The example is a toy example that computes the oating point number a n given by the
+recursion:
+a
+The straight calculation of the powers is expensive and can be improved. A possibility is to make
+the calculation as follows (after initialization of rst
+Example 2
+do
+Assume, for the sake of illustration, that the time for a multiply is twice the time for an add (one
+cycle). The dependence graph is depicted on Figure 7: the clock period is already minimal (equal
+to due to the circuit of length 3). The corresponding loop compaction is given, assuming
+two multipurpose units. The restricted resources impose the execution of the three multiplications
+in at least 4 cycles, and because of the loop independent dependences, the second addition has to
+wait for the last multiplication before starting, so we get a pattern which is 5 cycles long.
+The dierent steps of the algorithm are the following (see also Figure 8):
+we choose, for example, (d; a) as a non conformable edge, we nd the circuit (a; b; c; d; a) and
+we change the ow accordingly.
+we choose (t; a) as a non conformable edge, we nd the cocycle dened by the sets fag and
+and we change the retiming accordingly.
+we choose (c; t) as a non conformable edge, we nd the circuit (t; a; d; c; t) and we change the
+ow accordingly.
+
+Figure
+
+7: Dependence graph and the associated schedule for two resources.
+we choose (b; t) as a non conformable edge, we nd the cocycle dened by the two sets ftg
+and V n ftg, and we change the retiming accordingly.
+all edges are now conformable, the retiming is optimal:
+equal
+Note that, at each step, we have to choose a non conformable edge: choosing a dierent one than
+ours can result in a dierent number of steps and possibly a dierent solution, but the result will
+still be optimal. Note also that, on this example, the clock period remains unchanged by the
+minimization, there is no need to use the technique that will be presented in Section 4.4.
+G
+G
+G
+G
+G
+R
+U
+G Green
+Red
+Uncoloured
+Flow unit
+Distance (register) unit
+G
+G
+c
+d
+G
+G
+G
+c
+d
+c
+c
+c
+d
+Non conformable (black)
+a a
+a
+a
+a
+
+Figure
+
+8: The dierent steps of the zero-weight edge minimization.
+After the minimization (Figure 9), there remain two (instead of four) loop independent dependences
+that form a single path. We just have to ll the second resource with the remaining tasks.
+This results in a 4 cycles pattern which is (here) optimal because of the resource constraints.
+
+Figure
+
+9: Dependence graph and associated schedule for two resources after transformation.
+The resulting shifted code is given below. Since the dierent retiming values are 1 and 0, an
+extra prelude and postlude have been added compared to the original code:
+do i=4,n
+(computed at clock cycle
+(computed at clock cycle 1)
+(computed at clock cycle 2)
+(computed at clock cycle
+(computed at clock cycle 2)
+4.4 Taking the clock period into account
+We now show that the algorithm given in Section 4.2.3 can be extended so as to minimize the
+number of zero-weight edges, subject to a constraint on the clock period after retiming. In other
+words, given a dependence graph d), we want to retime G into a graph G r whose clock
+period (G r ) is less than or equal to a given constant  (which must be a feasible clock period),
+and which has as few zero-weight edges as possible. We recall that the clock period (G) is dened
+as the largest delay of a zero-weight path of Gg.
+4.4.1 Clock edges
+Following Leiserson and Saxe technique [17], we add a new constraint between each pair of vertices
+that are linked by a path whose delay is greater than the desired clock period, since such a path
+has to contain at least one register:
+In the above equation, W (u; v) denotes the minimal number of registers on any path between u
+and v, and D(u; v) denotes the maximal delay of a path from u to v with W (u; v) registers (see [17]
+for a detailed discussion about the clock period minimization problem and how some redundant
+constraints can be removed).
+This corresponds to adding new edges of weight W (u; v) 1 between each pair of vertices (u; v)
+such that D(u; v) > . We denote by E clock the set of new edges and we let
+We can notice that although the new edges (that we call clock edges) must have no eect on the
+retiming cost (since they are not part of the original graph, they should not be taken into account
+when counting the number of zero-weight edges), they may have some inuence on the ow cost
+since they constrain the register moves.
+4.4.2 Changes in the algorithm
+We now show how to incorporate these new edges into the algorithm, and how to dene for them
+a coloration compatible with the previously dened colors. The problem is the following: given a
+dependence graph w), the goal is to nd a retiming r Z such that r is legal for
+and of course that minimizes the number of zero-weight edges in E.
+Summarizing all previous observations, we change the denition of the kilter index in the following
+way (the kilter index is still nonnegative):
+This leads us to change also the proofs of Propositions 3 and 4 for taking into account the new
+edges. We denote by C f (resp. C fclock ) the set of edges in E (resp. in E clock ) such that f(e) > 0,
+and by C 0
+the multi-circuit of G 0 dened by f .
+Proposition 5
+f
+f(e)w(e).
+Proof:
+f
+f
+(v r
+f
+f(e)w r (e) by Proposition 2
+(v r
+ki(e) by denition of the kilter index
+Proposition 5 gives a new optimality condition that takes the clock edges into account.
+Proposition 6 If 8e then r is optimal and furthermore (G r )  .
+Proof: The proof is similar to the proof of Proposition 4. If
+(v r
+clock
+f(e)w r (e)
+f(e)w r (e)
+f
+f
+Thus,
+f
+f(e)w(e) and by Proposition 5,
+Furthermore, since the retiming is legal, the inequalities (4) are satised by construction of E clock .
+In other words, (G r )  .
+It remains to draw the kilter diagram of E Clock and to assign types and colors. The types are:
+Type 1: w r (e) > 0 and
+Type 3: w r
+Type 4: w r
+conformable edges
+Type 2: w r (e) > 0 and f(e) > 0
+non conformable edges
+The colors are chosen as follows: black for type 3 edges, red for type 4 edges, green for type 2 edges,
+and uncoloured for type 1 edges (see Figure 10).
+Black f(e)
+Red
+r w (e)
+r
+Uncoloured
+Green
+
+Figure
+
+10: Kilter diagram and coloration of clock edges.
+Note: we need to start from a legal retiming, i.e. a retiming for which (G r ) is less than ,
+so that all edge weights are nonnegative (including the weights of clock edges). Such a retiming
+is computed using Algorithm 2. Then, initially, all the edges of E clock are conformable. As the
+algorithm never creates non conformable edges, green edges in E clock never appear.
+The nal algorithm is similar to Algorithm 4. It reaches an optimal retiming while keeping a
+clock period less than a given constant . The number of steps is still bounded by jEj since all
+clock edges are conformable and remain conformable, but the number of edges of G 0 is O(jV
+since G 0 can be the complete graph in the worst case because of the new clock edges. The marking
+procedure is thus now O(jV and the overall complexity of the algorithm O(jEjjV j 2 ).
+5 Conclusions, limitations and future work
+As any heuristic, the shift-then-compact algorithm that we proposed can fall into traps, even
+if we rely on an optimal (exponential) algorithm for loop compaction. In other words, for a given
+problem instance, the shift that we select may not be the best one for loop compaction. Nevertheless,
+the separation between two phases, a cyclic problem without resource constraints and an acyclic
+problem with resource constraints, allows us to convert worst case performance results for the
+acyclic scheduling problem into worst case performance results for the software pipelining problem
+(see Equation 3). This important idea, due to Gasperoni and Schwiegelshohn [9], is one of the
+interests of decomposed software pipelining. No other method (including modulo-scheduling) has
+this property: how close they get to the optimal has not been proved.
+This separation into two phases has several other advantages. The rst advantage that we
+already mentioned is that we do not need to take the resource model into account until the loop
+compaction phase. We can thus design or use very aggressive (even exponential) loop compaction
+algorithms for specic architectures. A second advantage is that it is fairly easy to control how
+statements move simply by incorporating additional edges. This is how we enforced the critical
+path for loop compaction to be smaller than a given constant. This constant could be  opt
+, but
+choosing a larger value can give more freedom for the second objective, the minimization of loop
+independent edges. As long as this value is less than  holds. Another
+example is if we want to limit by a constant l(e) the maximal value w r (e) of an edge
+which is linked to the number of registers needed to store the value created by u: we simply add
+an edge from v to u with weight l(e) w(e). Taking these additional edges into account can be
+done as we did for clock edges. A third advantage (that we still need to explore) is that the rst
+phase (the loop shifting) can maybe be used alone as a pre-compilation step, even for architectures
+that are dynamically scheduled: minimizing the number of dependences inside the loop body for
+example will reduce the number of mispredictions for data speculation [20].
+Despite the advantages mentioned above, our technique has still one important weakness, which
+comes from the fact that we never try to overlap the patterns obtained by loop compaction. In
+practice of course, instead of waiting for the completion of a pattern before initiating the following
+one (by choosing the initiation interval equal to the makespan of loop compaction, see Algorithm 1),
+we could choose a smaller initiation interval as long as resource constraints and dependence constraints
+are satised. For each resource p, we can dene end(p) the last clock cycle for which p is
+used in the acyclic schedule  a . Then, given  a , we can choose as initial interval the smallest
+that satises all dependences larger than
+p. This is for example how we found the initiation intervals equal to
+3, 4 and 3 for Example 2 with pipelined resources (end of Section 4.3). While this overlapping
+approach may work well in practice, it does not improve in general the worst case performance
+bound of Equation 3. We still have to nd improvements in this direction, especially when dealing
+with pipelined resources. We point out that Gasperoni and Schwiegelshohn approach [9] does not
+have this weakness (at least for the worst case performance bound): by considering the shifting
+and the schedule for innite resources as a whole, they can use a loop compaction algorithm with
+release dates (tasks are not scheduled as soon as possible) that ensures a good overlapping. In
+the resulting worst case performance bound, d max can be replaced by 1 for the case of pipelined
+resources. The problem however is that it seems dicult to incorporate other objectives (such as the
+zero-weight edge minimization described in this paper) in Gasperoni and Schwiegelshohn approach
+since there is no real separation between the shifting and the scheduling problems. Nevertheless,
+this loop compaction with release dates looks promising and we plan to explore it.
+A possibility when dealing with pipelined resources is to change the graph so that d
+cutting an operation into several nodes: a rst real node corresponding to the eective resource
+utilization, and several virtual nodes, one for each unit of latency (virtual nodes can be scheduled
+on innite virtual resources). With this approach, we will nd a shorter clock period (because the
+delay of a node is now cut into several parts) equal to d 1 e. The situation is actually equivalent
+to the case of unit delays and unpipelined resources (and thus the bound of Equation 3 is the same
+with d max replaced by 1). The problem however is that the algorithm is now pseudo-polynomial
+because the number of vertices of the graph depends linearly on d max . This can be unacceptable
+if pipeline latencies are large. Another strategy is to rely, as several other heuristics do, on loop
+unrolling. We can hide the preponderance of d max (in the worst case bound and in the overlapping)
+by unrolling the loop a sucient number of times so that  p is large compared to d max . Since
+resources are limited, unrolling the loop increases the lower bound due to resources and thus the
+minimal initiation interval. But, this is also not completely satisfying. We are thus working on
+better optimization choices for the initial shift or on an improved compaction phase to overcome
+this problem.
+Currently, our algorithm has been implemented at the source level using the source-to-source
+transformation library, Nestor [26], mainly to check the correctness of our strategies. But we found
+dicult to completely control what compiler back-ends do. In particular, lot of work remains to
+be done to better understand the link between loop shifting and low-level optimizations such as
+register allocation, register renaming, strength reduction, and even the way the code is translated!
+Just consider Example 2 where we write instead
+simple modication reduces 1 and  opt to 3! Minimizing the number of zero-weight edges still lead
+to the best solution for loop compaction (with a clock period equal to 4), except if we simultaneously
+want to keep the clock period less than 3. Both programs are equivalent, but the software pipelining
+problem changes. How can we control this? This leads to the more general question: at which level
+should software pipelining be performed?
+
+
+
+--R
+
+Perfect pipelining
+Software pipelining.
+
+Circuit retiming applied to decomposed software pipelining.
+Rotation scheduling: a loop pipelining algorithm.
+
+Combining retiming and scheduling techniques for loop parallelization and loop tiling.
+
+Generating close to optimum loop schedules on parallel processors.
+Graphs and Algorithms.
+Cyclic scheduling on parallel processors: an overview.
+Computer architecture: a quantitative approach (2nd edition).
+
+Circular scheduling.
+A characterization of the minimum cycle mean in a digraph.
+Software pipelining
+Retiming synchronous circuitry.
+Swing modulo scheduling: a lifetime-sensitive approach
+
+Dynamic speculation and synchronization of data dependences.
+
+Iterative modulo scheduling: an algorithm for software pipelining.
+Iterative modulo scheduling.
+Some scheduling techniques and an easily schedulable horizontal architecture for high performance scienti
+
+The Nestor library: A tool for implementing Fortran source to source transformations.
+Decomposed software pipelining.
+--TR
+Graphs and algorithms
+Software pipelining: an effective scheduling technique for VLIW machines
+On optimal parallelization of arbitrary loops
+Circular scheduling
+An efficient resource-constrained global scheduling technique for superscalar and VLIW processors
+Lifetime-sensitive modulo scheduling
+Rotation scheduling
+Minimum register requirements for a modulo schedule
+Specification of software pipelining using Petri nets
+Decomposed software pipelining
+Software pipelining
+Circuit Retiming Applied to Decomposed Software Pipelining
+Computer architecture (2nd ed.)
+The IA-64 Architecture at Work
+Perfect Pipelining
+Some scheduling techniques and an easily schedulable horizontal architecture for high performance scientific computing
+Swing Modulo Scheduling
+
+--CTR
+Pemysl cha , Zdenk Hanzlek , Antonn Hemnek , Jan Schier, Scheduling of Iterative Algorithms with Matrix Operations for Efficient FPGA Design--Implementation of Finite Interval Constant Modulus Algorithm, Journal of VLSI Signal Processing Systems, v.46 n.1, p.35-53, January   2007

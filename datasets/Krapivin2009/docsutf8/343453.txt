@@ -1,0 +1,794 @@
+--T
+A Low Overhead Logging Scheme for Fast Recovery in Distributed Shared Memory Systems.
+--A
+This paper presents an efficient, writer-based logging scheme for recoverable distributed shared memory systems, in which logging of a data item is performed by its writer process, instead of every process that accesses the item logging it. Since the writer process maintains the log of data items, volatile storage can be used for logging. Only the readers' access information needs to be logged into the stable storage of the writer process to tolerate multiple failures. Moreover, to reduce the frequency of stable logging, only the data items accessed by multiple processes are logged with their access information when the items are invalidated, and also semantic-based optimization in logging is considered. Compared with the earlier schemes in which stable logging was performed whenever a new data item was accessed or written by a process, the size of the log and the logging frequency can be significantly reduced in the proposed scheme.
+--B
+Introduction
+Distributed shared memory(DSM) systems[15] transform an existing network of workstations to a powerful
+shared-memory parallel computer which could deliver superior price/performance ratio. However,
+with more workstations engaged in the system and longer execution time, the probability of failures in-
+creases, which could render the system useless. For the DSM system to be of any practical use, it is
+important for the system to be recoverable so that the processes do not have to restart from the beginning
+when there is a failure [25]. An approach to provide fault-tolerance to the DSM systems is to use the
+checkpointing and rollback-recovery. Checkpointing is an operation to save intermediate system states
+into the stable storage which is not affected by the system failures. With the periodic checkpointing, the
+system can recover to one of the saved states, called a checkpoint, when a failure occurs in the system.
+The activity to resume the computation from one of the previous checkpoints is called rollback.
+In DSM systems, the computational state of a process becomes dependent on the state of another
+process by reading a data item produced by that process. Because of such dependency relations, a process
+recovering from a failure has to force its dependent processes to roll back together, if it cannot reproduce
+the same sequence of data items. While the rollback is being propagated to the dependent processes, the
+processes may have to roll back recursively to reach a consistent recovery line, if the checkpoints for
+those processes are not taken carefully. Such recursive rollback is called the domino effect[17], and in
+the worst case, the consistent recovery line consists of a set of the initial points; i.e., the total loss of the
+computation in spite of the checkpointing efforts.
+One solution to cope with the domino effect is the coordinated checkpointing, in which each time
+when a process takes a checkpoint, it coordinates the related processes to take consistent checkpoints
+together [3, 4, 5, 8, 10, 13]. Since each checkpointing coordination under this approach produces a consistent
+recovery line, the processes cannot be involved in the domino effect. One possible drawback of
+this approach is that the processes need to be blocked from their normal computation during the check-pointing
+coordination. The communication-induced checkpointing is another form of the coordinated
+checkpointing, in which a process takes a checkpoint whenever it notices a new dependency relation
+created from another process[9, 22, 24, 25]. This checkpointing coordination approach also ensures no
+domino-effect since there is a checkpoint for each communication point. However, the overhead caused
+by too frequent checkpointing may severely degrade the system performance.
+Another solution to the domino effect problem is to use the message logging in addition to the
+independent checkpointing [19]. If every data item accessed by a process is logged into the stable storage,
+the process can regenerate the same computation after a rollback by reprocessing the logged data items.
+As a result, the failure of one process does not affect other processes, which means that there is no
+rollback propagation and also no domino effect. The only possible drawback of this approach is the
+nonnegligible logging overhead.
+To reduce the logging overhead, the scheme proposed in [23] avoids the repeated logging of the same
+data item accessed repeatedly. For the correct recomputation, each data item is logged once when it is
+first accessed, and the count of repeated access is logged for the item, when the data item is invalidated.
+As a result, the amount of the log can be reduced compared to the scheme in [19]. The scheme proposed
+in [11] suggests that a data item should be logged when it is produced by a write operation. Hence, a data
+item accessed by multiple processes need not be logged at multiple sites and the amount of the log can
+be reduced. However, for a data item written but accessed by no other processes, the logging becomes
+useless. Moreover, for the correct recomputation, a process accessing a data item has to log the location
+where the item is logged and the access count of the item. As a result, there cannot be much reduction in
+the frequency of the logging compared to the scheme in [23].
+To further reduce the logging overhead, the scheme proposed in [7] suggests the volatile logging.
+When a process produces a new data item by a write operation, the value is logged into the volatile
+storage of the writer process. When the written value is requested by other processes, the writer process
+logs the operation number of the requesting process. Hence, when the requesting process fails, the data
+value and the proper operation number can be retrieved from the writer process. Compared with the
+overhead of logging into the stable storage, volatile logging can cause much less overhead. However,
+when there are concurrent failures at the requesting process and the writer process, the system cannot be
+fully recovered.
+In this paper, we present a new logging scheme for a recoverable DSM system, which tolerates
+multiple failures. In the proposed scheme, two-level log structure is used in which both of the volatile
+and the stable storages are utilized for efficient logging. To speed up the logging and the recovery
+procedures, a data item and its readers' access information are logged into the volatile storage of the
+writer process. And, to tolerate multiple failures, only the log of access information for the data items
+are saved into the stable storage. For volatile logging, the limited space can be one possible problem
+and for stable logging, the access frequency of the stable storage can be the critical issue. To solve these
+problems, logging of a data item is performed only when the data becomes invalidated by a new write
+operation, and the writer process takes the whole responsibility for logging, instead that every process
+accessing the data concurrently logs it. Also, to eliminate unnecessary logging of data items, semantic-based
+optimization is considered for logging. As a result, the amount of the log and the frequency of
+stable storage accesses can substantially be reduced.
+The rest of this paper is organized as follows: Section 2 presents the DSM system model and the
+definition of the consistent recovery line is presented in Section 3. In Section 4 and Section 5, proposed
+logging and rollback recovery protocols are presented, respectively, and Section 6 proves the correctness
+of proposed protocols. To evaluate the performance of the proposed scheme, we have implemented the
+proposed logging scheme on top of CVM(Coherent Virtual Machine)[12]. The experimental results are
+discussed in Section 7, and Section 8 concludes the paper.
+2 The System Model
+A DSM system considered in this paper consists of a number of nodes connected through a communication
+network. Each node consists of a processor, a volatile main memory and a non-volatile secondary
+storage. The processors in the system do not share any physical memory or global clock, and they communicate
+by message passing. However, the system provides a shared memory space and the unit of the
+shared data is a fixed-size page.
+The system can logically be viewed as a set of processes running on the nodes and communicating
+by accessing a shared data page. Each of the processes can be considered as a sequence of state transitions
+from the initial state to the final state. An event is an atomic action that causes a state transition
+within a process, and a sequence of events is called a computation. In a DSM system, the computation
+of a process can be characterized as a sequence of read/write operations to access the shared data pages.
+The computation performed by each process is assumed to be piece-wise deterministic; that is, the computational
+states generated by a process is fully determined by a sequence of data pages provided for a
+sequence of read operations.
+For the DSM model, we assume the read-replication model [21], in which the system maintains a
+single writable copy or multiple read-only copies for each data page. The memory consistency model we
+assume is the sequential consistency model, in which the version of a data page a process reads should
+Reader
+Page X
+Copy Of
+Request
+(2)
+(2)
+(2)
+Writer
+Ownership
+Owner
+Page X&
+Invalidate
+Copy-Set Of X
+Owner
+(a) Remote Read Operation (b) Remote Write Operation
+(2)
+(1)
+Read
+Read-Only
+Request
+(1)
+Write
+
+Figure
+
+1: Remote Read/Write Procedures
+be the latest version that was written for that data page [14]. A number of different memory semantics
+for the DSM systems have been proposed including processor, weak, and release consistency [16], as
+well as causal coherence [1]. However, in this paper, we focus on the sequential consistency model, and
+the write-invalidation protocol [15] is assumed to implement the sequential consistency.
+
+Figure
+
+1 depicts the read and the write procedures under the write-invalidation protocol. For each
+data page, there is one owner process which has the writable copy in its local memory. When a process
+reads a data page which is not in the local memory, it has to ask for the transfer of a read-only copy
+from the owner. A set of processes having the read-only copies of a data page is called a copy-set of
+the page. For a process to perform a write operation on a data page, it has to be the owner of the page
+and the copy-set of the page must be empty. Hence, the writer process first sends the write request to
+the owner process, if it is not the owner. The owner process then sends the invalidation message to the
+processes in the copy-set to make them invalidate the read-only copies of the page. After collecting the
+invalidation acknowledgements from the processes in the copy-set, the owner transfers the data page with
+the ownership to the new writer process. If the writer process is the owner but the copy-set is not empty,
+then it performs the invalidation procedure before overwriting the page.
+For each system component, we make the following failure assumptions: The processors are fail-stop
+[20]. When a processor fails, it simply stops and does not perform any malicious actions. The failures
+considered are transient and independent. When a node recovers from a failure and re-executes the com-
+putation, the same failure is not likely to occur again. Also, the failure of one node does not affect other
+nodes. We do not make any assumption on the number of simultaneous node failures. When a node fails,
+the register contents and the main memory contents are lost. However, the contents of the secondary
+storage are preserved and the secondary storage is used as a stable storage. The communication subsystem
+is reliable; that is, the message delivery can be handled in an error-free and virtually lossless manner
+by the underlying communication subsystem. However, no assumption is made on the message delivery
+order.
+3 The Consistent Recovery Line
+A state of a process is naturally dependent on its previous states. In the DSM system, the dependency
+relation between the states of different processes can also be created by reading and writing the same
+data item. If a process p i reads a data item written by another process p j , then p i 's states after the read
+event become dependent on p j 's states before the write event. More formally, the dependency relation
+can be defined as follows: Let R ff
+i denote the ff-th read event happened at process p i and I ff
+i denote the
+state interval triggered by R ff
+i and ended right before R ff+1
+i denotes the p i 's initial
+state. Let W ff
+i denote the set of write events happened in I ff
+the read (or the write) event on a data item x with the returning (or written) value u.
+Definition 1: An interval I ff
+i is said to be dependent on another interval I fi
+if one of the following
+conditions is satisfied, and such a dependency relation is denoted by I fi
+C2. R ff
+j and there is no other W
+and
+C3. There exists an interval I fl
+, such that, I fi
+and I fl
+
+Figure
+
+2 shows an example of the computational dependency among the state intervals for a DSM
+system consisting of three processes . The horizontal arrow in Figure 2(a) represents the
+progress of the computation at each process and the arrow from one process to another represents the data
+page transfer between the processes. A data page X (or Y ) containing the data item x (or y) is denoted
+by X(x) (or Y (y)). Figure 2(b) depicts the dependency relation created in Figure 2(a) as a directed
+graph, in which each node represents a state interval and an edge (or a path) from a node n ff to another
+I
+jI jI
+kI
+kI
+(a) Computation Diagram (b) Dependency Graph
+
+Figure
+
+2: An Example of Dependency Relations
+node n fi indicates a direct (or a transitive) dependency relation from a state interval n ff to another state
+interval n fi .
+Note that in Figure 2(a), there is no dependency relation from I 1
+j to I 1
+k according to the definition
+given before. However, in the DSM system, it is not easy to recognize which part of a data page has been
+accessed by a process. Hence, the computation in Figure 2(a) may not be differentiated from the one in
+which p k 's read operation is R(y 0 ). In such a case, there must be the dependency relation, I 1
+k . The
+dotted arrow in Figure 2(b) denotes such possible dependency relation and the logging scheme must be
+carefully designed to take care of such possible dependency for the consistent recovery.
+The dependency relations between the state intervals may cause possible inconsistency problems
+when a process rolls back and performs the recomputation. Figure 3 shows two typical examples of inconsistent
+rollback recovery cases, discussed in message-passing based distributed computing systems[6].
+First, suppose the process p i in Figure 3(a) should roll back to its latest checkpoint C i due to a failure
+but it cannot retrieve the same data item for R(y). Then, the result of W (x) may be different from the
+one computed before the failure and hence, the consistency between p i and p j becomes violated since
+computation after the event R(x) depends on the invalidated computation. Such a case is called an
+orphan message case.
+On the other hands, suppose the process p j in Figure 3(b) should roll back to its latest checkpoint C j
+due to a failure. For p j to regenerate the exactly same computation, it has to retrieve the same data item x
+from does not roll back to resend the data page X(x). Such a case is called a lost message case.
+However, in the DSM system, the lost message case itself does not cause any inconsistency problem. If
+Failure
+Failure
+(a) Orphan Message Case (b) Lost Message Case
+
+Figure
+
+3: Possible Inconsistent Recovery Lines
+there has been no other write operation since W (x) of p i , then p j can retrieve the same contents of
+the page from the current owner, at any time. Even though there has been another write operation and
+the contents of the page has been changed, p j can still retrieve the data page X(x) (even with different
+contents) and the different recomputation of p j does not affect other processes unless p j has had any
+dependent processes before the failure.
+Hence, in the DSM system, the only rollback recovery case which causes an inconsistency problem
+is the orphan message case.
+Definition 2: A process is said to recover to a consistent recovery line, if and only if it is not involved in
+any orphan message case after the rollback recovery.
+4 The Logging Protocol
+For efficient logging, three principles are adopted. One is the writer-based logging. Instead of multiple
+readers logging the same data page, one writer process takes the responsibility for logging of the page.
+Also, invalidation-triggered logging is used, in which logging of a data page is delayed until the page
+is invalidated. Finally, semantic-based logging optimization is considered. To avoid the unnecessary
+logging activities, the access pattern of the data by related processes is considered into the logging
+strategy.
+4.1 Writer-Based, Invalidation-Triggered Logging
+For consistent regeneration of the computation, a process is required to log the sequence of data pages it
+has accessed. If the same contents of a data page have been accessed more than once, the process should
+log the page once and log its access duration, instead of logging the same page contents, repeatedly.
+The access duration is denoted by the first and the last computational points at which the page has
+been accessed. The logging of a data page can be performed either at the process which accessed it (the
+reader) or at the process which produced it (the writer). Since a data page produced by a writer is usually
+accessed by multiple readers, it is more efficient for one writer to log the page rather than multiple readers
+log the same page. Moreover, the writer can utilize the volatile storage for the logging of the data page,
+since the logged pages should be required for the reader's failure, not for the writer's own failure. Even
+if the writer loses the page log due to its own failure, it can regenerate the same contents of the page,
+under the consistent recovery assumption.
+To uniquely identify each version of data pages and its access duration, each process p i in the system
+maintains the following data structures in its local memory:
+assigned to process p i .
+variable that counts the number of read and write operations performed by process
+Using opnum i , a unique sequence number is assigned to each of read and write operations
+performed by p i .
+For each version of data page X produced by p i , a unique version identifier is assigned.
+ffl version x : A unique identifier assigned to each version of data page X . version
+where opnum i is the opnum value at the time when p i produced the current version of X .
+When produces a new version of X by a write operation, version x is assigned to the page. When
+the current version of X is invalidated, p i logs the current version of X with its version x into p i 's volatile
+log space, and it also has to log the access duration for the current readers of page X . To report the access
+duration of a page, each reader p j maintains the following data structure associated with page X , in its
+local memory.
+ffl duration jx : A record variable with four fields, which denote the access information of page X at p j .
+first : The value of opnum j at the time when page X is first accessed at p j .
+last : The value of opnum j at the time when page X is invalidated at p j .
+When the new version of page X is transferred from the current owner, p j creates duration jx and
+fills out the entries pid, version, and first. The entry last is completed when p j receives an invalidation
+message for X from the current owner, p i . Process p j then piggybacks the complete duration jx into
+its invalidation acknowledgement sent to p i . The owner p i , after collecting the duration kx from every
+reader logs the collected access information into its volatile log space. The owner p i may also have
+duration ix , if it has read the page X after writing on it. Another process which implicitly accesses the
+current version of X is the next owner. Since the next owner usually makes partial updates on the current
+version of the page, the current version has to be retrieved in case of the next owner's failure. Hence,
+when a process p k sends a write request to the current owner p i , it should attach its opnum k value, and
+on the receipt of the request, creates duration kx , in which first = last
+We here have to notice that the volatile logging of access information by the writer provides fast
+retrieval in case of a reader's failure. However, the information can totally be lost in case of the writer's
+failure since unlike the data page contents, the access information cannot be reconstructed after the
+failure. Hence, to cope with the concurrent failures which might occur at the writer and the
+readers, stable logging of the access information is required. When the writer p i makes the volatile
+log of access information, it should also save the same information into its stable log space, so that the
+readers' access information can be reconstructed after the writer fails.
+
+Figure
+
+4 shows the way how the writer-based, invalidation-triggered logging protocol is executed
+incorporated with the sequential consistency protocol, for the system consisting of three processes
+. The symbol R ff (X) (or W ff (X)) in the figure denotes the read (or the write) operation to
+data page X with the opnum value ff, and INV (X) denotes the invalidation of page X . In the figure,
+it is assumed that the data page X is initially owned by process p j . As it is noticed from the figure, the
+proposed logging scheme requires a small amount of extra information piggybacked on the write request
+message and invalidation acknowledgements. And, the volatile and the stable logging is performed only
+by the writer process and only at the invalidation time. Figure 4 also shows the contents of volatile and
+stable log storages at process p j . Note that the stable log of p j includes only the access information,
+while the volatile log includes the contents of page X in addition to the access information.
+By delaying the page logging until the invalidation time, the readers' access information can be collected
+without any extra communication. Moreover, the logging of access duration for multiple readers
+can be performed with one stable storage access. Though the amount of access information is small,
+Read
+Request
+Read
+Request
+Request
+Write
+Invalidate
+Invalidate
+Invalidate
+Invalidate
+Ownership
+(1)
+(i, j:1, 1, 1)
+Read-Only
+Copy of
+Copy of
+Read-Only
+
+Figure
+
+4: An Example of Writer-Based, Invalidation-Triggered Logging
+frequent accesses to the stable storage may severely degrade the system performance. Hence, it is
+very important to reduce the logging frequency with the invalidation-triggered logging. However, the
+invalidation-triggered logging may cause some data pages accessed by readers but not yet invalidated to
+have no log entries. For those pages, a reader process cannot retrieve the log entries, when it re-executes
+the computation due to a failure. Such a data page, however, can be safely re-fetched from the current
+owner even after the reader's failure, since a data page accessed by multiple readers cannot be invalidated
+unless every reader sends the invalidation acknowledgement back. That is, the data pages currently valid
+in the system are not necessary to be logged.
+The sequential consistency protocol incorporated with the writer-based, invalidation-triggered logging
+is formally presented in Figure 5 and Figure 6, in which the bold faced codes are the ones added for
+the logging protocol.
+4.2 Semantic-Based Optimization
+Every invalidated data page and its access information, however, are not necessary to be logged, considering
+the semantics of the data page access. Some data pages accessed can be reproduced during the
+recovery and some access duration can implicitly be estimated from other logged access information.
+When p i reads a data page X:
+If
+Send Read-Request(X) to Owner(X);
+Wait for Page(X);
+If (Not-Exist(duration ix
+duration ix .pid=pid
+duration ix .version=version x ;
+duration ix .first=opnum i +1;
+duration ix .last=0;
+When receives Read-Request(X) from
+Send Page(X) to
+
+Figure
+
+5: Writer-Based, Invalidation-Triggered Logging Protocol
+In the semantic-based logging strategy, some unnecessary logging points are detected based on the data
+page access pattern, and the logging at such points are avoided or delayed. This logging strategy can further
+reduce the frequency of the stable logging activity and also reduce the amount of data pages logged
+in the volatile storage.
+First of all, the data pages with no remote access need not to be logged. A data page with no remote
+access means that the page is read and invalidated locally, without creating any dependency relation. For
+example, in Figure 7, process p i first fetches the data page X from p j and creates a new version of X
+with an identifier (i:1). This version of the page is locally read for R 2 (X) and R 3 (X), and invalidated
+for W 4 (X). However, when the version (i:1) of X is invalidated due to the operation W 4 (X), p i need not
+log the contents of page X and the access duration (i,i:1,2,4). The reason is that during the recovery of p i ,
+the version (i:1) of X can be regenerated by the operation W 1 (X) and the access duration (i,i:1,2,4) can
+be estimated as the duration between W 1 (X) and W 4 (X). The next version (i:4) of page X , however,
+need to be logged when it is invalidated due to the operation W 2 (X) of p j , since the operation W 2 (X)
+When p i writes on a data page X:
+If
+Send (Write-Request(X) and opnum i ) to Owner(X);
+Wait for Page(X);
+Else If (Copy-Set(X) 6= OE) f
+Send Invalidation(X) to Every p k 2 Copy-Set(X);
+Wait for Invalidation-ACK(X) from Every p k 2 Copy-Set(X);
+duration x =[ k2Copy\GammaSet(X) duration
+Save (version x , Page(X), duration x ) into Volatile-Log;
+Flush (version x , duration x ) into Stable-Log;
+Write Page(X);
+version x =pid i :opnum
+When receives (Write-Request(X) and opnum j ) from
+Send Invalidation(X) to Every p k 2 Copy-Set(X);
+Wait for Invalidation-ACK(X) from Every p k 2 Copy-Set(X);
+duration x =[ k2Copy\GammaSet(X) duration
+duration jx .pid=pid
+duration jx .version=version x ;
+duration jx .first=duration jx .last=opnum j +1;
+duration x =duration x [ duration jx ;
+Save (version x , Page(X), duration x ) into Volatile-Log;
+Flush (version x , duration x ) into Stable-Log;
+Send Page(X) and Ownership(X) to
+When
+duration ix .last=opnum
+Send (Invalidation-ACK(X) and duration ix ) to Owner(X);
+
+Figure
+
+Invalidation-Triggered Logging Protocol (Continued)
+
+Figure
+
+7: An Example of Local Data Accesses
+of implicitly requires the remote access of the version (i:4).
+By eliminating the logging of local data pages, the amount of logged data pages in the volatile log
+space and also the access frequency to the stable log space can significantly be reduced. However, such
+elimination may cause some inconsistency problems as shown in Figure 8, if it is integrated with the
+invalidation-triggered logging. Suppose that process p i in the figure should roll back after its failure. For
+the consistent recovery, p i has to perform the recomputation up to W 4 (X). Otherwise, an orphan message
+case happens between p i and p j . However, p i performed its last logging operation before W 2 (X) and
+there is no log entry up to W 4 (X). If p i has no dependency with p j , then it does not matter whether p i
+rolls back to W 2 (X) or to W 4 (X). However, due to the dependency with p j , process p i has to perform
+the recomputation at least up to the point at which the dependency has been formed.
+To record the opnum value up to which a process has to recover, each process p i in the system maintains
+an n-integer array, called an operation counter vector(OCV ), where n is the number of processes
+in the system (OCV [n])). The i-th entry, V i [i], denotes the current opnum
+value of denotes the last opnum value of p j on which p i 's current computation is
+dependent. This notation is similar to the causal vector proposed in [18]. Hence, when a process p j
+transfers a data page to another process p i , it sends its current OCV j value with the page. The receiver
+updates its OCV i by taking the entry-wise maximum value of the received vector and its own
+vector, as follows:
+For example, in Figure 8, when p i sends the data page X and its version identifier (i;4) to p j , it sends
+its with the page and then p j updates its OCV j as (4; 2; 0). When p j sends the data
+page Y and its version identifier (j:3) to p k , OCV sent with the page, and OCV k is
+Failure
+Logging
+
+Figure
+
+8: An Example of Operation Counter Vectors
+updated as OCV 1). As a result, each V i [j] in OCV i indicates the last operation of process p j
+on which process p i 's current computation is directly or transitively dependent. Hence, when p j performs
+a rollback recovery, it has to complete the recomputation at least up to the point V i [j] to yield consistent
+states between p i and p j .
+Another data access pattern to be considered for the logging optimization is a sequence of write
+operations performed on a data page, as shown in Figure 9. Processes l , in the figure,
+sequentially write on a data page X , however, the written data is read only by R 2 (X) of p l . This access
+pattern means that the only explicit dependency relation which occurred in the system is W
+l . Even though there is no explicit dependency between any of the write operations shown
+in the figure, the write precedence order between those operations is very important, since the order
+indicates the possible dependency relation explained in Section 3 and it also indicates which process
+should become the current owner of the page after the recovery. To reduce the frequency of stable
+logging without violating the write precedence order, we suggest the delayed stable logging of some
+precedence orders.
+In the delayed stable logging, the volatile logging of a data page and its access duration is performed
+as described before, however, the stable logging is not performed when a data page having no copy-set
+is invalidated. Instead, the information regarding the precedence order between the current owner of
+the page and its next owner is attached into the data page transferred to the next owner. Since the new
+owner maintains the unlogged precedence order information, the correct recomputation of its precedent
+can be performed as long as the new owner survives. Now, suppose that the new owner and its precedent
+fail concurrently. If the new owner fails without making any new dependent after the write, arbitrary
+recomputation may not cause any inconsistency problem between the new owner and its precedent.
+Pl
+
+Figure
+
+9: An Example of Write Precedence Order
+However, if it fails making new dependents after the write, the correct recovery may not be possible.
+Hence, a process maintaining the unlogged precedence order information should perform the stable
+logging before it creates any dependent process.
+For example, in Figure 9, p i does not perform stable logging when it invalidates page X . Instead,
+maintains the precedence information, such as (i:1) ! (j:1), and performs stable logging when it
+transfers page X to p k . At this time, the precedence order between p j and p k , (j:1) ! (k:1), can also
+be stably logged together. Hence, the page X transferred from p j to p k need not carry the precedence
+relation between p j and p k . As a result, the computation shown in Figure 9 requires at most two stable
+logging activities, instead of four stable logging activities.
+5 The Recovery Protocol
+For the consistent recovery, two log structures are used. The volatile log is mainly used for the recovering
+process to perform the consistent recomputation, and the stable log is used to reconstruct the volatile log
+to tolerate multiple failures. In addition to the data logging, independent checkpointing is periodically
+performed by each process to reduce the recomputation time.
+5.1 Checkpointing and Garbage Collection
+To reduce the amount of recomputation in case of a failure, each process in the system periodically takes
+a checkpoint. A checkpoint of a process p i includes the intermediate state of the process, the current
+value of opnum i and OCV i , and the data pages which p i currently maintains. When a process takes a
+new checkpoint, it can safely discard its previous checkpoint. The checkpointing activities among the
+related processes need not be performed in a coordinated manner.
+A process, however, has to be careful in discarding the stable log contents saved before the new
+checkpoint, since any of those log entries may still be requested by other dependent processes. Hence,
+for each checkpoint, C ff , of a process p i , p i maintains a logging vector, say LV i;ff . The j th entry of
+the vector, denoted by LV i;ff [j], indicates the largest opnum j value in duration jx logged before the
+corresponding checkpoint. When a process p j takes a new checkpoint and the recomputation before
+that checkpoint is no longer required, it sends its current opnum j value to the other processes. Each
+process periodically compares the received opnum j value with the LV i;ff [j] value of each checkpoint
+C ff . When for every p j in the system, the received opnum j becomes larger than LV i;ff [j], process p i can
+safely discard the log information saved before the checkpoint, C ff .
+5.2 Rollback-Recovery
+The recovery of a single failure case is first discussed. For a process p i to be recovered from a failure,
+a recovery process for
+i , is first created and it sets p i 's status as recovering. Process p 0
+broadcasts the log collection message to all the other processes in the system. On the receipt of the
+log collection message, each process p j replies with the i-th entry of its OCV j , V j [i]. Also, for any data
+page X which is logged at p j and accessed by p i , the logged entry of duration ix and the contents of page
+are attached to the reply message. When p 0
+collects the reply messages from all the processes in the
+system, it creates its recovery log by arranging the received duration ix in the order of duration ix .first
+and also arranging the received data pages in the corresponding order. Process p 0
+then selects the maximum
+value among the collected V j [i] entries, where sets the value as p i 's recovery
+point.
+Since all the other processes in the system, except p i , are in the normal computational status, p 0
+can collect the reply messages from all of them, and the selected recovery point of p i indicates the
+last computational state of p i on which any process in the system is dependent. Also, the constructed
+recovery log for p i includes every remote data page that p i has accessed before the failure. The recovery
+process
+then restores the computational state from the last checkpoint of p i and from the restored state,
+process begins the recomputation. The restored state includes the same set of active data pages which
+were residing in the main memory when the checkpoint was taken. The value of opnum i is also set
+as the same one of the checkpointing time. During the recomputation, process p i maintains a variable,
+Condition Action
+and Read(X) or Write Page(X)
+duration ix .last
+Read Request(X) to Owner(X)
+.last Invalidate(X)
+Read Request(X) to Owner(X)
+recovery log
+
+Table
+
+1: Retrieval of Data Pages during the Recomputation
+called which is the value of duration ix .first for the first entry of the recovery log, and Next i
+indicates the time to fetch the next data page from the recovery log.
+The read and write operations for p i 's recomputation are performed as follows: For each read or
+first increments its opnum i value by one, and then compares opnum i with Next i . If
+they are matched, the first entry of the recovery log including the contents of the corresponding page and
+its duration ix is moved to the active data page space. Then, the operation is performed on the new page
+and any previous version of the page is now removed from the active data page space. The new version
+of the page is used for the read and write operations until opnum i reaches the value of duration ix .last.
+For some read and write operations, data pages created during the recomputation need to be used because
+of the logging optimization. Hence, if a new version of a data page X is created by a write operation
+and the corresponding log entry is not found in the recovery log, the page must be kept in the active data
+page space and the duration ix .last is set as the infinity. This version of page X can be used until the
+next write operation on X is performed or a new version of X is retrieved from the recovery log.
+Sometimes, when p i reads a data page X , it may face the situation that a valid version of X is not
+found in the active data page space and it is not yet the time to fetch the next log entry (opnum
+Next i ). This situation occurs for a data page which has been accessed by p i before its failure, but, has
+not been invalidated. Note that such a page has not been logged since the current version is still valid.
+In this case, the current version of page X must be re-fetched from the current owner. Hence, when p i
+reads a data page X , it has to request the page X from the current owner, if it does not have any version
+of X in the active data page space, or, the duration ix .last value for page X in the active data page space
+is less than opnum i . In both cases, opnum i must be less than Next i . Any previous version of page X
+has to be invalidated after receiving a new version. The retrieval and the invalidation activities of data
+pages during the recomputation are summarized in Table 1. The active data page space is abbreviated to
+ADPS in the table.
+During the recomputation, process p i also has to reconstruct the volatile log contents which were
+maintained before the failure, for the recovery of other dependent processes. The access information of
+volatile log can be retrieved from its stable log contents while p 0
+i is waiting for the reply messages
+after sending out the log collection requests. However, the data pages which were saved in the volatile
+log must be created during the recomputation. Hence, for each write operation, p i logs the contents of
+the page with its version identifier if the corresponding access information entry is found in the volatile
+log. In any case, the write operation may cause the invalidation of the previous version of the page in
+the active data page space, however, it does not issue any invalidation messages to the other processes
+during the recomputation. When opnum i reaches the selected recovery point, p i changes its status from
+recovering to normal and resumes the normal computation.
+Now, we extend the protocol to handle the concurrent recoveries from the multiple failures. While
+a process p i (or p 0
+performs the recovery procedure, another process p j in the system can be in the
+failed state or it can also be in the recovering status. If p j is in the failed state, it cannot reply back to
+the log collection message of p 0
+i has to wait until p j wakes up. However, if p j is in the
+recovering status, it should not make p i wait for its reply since in such a case, both of p i and p j must end
+up with a deadlocked situation. Hence, any message sent out during the recovering status must carry the
+recovery mark to be differentiated from the normal ones, and such a recovery message must be taken care
+of without blocking, whether the message is for its own recovery or related to the recovery of another
+process. However, any normal message, such as the read/write request or the invalidation message, need
+not be delivered to a process in the recovering status, since the processing of such a message during the
+recovery may violate the correctness of the system.
+When
+in the recovering status receives a log collection message from another process p 0
+reconstructs the access information part of p i 's volatile log from the stable log contents, if it has not done
+it, yet. It then replies with the duration jx entries logged at p i to p j . Even though the access information
+can be restored from the stable log contents, the data pages which were contained in the volatile log
+may have not yet been reproduced. Hence, for each duration jx sent to
+records the value
+of duration jx .version and the corresponding data page should be sent to p j later as p i creates the page
+during the recomputation. Process p j begins the recomputation as the access information is collected
+from every process in the system.
+As a result, for every data page logged before the failure, the corresponding log entry, duration ix , can
+be retrieved from the recovery log, however, the corresponding data page X may not exist in the recovery
+log when the process p i begins the recomputation. Note that in this case, the writer of the corresponding
+page may also be in the recovery procedure. Hence, p i has to wait until the writer process sends the page
+X during the recomputation or it may send the request for the page X using the duration ix .version. In
+the worst case, if two processes p i and p j concurrently execute the recomputation, the data pages must be
+re-transferred between two processes as they have been done before the failure. However, there cannot
+occur any deadlocked situation, since the data transfer exactly follows the scenario described by the
+access information in the recovery log and the scenario must follow the sequentially consistent memory
+model.
+Before the recovery process p i begins its normal computation, it has to reconstruct two more informa-
+tion: One is the current operation counter vector and the other is the data page directory. The operation
+counter vector can be reconstructed from the vector values received from other processes in the system.
+For each V i [j] value, p i can use the value V j [i] retrieved from process p j , and for V i [i] value, it can use its
+current opnum i value. The directory includes the ownership and the copy-set information for each data
+page it owns. The checkpoint of p i contains the ownership information of the data pages it has owned
+at the time of checkpointing. Hence, during the recomputation, p i can reconstruct its current ownership
+information as follows: When p i performs a write operation on a data page, it records the ownership of
+the page on the directory. When p i reads a new data page from the log, it invalidates the ownership of that
+page since the logging means the invalidation. However, the copy-set of the data pages the process owns
+can not be obtained. Since the copy-set information is for future invalidation of the page, the process can
+put all the processes into the copy-set.
+6 The Correctness
+Now, we prove the correctness of the proposed logging and recovery protocols.
+Lemma 1: The recovery point selected under the proposed recovery protocol is consistent.
+Proof: We prove the lemma by a contradiction. Suppose that a process p i recovering from a failure
+selects an inconsistent recovery point, say R must have produced a data page X with
+version x =i:k, where k ? R i , and there must be another process p j alive in the system, which have read
+that page. This means that V j [i] of p j must be larger than or equal to k. Since R i is selected as the
+maximum value among the V k [i] values collected, R contradiction occurs. 2
+Lemma 2: Under the proposed logging protocol, a log exists for every data access point prior to the
+selected recovery point.
+Proof: For any data access point, if the page used has been transferred from another process, either it was
+logged before it has been transferred (the remote write case) or it is logged when the page is invalidated
+(the remote read case). If a data page locally generated is used for a data access point, either a log is
+created for the page when the page is invalidated (the remote invalidation case) or the log contents can
+be calculated from the next write point (the local invalidation case). In any case, the page which has
+not been invalidated before the failure can be retrieved from the current owner. Therefore, for any data
+access point, the log of the data page can either be found in the recovery log or calculated from other log
+contents. 2
+Theorem 1: A process recovers to a consistent recovery line under the proposed logging and recovery
+protocols.
+Proof: Under the proposed recovery protocol, a recovering process selects a consistent recovery point
+(Lemma 1), and the logging protocol ensures that for every data access point prior to the selected recovery
+point, a data log exists (Lemma 2). Therefore, the process recovers to a consistent recovery line. 2
+7 The Performance Study
+To evaluate the performance of the proposed scheme, two sets of experiments have been performed. A
+simple trace-driven simulator has been built to examine the logging behavior of various parallel programs
+running on the DSM system, and then the logging protocols have been implemented on top of CVM
+system to measure the effects of logging under the actual system environments.
+
+Figure
+
+10: Comparison of the Logging Amount (Synthetic Traces)
+7.1 Simulation Results
+A trace-driven simulator has been built and the following logging protocols have been simulated:
+Shared-access tracking(SAT)[23] : Each process logs the data pages transferred for read and write
+operations, and also logs the access information of the pages.
+Each process logs the data pages produced by itself, and also, for the
+data pages accessed, it logs the access information of the pages. In both of the SAT and the RWL
+schemes, the data pages and the related information are first saved in the volatile storage and logged
+into the stable storage when the process creates new dependency by transferring a data page.
+Write-triggered logging(WTL) : This is what we propose in this paper.
+The simulation has been run with two different sets of traces: One is the traces synthetically generated
+using random numbers and the other is the execution traces of some parallel programs.
+First, for the simulation, a model with 10 processes is used and the workload is randomly generated
+by using three random numbers for the process number, the read/write ratio, and the page number.
+One simulation run consists of 100,000 workload records and the simulation was repeated with various
+
+Figure
+
+11: Comparison of the Logging Frequency (Synthetic Traces)
+read/write ratios and locality values. The read/write ratio indicates the proportion of read operations to
+total operations. The read/write ratio 0.9 means that 90% of operations are reads and 10% are writes.
+The locality is the ratio of memory accesses which are satisfied locally. The locality 0.9 means that 90%
+of the data accesses are for the local pages.
+The simulation results with the synthetic traces are the ones which most well show the effects of
+logging for the various application program types. Figure 10 and Figure 11 show the effects of the
+read/write ratio and the locality of the application program on the number of logged data pages and
+the frequency of stable logging, respectively. The number in the parenthesis of the legend indicates
+the locality. In SAT scheme, after each data page miss, the logging of the newly transferred page is
+required. Hence, as the write ratio increases, the large number of data pages become invalidated and the
+large number of page misses can occur. As a result, the number of logged pages and also the logging
+frequency are increased. However, as the locality increases, the higher portion of the page accesses can
+be satisfied locally, and hence the number of data pages to be logged and the logging frequency can be
+decreased.
+In the RWL scheme, the number of logged data pages is directly proportional to the write ratio and
+the number is not affected by the locality, since each write operation requires the logging. However, the
+
+Figure
+
+12: Comparison of the Logging Amount (Parallel Program Traces)
+stable logging under this scheme is performed when the process creates a new dependent as in the SAT
+scheme, and hence, the logging frequency of the RWL scheme shows the performance which is similar
+to the one of the SAT scheme. Comparing the SAT scheme with the RWL scheme, the performance of
+the SAT scheme is better when both the write ratio and the locality are high, since in such environments,
+there has to be a lot of logging for the local writes in the RWL scheme.
+As for the WTL scheme, only the pages being updated are logged and the logging is performed only
+at the owners of the data pages. Compared with the SAT scheme in which every process in the copy-set
+performs the logging, the number of logged data pages is much smaller and the logging frequency is
+much lower in the WTL scheme. Also, in the WTL scheme, there is no logging for the data page with no
+remote access and some logging of the write-write precedence order can be delayed. Hence, the WTL
+scheme shows much smaller number of logged data pages and much lower logging frequency compared
+with the RWL scheme, in which the logging is performed for every write operation. Furthermore, the
+logging of data pages for the SAT scheme and the RWL scheme require the stable storage, while for the
+scheme, the volatile storage can be used for the logging.
+To further validate our claim, we have also used real multiprocessor traces for the simulation. The
+traces contain references produced by a 64-processor MP, running the following four programs: FFT,
+
+Figure
+
+13: Comparison of the Logging Frequency (Parallel Program Traces)
+SPEECH, SIMPLE and WEATHER. Figure 12 and Figure 13 show the simulation results using the
+parallel program traces. In Figure 12, for the programs, FFT, SIMPLE and WEATHER, the SAT scheme
+shows the worst performance, because those programs may contain the large number of read operations
+and the locality of those reads must be low. However, for the program, SPEECH, the RWL scheme shows
+the worst performance, because the program contains a lot of local write operations. In all cases, the WTL
+scheme consistently shows the best performance for the amount of the log. Also, considering the logging
+frequency shown in Figure 13, for all programs, the WTL scheme shows the lowest frequency.
+From the simulation results, we can conclude that our new scheme(WTL) consistently reduces the
+number of data pages that have to be logged and also the frequency of the stable storage accesses,
+compared with the other schemes(SAT,RWL). The reduction is more than 50% in most of the cases and
+it is shown in both synthetic and parallel program traces.
+7.2 Experimental Results
+To examine the performance of the proposed logging protocol under the actual system environments,
+the proposed logging protocol (WTL) and the protocol proposed in [23] (SAT) have been implemented
+on top of a DSM system. In order to implement the sequentially consistent DSM system, we use
+Application Logging Execution Logging Amount of Logged Number of
+Program Scheme Time (sec.) Overhead(%) Information (Bytes) Stable Logging
+
+Table
+
+2: Experimental Results
+the CVM(Coherent Virtual Machine) package [12], which supports the sequential consistency memory
+model, as well as the lazy release consistency memory models. CVM is written using C++ and well
+modularized and it was pretty straightforward to add the logging scheme. The basic high level classes are
+CommManager class and Msg class which handle the network operation, MemoryManager class which
+handles the memory management, and Page class and DiffDesc class handling the page management.
+The protocol classes such as LMW, LSW and SEQ inherit the high level classes and support operations
+according to each protocol. We have modified the subclasses in SEQ to implement the logging protocols.
+We ran our experiments using four SPARCsystem-5 workstations connected through 10Mbps ethernet.
+For the experiments, four application programs, such as FFT, SOR, TSP, WATER, have been run. Table 2
+summarizes the experimental results.
+The amount of logged information in Table 2 denotes the amount of data pages and access information
+which should be logged in the stable storage. For the SAT scheme, the data pages with the size of
+4K bytes and the access information should be logged, whereas for the WTL scheme, only the access
+information is logged. Hence, the amount of information logged in the WTL scheme is only 0.01%-0.5%
+of the one logged in the SAT scheme. The number of stable logging in the table indicates the frequency
+of disk access for logging. The experimental results show that the logging frequency in the WTL scheme
+
+Figure
+
+14: Comparison of the Logging Overhead
+is only 57%-66% of the one in the SAT scheme. In addition to the amount of logged information and the
+logging frequency, we have also measured the total execution times of the parallel programs under each
+logging scheme and without logging to compare the logging overhead.
+The logging overhead in Table 2 indicates the increases in the execution time under each protocol
+compared to the execution time under no logging environment, and the comparison of the logging overhead
+is also depicted in Figure 14. As shown in the table, the SAT scheme requires 20%-189% logging
+overhead, whereas the WTL scheme requires 5%-85% logging overhead. Comparing these two schemes,
+the WTL scheme achieves 55%-75% of reduction in the logging overhead compared to the SAT scheme.
+One reason of such reduction is the low logging frequency imposed by the WTL scheme, and the small
+amount of log information written under the WTL scheme can also be another reason. However, considering
+the fact that the increases in the amount of data pages written per each disk access do not cause
+much increases in the disk access time, the 75% reduction in the logging overhead may require another
+explanation. One possible explanation is the cascading delay due to the disk access time; that is, the
+stable logging delays the progress of not only the process which performs the logging, but also the one
+waiting for the data transfer from the process.
+Overall, the experimental results show that the WTL scheme reduces the amount of logged information
+and the logging frequency compared to the SAT scheme, and they also show that in the actual
+system environment, more reductions on the total execution time can be achieved.
+Conclusions
+In this paper, we have presented a new message logging scheme for the DSM systems. The message
+logging has been usually performed when a data page is transferred for a read operation so that the
+process does not have to affect other processes in case of the failure recovery. However, the logging to
+the stable storage always incurs some overhead. To reduce such overhead, the logging protocol proposed
+in this paper untilizes two-level log structure; the data pages and their access information are logged into
+the volatile storage of the writer process and only the access information is duplicated into the stable
+storage to tolerate multiple failures. The usage of two-level log structure can speed up the logging and
+also the recovery procedures with the higher reliability.
+The proposed logging protocol also utilizes two characteristics of the DSM system. One is that
+not all the data pages read and written have to be logged. A data page needs to be logged only when
+it is invalidated by the overwriting. The other is that the data page accessed by multiple processes
+need not be logged at every process site. By one responsible process logging the data page and the
+related information, the amount of the logging overhead can be substantially reduced. From the extensive
+experiments, we have compared the proposed scheme with other existing schemes and concluded that the
+proposed scheme always enforces much low logging overhead and the reduction in the logging overhead
+is more profound when the processes have more reads than writes. Since disk logging slows down the
+normal operation of the processes, we believe that parallel applications would greatly benefit from our
+new logging scheme.
+
+
+
+--R
+
+Implementing and programming causal distributed shared memory.
+Causal memory.
+
+The performance of consistent checkpointing in distributed shared memory systems.
+Network multicomputing using recoverable distributed shared memory.
+Distributed snapshot: Determining global states of distributed systems.
+Lightweight logging for lazy release consistent distributed shared memory.
+Coordinated checkpointing-rollback error recovery for distributed shared memory multicomputers
+Relaxing consistency in recoverable distributed shared memory.
+Reducing interprocessor dependence in recoverable shared memory.
+Implementation of recoverable distributed shared memory by logging writes.
+CVM: The Coherent Virtual Machine.
+A recoverable distributed shared memory integrating coherence and recoverability.
+How to make a multiprocessor computer that correctly executes multiprocess pro- grams
+Shared virtual memory on loosely coupled multiprocessors.
+Distributed shared memory: A survey of issues and algorithms.
+Reliability issues in computing system design.
+The causal ordering abstraction and a simple way to implement it.
+
+
+Algorithms implementing distributed shared memory.
+Fault tolerant distributed shared memory.
+Reduced overhead logging for rollback recovery in distributed shared memory.
+Fast recovery in distributed shared virtual memory systems.
+Recoverable distributed shared memory.
+--TR
+
+--CTR
+Taesoon Park , Inseon Lee , Heon Y. Yeom, An efficient causal logging scheme for recoverable distributed shared memory systems, Parallel Computing, v.28 n.11, p.1549-1572, November 2002

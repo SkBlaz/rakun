@@ -1,0 +1,1046 @@
+--T
+Evaluation of NUMA Memory Management Through Modeling and Measurements.
+--A
+Dynamic page placement policies for NUMA (nonuniform memory access time)shared-memory architectures are explored using two approaches that complement eachother in important ways. The authors measure the performance of parallel programsrunning on the experimental DUnX operating system kernel for the BBN GP1000, whichsupports a highly parameterized dynamic page placement policy. They also develop andapply an analytic model of memory system performance of a local/remote NUMAarchitecture based on approximate mean-value analysis techniques. The model isvalidated against experimental data obtained with DUnX while running a syntheticworkload. The results of this validation show that, in general, model predictions are quitegood. Experiments investigating the effectiveness of dynamic page-placement and, inparticular, dynamic multiple-copy page placement the cost of replication/coherency faulterrors, and the cost of errors in deciding whether a page should move or be remotelyreferenced are described.
+--B
+Introduction
+NUMA (nonuniform memory access time) multiprocessor designs are of increasing importance
+because they support shared memory on a large scale. For such systems, the placement and
+movement of code and data are crucial to performance. This need to deal with data placement
+issues has been called the "NUMA Problem". Presenting the programmer with an explicit NUMA
+memory model results in a significant additional programming burden. The alternative considered
+here is for the operating system (OS) to manage placement through the policies and mechanisms
+of the virtual memory subsystem. In such a system, the task of the OS-level memory management
+software is to decide when to reference memory remotely and when to migrate (move) or replicate
+(copy) a page to a frame in the local memory of the processor generating the memory request.
+OS-level NUMA memory management is an area of active research. Bolosky, Scott, and Fitzgerald
+and Cox and Fowler [10] demonstrated specific solutions implemented on the IBM Ace and
+BBN Butterfly Plus multiprocessors, respectively. Black et al. proposed provably competitive
+algorithms for page migration and replication in [4, 5, 6]. Scheurich and Dubois proposed page
+migration algorithms based on page pivoting in [26]. Bolosky et al. conducted a trace-based simulation
+study of the effects of architectural features on the performance of several migration and
+replication policies in [8], and Ramanathan and Ni conducted a study of critical factors in NUMA
+memory management reported in [25]. We have also investigated OS-level NUMA memory management
+through experimentation, both with the USMR programming library for the BBN GP1000
+and with our DUnX kernel for the BBN GP1000 and TC2000 [14, 15, 17, 18, 19, 20, 21]. The
+unique contribution of this current work in relation to previous research is the complementary use
+of 1) measurements based on a flexible parameterized policy implementation that can explore a
+wide range of policy behavior and 2) an experimentally validated analytic model.
+Our focus has been on the class of NUMA architectures known as Local/Remote architectures,
+as typified by the BBN GP1000 [3]. Local/Remote architectures are those in which the memory
+modules of the machine are distributed such that there is one memory module local to each pro-
+cessor, with the rest being remote from that processor (but local to some other processor). Each
+processor/memory module pair is called a node. While a processor may directly reference any of the
+memory modules, references to the local module are much faster than to remote modules, since the
+request need not be sent through the interconnection network. For example, on the GP1000, a local
+read takes approximately 0:6-s, whereas a remote reference takes approximately 7:5-s (ignoring
+various contention factors).
+For this research, implementation-based experimentation has several advantages over more formal
+approaches. Most importantly, real applications can be used as the workload. The likelihood
+of discovering the subtle issues that may be important to addressing the problem increases.
+Complex interactions between the reference behavior of real programs and the features of policies
+implementable in an operating system kernel are often difficult, if not impossible, to capture in an
+abstract model. Thus, we have developed the DUnX (Duke University nX) operating system kernel
+as an experimental platform for exploring the potential role of the operating system in solving the
+NUMA Problem. On the other hand, performance measurement of implemented systems also has
+limitations: architectural parameters cannot easily be varied, the workload is limited to the set of
+available application programs, and the interpretation of results can be muddied by implementation
+details.
+In order to complement our experimental work, we have developed an analytical model of the
+memory management behavior of a NUMA multiprocessor supporting dynamic multiple-copy page
+placement (page placement with migration and replication) [16]. It is based on the approximate
+mean-value analysis (MVA) approach as in [2, 9, 22, 27, 29, 28]. The goal of the model is to
+evaluate the performance of some basic policies within the context of a given workload model.
+There are necessarily restrictions on the workload model and policies considered. We do not claim
+that our workload model can predict the exact performance of a specific real application program.
+We do, however, conjecture that the parameters of our workload model capture some of the key
+features of real programs and can provide insight into the general performance of different classes
+of programs on a given architecture and operating system. Within the context of our workload
+model it is straightforward to define an approximate ideal policy which always makes the proper
+choice between remote reference, migration, or replication depending on the interprocess reference
+granularity and the interprocess write granularity. This establishes a performance goal against
+which to compare other policies. There is no analogous policy that can be implemented and
+measured in an experimental system without knowledge of future references. The ideal policy can
+be modified to introduce errors (i.e., poor policy choices), so that their effects can be compared to
+the ideal performance for different workload assumptions.
+Working with both an experimental system and an analytic model puts us in a unique position
+to investigate a wide range of issues in NUMA memory management. First of all, this approach
+allows us to validate our model using experimental data obtained with DUnX. Then we can use both
+measurements of real applications running on DUnX and our model, with architectural parameters
+set to values that are consistent with our GP1000 implementation or other architectures, to answer
+a series of questions about dynamic page placment. These include the effectiveness of dynamic
+single-copy page placement, the effectiveness of dynamic multiple-copy page placement, the cost of
+using replication/coherency-fault pairs instead of page migrations, and the cost of incorrect policy
+decisions.
+In the next section, we describe the DUnX operating system kernel. In Section 3, we present
+the modeling approach. We outline the system model of the architecture and operating system
+in 3.1 and the workload model in 3.2. Validation is done in Section 4. The experiments and results
+are described in Section 5. Finally, we summarize in the last section.
+Experimental Framework
+We developed the DUnX kernel for the BBN GP1000 NUMA shared memory multiprocessor as a
+framework for implementing a wide assortment of dynamic page placement strategies. We initially
+viewed the NUMA memory management policy design space in terms of distinct points; individual
+policies that captured various combinations of the large number of factors that we suspected might
+affect performance. Nearly fifty policies were tested using DUnX, including (at least approximations
+of) most of the published policies, and the experimental results were reported in [18].
+Our early experiences allowed us to prune and consolidate techniques. It appeared that our
+further investigation of policy issues could best be formulated in the context of a single parameterized
+policy and studied by varying the parameter settings and measuring the effect on performance.
+This insight led to the development of version two of DUnX, which supports such a tunable policy.
+This single policy seems to capture a fairly large region of the policy design space, including the
+most successful policies identified in our earlier experiments. A study of the effects of policy tuning
+with respect to differences in applications and architectural features appears in [20].
+In this paper, we consider a static single-copy policy and our highly parameterized dynamic
+multiple-copy policy. The static policy places each virtual page in a frame on the processor that
+first references that page or in a frame on the processor explicitly specified by the application
+programmer when the virtual memory is allocated. Other processors that wish to share access to
+the page create mappings to the same physical copy (with the exception of code pages, which are
+always replicated to each node using them), and the placement of a page does not change unless it
+is selected for removal by the replacement policy and later paged in again.
+The dynamic policy that we consider uses the same initial placement as the static policy, but
+periodically reevaluates earlier decisions and allows multiple physical copies of a single virtual
+page. This policy can move a page to a local frame upon demand. It supports both migration
+and replication with the choice between the two operations based on reference history (specifically,
+the recent history of modifications made to the page). A directory-based invalidation scheme is
+used to ensure the coherence of replicated pages. DUnX supports a sequentially consistent memory
+system. Recent work suggests that weaker consistency models can be exploited to obtain additional
+performance improvements [1, 11, 12, 13]. The use of weak consistency could be incorporated
+into the DUnX framework as well. The policy applies a freeze/defrost strategy (an idea adopted
+from [10]) to control page bouncing, a condition in which a page is continually being migrated from
+one node to another. With the freeze/defrost strategy, excessive page movement is controlled by
+Param Role
+freeze-window defines size of "recent invalidations" window for freezing decisions
+recent-mod controls the replication vs. migration decision
+scan-delay sets the rate of scanner daemons
+sample-passes adjusts the number of reference collection samples
+defrost-trigger remote count - local count "successes" needed to defrost
+trigger-method controls the "invalidate all" vs. "invalidate remote" trigger decision
+
+Table
+
+1: Policy Parameter Summary
+freezing the page in place and forcing remote accesses. The freezing criterion is based on the time
+since the most recent invalidation of the page. Determining when to defrost a frozen page and
+trigger reevaluation of its placement is based on both time (by how often such decisions are made)
+and reference history (the recent remote/local usage). At the same time, choosing how to trigger
+new placement decisions is based on reference data (recent modification history).
+Six parameters control the behavior of the policy. One set of parameters controls the frequencies
+at which certain events take place (defrost and triggering decision-points, reference data collection,
+and aging of usage counts). Other parameters set thresholds on the interpretation of reference data
+(e.g., defining "recent" history). These parameters are not intended to be orthogonal, but they
+do provide a means to systematically study the policy design space. With appropriate parameter
+settings, behavior of the policy can be adjusted to mimic a wide variety of freeze-based policies.
+The parameters and their roles are summarized in Table 1.
+The policy is comprised of two parts. The first defines the behavior of the policy when faced
+with a page fault, and the second defines the behavior of the page scanner daemons used to trigger
+the reevaluation of earlier page placement decisions.
+When a fault occurs on a page that has not been replicated but is already resident in some
+remote physical frame, the chosen course of action depends primarily on the recent reference history
+for the page and the settings of the freeze-window and recent-mod policy parameters. The policy
+must decide between installing a remote mapping and migrating or replicating the page.
+The first step involves determining whether the page should be frozen by checking to see whether
+the most recent invalidation of the page (due to a page migration or coherency fault) occurred within
+the past freeze-window milliseconds. If the page is frozen (either imposed just now or sometime in
+the past), the remote frame is used to service the fault. The freeze-window parameter essentially
+limits the rate at which invalidations of a page can occur. When freeze-window is set to zero,
+the policy behaves much like the caching policies used in the proposed software distributed shared
+memory environments (e.g., [23, 24]). When freeze-window is set to infinity, a page may only
+be invalidated once (migrated once, or replicated until the first coherency fault occurs) before it is
+frozen. Values of freeze-window between these two extremes allow varying amounts of dynamic
+page placement activity (migration and replication). In essence, the freeze-window parameter
+controls the eagerness of the policy to migrate and replicate pages.
+Once it is determined that a local copy of the page is desired, it is necessary to decide between
+migration and replication. The recent-mod parameter controls this decision. The policy checks to
+see if the page has been recently modified by comparing the modification history (maintained by
+the page scanners through aging of the hardware modification bits) to the recent-mod parameter.
+If the aged modification counter exceeds the recent-mod threshold or if a write reference triggered
+the current fault, the page is migrated to a local free frame. Otherwise, a local free frame is used to
+create a replica of the page. Write access to all copies is prohibited, allowing the fault handler to
+ensure data coherency. When recent-mod ! 0, migration is always chosen in favor of replication
+(i.e., replication is not allowed). When recent-mod = 1, replications are chosen over migrations
+on any fault not triggered by a write reference. If we assume that the goal of the policy is to
+replicate only pages being referenced in a read-only fashion, then we can characterize recent-mod
+as the point at which the policy concludes that the last modification of the page is far enough in
+the past that it can assume that the page is now being referenced in a read-only fashion.
+The handling of a fault on a page that is already replicated requires that data coherence be
+maintained. If a write memory reference triggered the fault, all but the copy eventually used to
+satisfy the fault must be invalidated. If no local copy of the page exists, one of the existing replicas
+is migrated to a local frame. If a read memory reference triggered the fault, then the policy either
+uses an existing replica, or creates an additional local one if none already exists. There is no need
+to check for freezing, since it is impossible for a page that should be frozen to be replicated.
+Our policy uses a page scanner on each processor node to trigger the reevaluation of earlier
+placement decisions. The page scanners run every scan-delay seconds. Each time a scanner runs,
+it collects page reference and modification information for the frames on its processor. Separate
+local and remote reference counts are maintained, so that the policy can tell whether only local
+processes, only remote processes, or both local and remote processes are referencing each page.
+The remaining parameters specify details of scanner operation that have minor effects and are not
+varied in the experiments presented in this paper.
+3 Analytical Framework
+3.1 The System Model
+The system model is an approximate mean-value analysis (MVA) similar to those reported elsewhere
+
+Figure
+
+graphically depicts the modeled system, which is a Lo-
+cal/Remote memory architecture. The system is comprised of N processor/memory nodes, connected
+to each other through some interconnection network. Queuing delays are encountered when-
+\Upsilon
+\Upsilon
+\Upsilon
+Interconnection Network
+F
+A
+
+Figure
+
+1: System Queuing Model
+ever a processor attempts to reference memory and whenever a message is sent through the inter-connection
+network.
+
+Table
+
+summarizes model hardware and software input parameters. Since b is the number
+of blocks in a page, the time to read or write an entire page is bt bm and the time to transfer a
+page across the interconnection network is bt bx . The basic system model assumes a local memory
+reference takes a uniform amount of time, modeled in the t l input parameter. To account for time
+differences between read and write references in some systems (e.g. the BBN GP1000), we can derive
+the t l input parameter using t lr and t lw , the local read and write reference times, respectively.
+The memory management policy and the workload are both modeled by the software input
+parameters. The model assumes that the mean time between memory references is - time units, and
+that any given reference is to local memory with probability p l and to a remote memory module with
+probability . There are a number of different types of faults. We concentrate primarily
+on faults resulting in migration, replication, or coherency operations with the probabilities q m , q r ,
+and q c , respectively. This discussion omits details of other types of faults that enter into the model.
+In Subsection 3.2 we describe how these input parameters relate to application program reference
+patterns and management policies.
+The mean total time between virtual (user program) memory requests (R) issued by a processor
+is the sum of the execution time between requests (- ), the mean time to complete the memory
+request (R r ), and the weighted mean time for servicing encountered page faults (R f ) (equation 1).
+The mean time to complete a virtual memory request (R r ) (equation 2) depends on T l (equation 3),
+the mean time required to perform a local memory reference (including wait time) and T r (equa-
+tion 4), the time required to make a remote request. The page fault handler also makes local and
+remote memory references. The mean time (per virtual memory request) spent servicing faults,
+R f , is calculated based on the probabilities and costs of each type of fault. The calculation of the
+Symbol Meaning
+Hardware Input Parameters
+l short message memory reference time
+t lr local read reference time
+t lw local write reference time
+t x short message network transfer time
+t bm block memory reference time
+t bx block network transfer time
+b number of blocks in a page
+t d mean disk transfer time
+Software Input Parameters
+- mean time between memory reference requests
+l prob. that a memory reference is local
+r prob. that a memory reference is remote
+q r prob. of a page fault that results in a replication
+prob. of a page fault that results in a migration
+q c prob. of a page fault that is a coherency fault
+
+Table
+
+2: System Model Input Parameters
+wait times w l , w r , and w n is discussed in [17].
+Consider processor zero in Figure 1 making a reference to local memory, and then a reference to
+a location in memory module one. In the first case, the only wait required is at the queue labeled
+"B" in the figure. Thus, the service time is comprised of the single wait for local memory (w l ) and
+the time to actually complete the reference (t l ). In the second case, the request must be sent out
+over the network to memory module one. First, the request is delayed at queue "A" to wait for
+network access for w n time units, then it must travel through the network (t x time units) and wait
+at the remote memory module at queue "D" for w r time units. After the wait at queue "D" and
+the time to actually process the request (t l ), a return message must be sent back to the original
+requesting processor, zero. This involves waiting at queue "C" (w n ) and then the time to actually
+make the final transfer (t x ), thus yielding equation 4.
+PR Private data pages and code pages
+RO Read-only shared data
+RM Read-mostly shared data
+SS Shared-sequential pages
+SP Shared-parallel pages
+
+Table
+
+3: Shared Data Page Classes
+Symbol Meaning
+number of pages in class c
+R c mean read references to page
+references to page
+r c interprocess reference granularity
+mean number of processors sharing page
+
+Table
+
+4: Workload Model Input Parameters (c 2 fPR; RO;RM;SS;SPg)
+3.2 The Workload Model
+In this subsection, we develop a simple workload model for obtaining approximations to these input
+parameters for different application/policy combinations. We assume that each virtual page in the
+address space of a process can be placed into one of a small number of classes as shown in Table 3.
+Similar classifications into page classes and use in MVA models have been developed independently
+for studying cache coherency [2, 29]. PR pages contain program code and variables of which each
+process needs its own copy. We assume these pages are replicated into each local memory before
+execution. The RO class contains shared data pages which are never modified during the execution
+of the program. The class of RM pages contains those shared data pages that are modified only
+occasionally, but referenced in a read-only fashion far more often. The two remaining classes (SS
+and SP ) contain shared data pages that are read-write shared, but differ in how active the sharing
+is. Specifically, a read-write shared page is an SS class page if the number of references a process
+makes to such a page between references by another is large enough to justify migrating the page,
+and is an SP class page otherwise.
+For each of the five page classes, we define six workload model input parameters, summarized
+in
+
+Table
+
+4. P c , where c 2 fPR; RO;RM;SS;SPg, is the number of pages in class c. R c (W c ) is the
+mean number of read (write) memory references each process makes to each page in class c. r c (w c )
+is the interprocess reference (write) granularity; that is, the mean number of references a processor
+makes to each page in class c between reads or writes (writes) to that page by another processor.
+Policy Description
+ideal chooses the right operation
+static never migrate or replicate
+cache migrate SS and SP pages, replicate RO and RM pages
+MOR always migrate
+RC ideal with RC migrations
+error ideal with percentage of decisions wrong
+
+Table
+
+5: Model Policies
+The sixth parameter is M c , which is the mean number of processors sharing each page of class c.
+The r c parameter is what distinguishes SS from SP pages. If r c is small, migration is not likely to
+be cost effective and we classify the page as class SP. If, on the other hand, r c is rather large, then
+migration is likely to be worthwhile and we consider the page to be of class SS. In Section 5.5, we
+discuss results that make this distinction clear.
+On the first reference to a non-local page, any policy must chose between establishing a mapping
+to a remote copy of the page (thus deciding to reference that page remotely) or migrating or
+replicating that page to a local frame. In order to ensure strict data coherency, modification to
+a page is allowed only if there exists only a single valid copy of that page. An invalidation-based
+coherency protocol is used to enforce this requirement.
+
+Table
+
+5 lists the management policies considered in the model. An ideal policy makes the
+correct choice among the options on each reference. In addition to the ideal policy, we consider
+several other policies: static (never migrate or replicate), cache (always migrate SS and SP pages
+and always replicate RO and RM pages), migrate-on-reference (MOR) (always chose migration over
+remote references), ideal with migration errors (RC) (ideal with migration implemented through
+replication/coherency fault pairs), and ideal with percent errors (error) (a certain percentage of all
+ideal policy decisions are incorrect).
+We derive the system model parameters for each of these policies based on the workload model
+parameters.
+For static page placement, we know that q We assume that each page is
+placed in a frame on a randomly selected node that actually uses that page and, therefore, is local
+to at least one of the processors using that page. The probability of a reference being to a remote
+memory module (p r ) and to a local memory (p can be derived.
+The cache policy is the "always migrate or replicate" policy typically used by software distributed
+shared memory systems (e.g., [24]). Remote memory is never referenced directly, so
+The probability of migrating a page, q m , is simply the total number of SS and SP
+migrations divided by the total number of application references, where the mean number of migrations
+performed for each SS and SP page is the mean total number of references to those pages
+divided by the mean number of references the processor is able to make before needing to re-migrate
+the page back to a local frame. The probability of the cache policy replicating a page, q r , is the
+number of replications divided by the total number of references. References to a page that will be
+replicated are broken into runs of size w c , c 2 fRO;RMg, with a replication required at the start
+of each run (the page is not resident at the start of the computation, and a coherency fault ensures
+that a replication will be required after every w c references).
+For the migrate-on-reference (MOR) policy, q and the calculation of q m includes the
+RO and RM page references as well as the SS and SP page references.
+Key to the approximate ideal policy is knowledge of the reference count k mig necessary to
+justify a page migration and the reference count k rep necessary to justify a replication. The idea
+behind the ideal policy is that it is better to migrate a page than to reference it remotely whenever
+and better to replicate a page than to reference it remotely whenever w c ? k rep. We
+assume that the policy is able to distinguish between page classes. Consequently, for the RO and
+RM page classes, the policy uses the w c and k rep values to determine whether or not to replicate
+a page, and for the SS and SP classes, the policy uses r c and k mig values to determine whether or
+not to migrate a page. The policy never choses to migrate RO or RM pages, nor does it ever chose
+to replicate SS or SP pages.
+Migration can be effected through a replication/coherency fault pair (henceforth called an RC
+migration). The RC policy uses the ideal policy equations except that q r and q c are set to the
+original q m and q m is set to zero.
+Our error policy performs like the ideal policy, but with a certain fraction of the decisions being
+incorrect. The equations for the error policy are similar to those for the ideal policy but with a
+percent error factor for each class (e c ).
+4 Validation of the Model Against the Implementation
+In this section, we investigate the accuracy of our analytic predictions by comparing them to
+experimental results obtained using the DUnX operating system kernel running on a BBN GP1000
+multiprocessor. It is very difficult to derive accurate estimates for the input parameters to our
+workload model for some arbitrary application program, so we wish to avoid this task. Yet in order
+to validate the model, we need to examine a wide assortment of points in the possible workload
+space. To deal with these conflicting goals, we develop a synthetic program (called synth) for which
+detailed analysis is simplified. The synthetic program is parameterized so that it can, in effect,
+exhibit a wide assortment of different reference patterns.
+The five most important input parameters to synth are the number of pages in each of our five
+Instance P PR PRO PRM P SS P SP
+
+Table
+
+Synth Program Instances
+workload model page classes (i.e., PR, RO, RM , SS, and SP ). The synth program allocates the
+input number of shared pages of each class, and enters a series of loops with references to those
+pages. The loops are constructed so that the key workload model parameters (e.g., the interprocess
+reference granularities) are obeyed. Thus, if the mean interprocess reference granularity for the SS
+page class is r SS , then a synth process will make r SS references to such a page before any other process
+references that page. Through a detailed hand-level analysis of the synth compiler-generated
+assembler code, expressions for the numbers of memory references and instructions executed have
+been developed. Thus, we can quickly determine the total number of memory references made to
+each type of page given the correct values for the five synth input parameters.
+In this section, we consider nine points in the synth parameter space. We refer to these points
+as instances of synth, numbered 1 through 9. The instances are defined in Table 6.
+The first step in our analysis of a particular synth instance is to run it in a one-node cluster of our
+GP1000 under a static page placement policy. Each experiment is conducted ten times, so that the
+statistical significance of variation from analytic results can be checked. Using the reference count
+data obtained through our source analysis expressions and the mean measured completion time and
+page fault data, we compute - and the page fault probabilities for this instance of synth. This is
+possible in the one-node case because we know exactly what fraction of the memory references made
+are local (exactly 1), the total number of references made (from our source analysis expressions), and
+the numbers of page faults of different types encountered and their mean costs (from experimental
+data).
+In
+
+Figure
+
+2, we plot the measured (from DUnX) and predicted (from our system model) completion
+times (in seconds) for the nine instances running in a one-node cluster with static page
+placement. For the experimental results, two points are plotted for each experiment. These points
+bound a 99% confidence interval calculated using the Student-t distribution with a sample size of
+Comparison of Experimental and Predicted Data - 1 Node Case
+Model
+
+Figure
+
+2: Comparison of 1-Node Static Results (completion time in seconds)
+ten. The results match quite well. This, however, is expected since we used the experimental data
+to set the input parameters to the model. If the results didn't match, it would indicate a problem
+in our methodology.
+The next step in the analysis is to use the values obtained in the first step to make predictions
+about performance in an n-node cluster. These data are then compared to experimental data
+obtained by running synth under DUnX on our GP1000. For example, the 8-node results under a
+static page placement policy are shown in Figure 3. Again, the two DUnX points for each instance
+bound a 99% confidence interval established with ten sample points and the Student-t distribution.
+Note that each of the ten sample points is itself the mean completion time of the eight processes
+that comprise the computation.
+
+Figure
+
+3 shows that our analytic predictions are quite close to the experimental results, differing
+from the mean experimental time (the mean is not plotted but it lies halfway between the plotted
+bounds) by less than 5% in all cases. These data clearly show that our memory and network
+contention estimates are reasonably accurate, as are our workload model's p l and p r estimates.
+The analytic predictions are slightly optimistic, however, probably due to some combination of the
+following factors:
+1. Clustering in time of references to pages of a particular class - It is likely that each of
+the synth processes references pages of a certain class at roughly the same time. This, of
+course, means that memory and network contention encountered making those references
+may be higher than predicted, since the model assumes that these references are distributed
+Comparison of Experimental and Predicted Data - Static Policy
+Model
+
+Figure
+
+3: Comparison of 8-Node Static Results (completion time in seconds)
+uniformly in time.
+2. Clustering of page faults - Though only a few page faults occur, they all must occur at
+the start of the application. Thus, contention for operating system data structures may be
+higher, resulting in total page fault costs slightly greater than those predicted by the model.
+3. Other factors - The experimental data are obtained from a real system supporting a real
+user community. Certain operating systems functions, such as the process scheduler, may
+play a role in slowing the application, as may unexpected interference (in terms of memory,
+network, and OS data structure contention) from other users of the system. 1 It is simply
+not possible for the system model to account for all of the factors that may affect the overall
+performance of a real application.
+Of course, despite quantitative errors of as much as nearly 5%, the model predictions are qualitatively
+accurate.
+In
+
+Figure
+
+4, we compare analytic predictions of our nine synth instances running under the
+cache policy with experimental results obtained when running under (essentially) the same policy.
+The results for Instances 5, 7, 8, and 9 (those instances for which P SP ? 0) do not appear in
+the figure. For each of these cases, the model predicts excessively high completion times (e.g., for
+Instance 5, the prediction is over hours). We did not allow the experimental runs for these
+Other users may affect memory and network contention despite the fact that our computation runs in its own
+cluster of processor nodes since the operating system's disk buffer cache is distributed across the memories of all the
+nodes in the system.
+Comparison of Experimental and Predicted Data - Cache Policy
+Model 3
+w/barriers \Theta
+\Theta \Theta
+\Theta \Theta \Theta \Theta
+
+Figure
+
+4: Comparison of 8-Node Cache Results (completion time in seconds)
+instances to complete (for obvious reasons), but we did allow each to run long enough to conclude
+that excessive amounts of dynamic page placement activity (migrations, replications, and coherency
+were certain to result in very long application run times.
+The predictions for synth Instances 1 and 2 are well within 5% of the mean measured completion
+times. The factors contributing to these quantitative differences are likely the same as those
+proposed in our discussion of the 8-node static policy results.
+For synth Instances 4 and 6, the analytic predictions differ from the mean experimental completion
+time by a more significant amount (12:7% for Instance 4 and 21:4% for Instance 6). In the
+Instance 4 case, the analytic prediction lies within the 99% confidence interval, but the analytic
+prediction for Instance 6 is nearly 10% lower than even the lower bound on the 99% confidence
+interval.
+Only the lower bound of the 99% confidence interval for Instance 3 appears in Figure 4. The
+upper bound on that interval is over 800 seconds, indicating a wide variance in the measured
+completion times for that synth instance.
+The following factors play a role in the noted differences for synth Instances 3, 4, and
+1. "Fuzzy" phase transitions - When deriving the input parameters for our workload model, we
+make a simplifying assumption that phase transitions occur at distinct points in time. This
+assumption maximizes the r SS and wRM parameter estimates (minimizing the number of
+migrations and replications), since no overlapping of phases occurs. Unfortunately, when we
+actually run the application under DUnX, some overlap may occur, counter to our assumption.
+Since we overestimate r SS and wRM , the workload model predicts fewer migrations of SS
+pages and fewer coherency faults and replications of RM pages. Better estimates of r SS
+and wRM would likely improve the success of the model, but there is no clear-cut way to
+determine exactly how much the phase transitions may overlap (barring the introduction of
+barrier synchronization between phases).
+2. A subtle DUnX race - As it turns out, a subtle race condition in DUnX is also partially
+to blame. A processor may experience a page fault that results in a coherence operation or
+a page migration, yet be unable to complete the memory reference that triggered the fault
+before some other processor is able to replicate (disabling write access to the page) or migrate
+that same page. This causes the first processor to fault on the same memory reference once
+more, repeating the process. 2 As with the item number 1 above, it is difficult to imagine how
+one would include the effects of such a race in the analytic model.
+Note that both of these effects can introduce large amounts of variance in experimental measure-
+ments, since both the amount of phase overlap and the number of iterations through the DUnX
+coherency/write race are highly unpredictable.
+To test these hypotheses, we introduced several barrier synchronization points to the synth
+application so that the noted problems would be avoided. Results of these experiments are also
+shown in Figure 4 (as before, two data points bound a 99% confidence interval). We see that
+performance of the modified synth is much closer to that predicted by our model, despite the fact
+that the model does not account for the additional memory references and contention associated
+with the barrier synchronization points. Additionally, we note that the confidence interval size for
+the modified synth instances is also greatly reduced (the two Instance 4 points lie on top of one
+another). These data give strong support for our explanation of the noted differences in the model
+predictions and the experimental measurements.
+It is more difficult to test the accuracy of our analytic model of more realistic policies, since
+there is no clear mapping from modeled policies to actual DUnX policies. In Figure 5, we compare
+the performance of the analytic ideal policy to the best performance we were able to obtain with
+the parameterized DUnX policy (note that the policy tuning differs for each of the nine instances).
+As before, the experimental results are given by the lower and upper bounds of a 99% confidence
+interval around the mean measured completion time. We see that the predicted ideal performance
+is reasonably close to the best performance we were able to achieve under DUnX for most cases.
+Reasons for the differences include those discussed in relation to the static policy results as well
+2 Note that it is not clear how one would "correct" this race condition in DUnX, nor is it clear that it is necessary
+to do so. The problem occurs only when run under the cache policy, since the migration and replication control
+mechanisms present in other policies prevent it from occurring. The appropriate action is to change policies when
+faced with such behavior.
+Time
+Instance Number
+Comparison of Experimental and Predicted Data - Ideal Policy
+Model 3
+
+Figure
+
+5: Comparison of 8-Node Ideal Policy Results with the Best Possible Results under DUnX
+(completion time in seconds)
+as the first item in our list of factors affecting performance of the cache policy. Other factors also
+come into play:
+1. Lack of an ideal DUnX policy - We cannot implement an ideal policy since such a policy
+requires knowledge of future reference patterns.
+2. Page scanner overhead - The real DUnX policies must suffer overhead effects associated
+with running the page scanner daemons. This overhead comes in the form of lost CPU cycles
+used by the daemons as well as additional "quick" faults not accounted for by our workload
+model.
+As with our other results, even though our predictions may not be extremely accurate (though
+within 10% in all cases is certainly not terrible), they are qualitatively accurate. This becomes
+especially obvious when we compare the results of Figure 3 with those of Figure 5, for there it
+is evident that the model "responds" correctly to differing reference patterns. For example, it
+predicts that significant performance improvements can be made for synth Instances 2 and 6,
+whereas it doesn't predict such drastic improvements for Instances 7 and 8. Also note the relative
+performances for Instances 6, 7, and 8. The model successfully predicts which instances it can most
+improve.
+The Instance 5 results in Figure 5 merit special attention, since the DUnX results are faster
+than the predicted ideal completion time. There is a relatively simple explanation for this, however.
+Instance 5 is comprised entirely of SP pages. Under the ideal policy, SP pages are never replicated
+and not migrated when r SP is less than k mig as in this case. Thus, the predicted performance of
+the ideal policy for Instance 5 is virtually identical to that predicted for the static policy. The r SP
+and w SP values are just means, however. In reality, migration and replication can improve the
+performance of Instance 5, as is evidenced by the experimental data in Figure 5. This is the same
+type of error that motivates the development of our error policy, though in the opposite sense (the
+error results in pessimistic rather than optimistic model predictions).
+To summarize the results of this section: we have found that while the differences between
+analytic predictions and experimental results are usually small, there are cases where the difference
+is substantial. These differences are due to several factors not accounted for in the analytic model.
+Especially important are the factors related to program behavior, such as the clustering of memory
+accesses and page faults, and the fuzziness of phase transitions. These factors appear in the
+execution of a synthetic program designed specifically to conform to our workload model. These
+factors are likely to play an even more important role in real applications. Consequently, though
+we can use the model to make predictions about the behavior of the policies defined above in
+the context of our workload model, predictions about the performance of specific real applications
+running under real policies are of questionable value.
+5 Experiments and Results
+We take the approach of using both the analytic model and experiments on DUnX to answer specific
+questions about dynamic page placement behavior and the effects different workload features have
+on performance. The two methods complement each other. Each technique has its strengths and
+weaknesses, but the limitations of one approach tend to be covered by the capabilities of the other.
+Measurements of an implemented system running real applications can capture true program
+behavior, complex interactions that may be hard to anticipate, and the impact of actual system
+overhead, but only for the specific workload suite tested and the hardware/software implementation
+available. Thus, while the experimental results can be considered accurate, they may not be easily
+generalizable to other architectures, the possibility of better implementations, or a different set of
+programs. On the other hand, the model clearly does not include all the subtle effects of real system
+performance, but it does allow exploration of a wider range of hardware/software parameters once
+some confidence in the model has been established. For example, in Section 5.4, we ask a question
+about the effect of poor policy decisions when the cost of the resulting migrations differs from that
+of our DUnX implementation.
+The complexity of actual behavior that is missing from the model can also make experimental
+data difficult to interpret whereas the model explicitly formulates relationships among the appar-
+Class P c R c W c r c w c M c
+Workload #1 Characterization
+PR 50 500; 000 50; 000 550; 000 550; 000 1
+RO
+Workload #2 Characterization
+PR 50 500; 000 50; 000 550; 000 550; 000 1
+SS
+Workload #3 Characterization
+SS
+Workload #4 Characterization
+
+Table
+
+7: Workload Characterizations for the Simple Workloads
+ent contributing factors and can be used to test hypotheses to explain results. For example, in
+Section 5.3, the question of whether replication is the "right" mechanism to serve as the basis for
+dynamic placement is addressed by constructing workloads specially tailored to favor replication
+(an emphasis on read-only shared data) or migration (emphasizing sequentially shared read-write
+data) to see the impact of using the intuitively less appropriate mechanism.
+Finally, it is useful to establish a performance goal although this implies policy decisions that
+can not actually be implemented. Thus, we use the modeled ideal policy to ask whether there
+is significant potential for improved performance by pursuing sophisticated dynamic placement
+strategies (Section 5.2).
+5.1 Methodology
+In applying the analytic model, we use simple workloads and vary one or two key parameter values
+in order to study, in isolation, some particular aspect of memory reference behavior. The workload
+settings for these experiments are in Table 7. The use of the variable x in the table signifies that
+this parameter is varied. Hardware parameters are set to the values on our GP1000 (t
+
+Table
+
+2). For the software parameters, are derived by the
+workload model.
+For the experimental measurements in the DUnX implementation, the architecture and work-load
+characteristics are fixed by the actual hardware and applications available. The basic costs for
+page placement operations have been measured in the GP1000 DUnX implementation to be 4.5 ms
+Program Description
+msort merge sort of an integer array
+gauss
+simulates gaussian elimination
+with integer arithmetic
+hh3d
+simulates electrical conduction
+in cardiac tissue
+hough computes hough transforms
+solves
+using block chaotic relaxation
+wave
+solves the wave equation on a
+square grid with periodic boundary
+fish
+simulates sharks and fishes
+in two-dimensional sea
+mandel
+performs mandelbrot set calculation
+
+Table
+
+8: Experimental Workload Collection
+for migration, 4.6 ms for replication, and 2.1 ms for servicing a coherency fault. The experiments
+focus on varying policy parameters to achieve a range of responses.
+The workload used for our experimentation was developed independently from our project, in
+an effort to prevent unconscious attempts at making design decisions that might affect our results.
+For most of the applications that comprise our workload collection (listed in Table 8), there are
+versions written in both UMA and NUMA styles. The exception is msort, for which we have no
+NUMA version. The NUMA version is a highly-tuned implementation of the program written to
+optimize memory reference locality assuming a static policy and using programming techniques
+such as manually placing shared data pages or making explicit copies of read-only data structures.
+The UMA version does no such NUMA-specific memory management. As one would expect, the
+NUMA version of an application is typically more complicated, less portable, and much more
+difficult to write. For each application in our workload collection, we began our study by "tuning"
+the parameter settings to achieve the best possible performance for that application on the GP1000
+within the limits of the somewhat ad hoc tuning process. Once we arrived at those parameter
+settings for an application, we designated them as the default settings for that application. In the
+experiments, the default settings for all but the parameter being varied were used. These settings
+are indicated in the figure captions.
+In the plots of DUnX performance, there are generally two heavy lines that mark the levels of
+performance obtained by the UMA and NUMA versions of the application program using static
+page placement (the upper line is the UMA result, and the lower the NUMA result). Each diamond
+in a plot is an experimental data point obtained with the UMA version of the program run under
+our dynamic policy with the corresponding parameter settings (multiple trials were done to check
+validity of data). The thin solid line plots the mean values. In all of the DUnX plots, time on the
+y-axis is measured in elapsed seconds.
+5.2 The Importance of Dynamic Page Placement
+Perhaps the most important question to answer is whether dynamic page placement is worth
+pursuing. The model predictions for the instances of synth used in the validation study provide
+evidence that dynamic page placement can improve the performance of some applications. For
+example, the results of Figures 3, 4, and 5 show that for several synth instances, the cache and/or
+ideal policies perform better than the static policy. With the appropriate k mig and k rep values
+(the minimal reference counts necessary to justify a page migration or replication), the ideal policy
+will never perform worse than the static policy, though in many cases, it will perform better. Since
+the ideal policy performs better than the cache policy in many cases, the investigation of more
+sophisticated dynamic policies is worthwhile. The validation results obtained by running synth on
+DUnX also confirm that dynamic page placement is worth investigating.
+To answer this question in the context of actual programs and practical policies in DUnX, we
+consider the performance of three application/policy combinations. The UMA version of an application
+run under the static page placement policy serves as a base case measure, since it is the case
+in which the NUMA problem has not been addressed by either the application programmer or the
+operating system. If we assume that the NUMA versions are well written, in the sense that they
+represent successful attempts at addressing the NUMA problem, then we can consider the difference
+in performance between the UMA version of the application run with static page placement
+(a combination denoted by UMA/Static) and the NUMA version run under static page placement
+(NUMA/Static) as the cost of the NUMA problem. The performance of the NUMA/Static combination
+serves as a performance goal, in the sense that if we achieve that level of performance through
+some other method, we can consider that method successful. In our case, the other method is the
+dynamic multiple-copy page placement policy implemented in our DUnX kernel, individually tuned
+for each application in our workload. Thus, the third combination of interest in our experiments is
+UMA/Dynamic.
+In
+
+Table
+
+9 we give the raw completion time data for the three application/policy combina-
+tions. The table labels U/S, N/S, and U/D correspond to the UMA/Static, NUMA/Static, and
+UMA/Dynamic combinations, respectively. In most cases, the UMA/Dynamic combination performs
+significantly better than the UMA/Static combination, thus showing that the operating
+system can indeed prove effective at addressing the NUMA problem. In many instances, the performance
+of the UMA/Dynamic combination approaches that of the NUMA/Static combination, and
+in fact, for the hough application the UMA/Dynamic combination outperforms the NUMA/Static
+combination. This last result indicates that the NUMA version of the hough application must not
+be optimal, since whatever the operating system is able to do to further improve performance, the
+Program U/S N/S U/D
+msort 336:7s - 80:2s
+gauss 1833:1s 174:7s 238:1s
+hh3d 1102:2s 628:5s 722:9s
+hough 180:4s 154:0s 96:8s
+psolu 3796:0s 530:7s 577:6s
+wave 465:0s 124:4s 251:0s
+fish 86:3s 85:5s 105:4s
+mandel 1160:6s 1155:9s 1168:4s
+
+Table
+
+9: Absolute Performance
+applications programmer could also have done (most likely more efficiently). The data also show
+that for the fish and mandel applications, dynamic multiple-copy page placement serves only to
+degrade performance. Since the hand-tuned NUMA/Static versions of fish and mandel fail to
+perform significantly better than their UMA/Static counterparts, it is not surprising that the costs
+of dynamic placement outweigh the limited potential for benefits.
+Results presented throughout the remainder of this section support the value of dynamic page
+placement, in addition to answering other questions.
+5.3 The Importance of Page Replication
+Intuitively, page replication should be desirable, and favored over migration or single-copy static
+placement, for applications which have a significant amount of read-only sharing. However, single-copy
+policies would be simpler to implement. The model with Workload 1 can be used to investigate
+the impact of multiple-copy page placement by comparing performance of the static, MOR, and
+cache policies (see Figure 6). Since varying the inter-process reference granularity, r RO , is the only
+way to change the number of migrations and/or replications without changing the total number
+of references to the RO pages, it is the parameter varied in the experiment. The MOR curve
+continues to rise as r RO decreases until at r RO = 10, MOR has R (mean time between virtual
+memory requests) of over 350 -s. This is due to page bouncing. The cache policy performs
+significantly better than the static policy, indicating that multiple-copy page placement policies
+can improve performance of some applications. The figure also shows that at sufficiently high r RO
+values, MOR achieves performance as good as the cache policy, but never better. This result makes
+clear the importance of multiple-copy page placement policies for at least one class of applications
+(i.e., applications with a significant amount of RO pages). Other experiments not presented here
+support similar conclusions with respect to RM pages.
+Given the predetermined reference patterns generated by real programs, the approach to experimentally
+investigating the choice between replication and migration is to vary the policy. The
+R
+r RO
+Importance of Page Replication
+
+Figure
+
+Workload #1 Model Experiments (R is in microseconds)
+recent-mod parameter of the DUnX parameterized policy controls the migration versus replication
+decision. The results of varying recent-mod for the gauss application on the GP1000 are given in
+
+Figure
+
+7.
+
+Figure
+
+7 indicates that the higher the preference for replication over migration, the better the
+measured performance. Since the primary mode of sharing in gauss involves reading pivot rows
+of the matrix, which are never modified once they become pivot rows, the value of replication
+is not surprising. Figure 7 shows that when replication is always chosen over migration on read
+faults performance of the UMA version of gauss is nearly as good as with the
+NUMA/Static version of the program. Intermediate recent-mod values result in performance better
+than without replication (the recent-mod ! 0 case), but fail to take advantage of some potential
+page replications that further improve performance in the recent-mod case. Results of
+recent-mod experiments with the psolu, hough, and wave applications on the GP1000 resemble
+those obtained for the gauss program. Based on our analytic results, the improved performance of
+these applications under a policy favoring page replication suggests that they share a substantial
+amount of data in a read-only fashion (i.e., pages of type RO and RM ).
+5.4 The Effects of Coherency Faults on Performance
+Workload 2 is used to investigate the performance of a policy that implements page migration (for
+workloads in which that is the appropriate operation) through replication/coherency fault pairs
+(RC migrations). For this experiment (see Figure 8), we vary r SS and w SS together. With this
+Time
+secs
+recent-mod
+Effect of recent-mod on gauss Performance
+Dynamic Policy Points 33 3 3 3 33
+UMA and NUMA Static
+
+Figure
+
+7: Effects of recent-mod on gauss/GP1000 Measured Performance
+workload consisting only of PR and SS pages, the workload model predicts that, with the ideal
+policy, no page replications or coherency faults will occur. For sufficiently high r SS , however, the
+ideal policy predicts a positive q m value. Values of r SS and w SS below 1000 are not considered,
+since for such values the ideal policy is the same as the static policy. Even in the worst case of
+r SS and w SS values between 1000 and 10,000, the penalty for using RC migrations is not excessive.
+This is fortunate, since in a real system, the memory management software has no way of knowing,
+at fault time, whether it is best to migrate or replicate a particular page. Thus, RC migrations are
+likely to be fairly common in real systems.
+The msort application is an example of an application that does not benefit when replication is
+preferred over migration on the GP1000. The data are shown in Figure 9. This behavior is explained
+by the fact that there is no read-only sharing in msort which can benefit from page replication. As
+a result, when we see a very slight performance degradation. This degradation
+is due to using replication/coherency fault pairs to migrate pages since a replication/coherency
+fault pair is more costly than simply migrating the page. The weakness of the negative impact of
+coherency faults is consistent with the analytic predictions of Figure 8, and is because the cost of
+incorrectly choosing replication over migration (a coherency fault) is only 50% more expensive in
+our DUnX implementation on the GP1000. Our analytic model predicts that avoiding coherency
+faults may be more important for architectures in which processing of a coherency fault is very
+R
+r SS and w SS
+Migration vs. Replication/Coherency Fault Pairs
+Migration
+Replication/Coherency 222 2 22
+
+Figure
+
+8: Workload #2 Model Experiments (R is in microseconds)100200300-1
+Time
+secs
+recent-mod
+Effect of recent-mod on msort Performance
+Dynamic Policy Points 3
+Average Dynamic Policy
+UMA Static
+
+Figure
+
+9: Effects of recent-mod on msort/GP1000 Measured Performance
+e SS
+Effects of SS Page Errors
+\Theta \Theta \Theta \Theta \Theta
+\Theta
+\Theta
+
+Figure
+
+10: Workload #3 Model Experiments (R is in microseconds)
+expensive. Experimental results with a DUnX implementation on the BBN TC2000, reported
+in [20], also suggest this to be the case.
+5.5 The Effects of Policy Errors on Performance
+The success of the ideal policy promotes the development of sophisticated policies that attempt to
+approximate the ideal policy by selectively limiting page movement activity in some way. However,
+such policies are bound to make mistakes either by being too aggressive about moving pages and
+encountering page bouncing or by being too conservative and passing up desirable opportunities.
+In the analytic model, errors in determining the level of dynamic placement activity are represented
+in the error policy. Correctly handling PR and RO pages should not prove difficult for
+any reasonable policy implementation, so we assume that no such errors will be made (i.e., we let
+0). For RM pages with wRM ? k rep and SS pages an incorrect policy choice is
+to use a remote reference, so clearly the worst case performance degradation is only to the static
+policy. The more interesting case is when the incorrect policy choice is to replicate (for RM pages
+with or migrate (for SP pages) since this can result in performance worse than that
+of the base-case static policy.
+We use Workload 3 to consider SS page errors. In Figure 10, we plot R versus e SS for five
+different r SS and w SS values. For each of the r SS and w SS values, the performance of the error
+policy with e SS = 0:001 is approximately the same as the ideal policy performance. As expected,
+for the r performance eventually degrades to that of the static policy
+s
+\Theta \Theta \Theta \Theta \Theta \Theta \Theta
+
+Figure
+
+11: Workload #4 Model Experiments (R is in microseconds)
+(R 9:2-s). The r case differs in that the ideal performance is nearly identical
+to that of the static policy, and performance of the error policy degrades as e SS increases until
+at e is identical to that of the cache policy (which, at worse than that
+of the static policy). This is because the default error policy k mig parameter is greater than
+the r SS value of 1000, so policy errors result in undesirable page migrations rather than missed
+opportunities. In effect, SS pages with low r SS values behave like SP pages. In fact, the natural
+division between the two page classes is at r mig.
+The next case (Workload 4) considers SP page errors. As shown in Figure 11 we plot R versus
+e SP for five r SP and w SP values. Performance at higher e SP values is considerably worse than
+we encountered with Workload 3. This poor performance is due to page bouncing behavior. To
+better see how quickly page bouncing becomes a concern, the data of Figure 11 are plotted again in
+
+Figure
+
+12 for only smaller R values (the key is not shown in this figure due to space limitations, but
+it is the same as in Figure 11). We see that for smaller r SP and w SP values, performance quickly
+degrades for the error policy as e SP increases from 0:001. The most significant result, however, is
+that for any e SP value, performance is never better than with the static policy (R = 9:2-s).
+The questions naturally arise of whether the migration costs derived from our implementation
+are simply too high and how the behavior may change if page migration and fault handling can
+be made significantly faster. Repeating the Workload 4 tests with r five
+different parameter settings for migration costs (expressed as percentages of the default values used
+previously) exploits the ability of the model to explore different architectural parameters. Figure 13
+\Theta \Theta \Theta \Theta \Theta
+\Theta
+\Theta
+
+Figure
+
+12: Close-Up of Workload #4 Model Experiments (R is in microseconds)
+shows that the trends in the curves as e SP increases remain the same as in Figures 12 and 11,
+although the magnitude of the impact of page bouncing changes with different migration costs.
+The model predictions indicate that it is better to err on the side of the more conservative
+approaches (i.e., it is better to miss a migration opportunity than to suffer unwanted migra-
+tions). Limiting page movement is controlled by the freezing/defrost mechanism in DUnX. The
+freeze-window parameter essentially controls the imposition of freezing to limit the amount of
+dynamic page placement activity. When freeze-window is set to zero, there is no limit on the
+frequency of page migrations and coherency faults, and for most of our applications on both the
+GP1000 and TC2000, the page bouncing problem sets in, resulting in incredibly poor performance.
+In order to prevent such situations, higher freeze-window values must be used. However, if
+freeze-window is set too high, the prevention or delay (until defrost) of desirable migrations and
+replications becomes a real possibility.
+The results of our freeze-window experiments with psolu shown in Figure 14, are typical. The
+plot shows that performance with lower freeze-window values suffers relative to higher values. If
+we let freeze-window go to zero, performance degrades to the point that we have never been able
+to let the computation complete. An important characteristic of the psolu freeze-window results
+is that once the freeze-window setting is "high enough," further increases have little effect on
+performance. This is true of the hough, gauss, hh3d, and msort results as well. This suggests that
+the potential problem of delaying desirable operations is not a concern for these applications on
+these architectures, either because the effects of such delays are negligible (e.g., delays are short
+R (-s)
+e SP
+Effects of SP Page Errors versus Migration Costs
+\Theta \Theta \Theta \Theta \Theta
+\Theta
+\Theta
+
+Figure
+
+13: Workload #4 Model Experiments with Different Migration Costs (R is in microseconds)5506500 125 250 375 500 625 750 875 1000
+Time
+secs
+freeze-window (ms)
+Effect of freeze-window on psolu Performance
+Dynamic Policy Points 33 3
+Average Dynamic Policy
+UMA and NUMA Static
+
+Figure
+
+14: Effects of freeze-window on psolu/GP1000 Measured Performance
+since defrost comes soon), or because there are few such operations. We suspect that a combination
+of the two factors is the reason.
+6
+
+Summary
+
+Dynamic multiple-copy page placement is an important operating system technique for dealing
+with NUMA memory management. We have investigated issues related to dynamic multiple-copy
+page placement through a mixture of measurement of an operating system implementation running
+a real workload and of applying an MVA-based model.
+We checked the validity of our model by comparing its performance predictions with experimental
+data obtained from running a synthetic program on a BBN GP1000 multiprocessor with
+the DUnX operating system kernel. In most of the cases, our predictions were quite accurate. Substantial
+errors, however, did occur in some cases due to "fuzzy" phase transitions in the synthetic
+program and a certain race condition in the DUnX kernel. Introducing barriers into the synthetic
+program caused the differences to become insignificant. The need to introduce barriers in some
+cases highlights an essential distinction. We can only say with confidence that the conclusions that
+we draw from our model are valid to the extent that real programs conform to our workload model.
+We identified several important questions and constructed experiments with the implementation
+and the model to provide answers. Experiments with DUnX compared the performance of programs
+in our collected workload suite, each with an individualized policy tuning, to hand-tuned NUMA
+versions of the same programs (representing a performance target). Policy parameters were varied
+to effect a range of dynamic placement activity in response to a given program. Using the model,
+we compared the relative performance of an approximate ideal policy with several other policies
+(not all implementable) for which analytic modeling is possible. The ideal policy always makes
+the correct choice among remote reference, migration, and replication. The alternatives considered
+(static, MOR, cache, RC, and error) sometimes make incorrect policy decisions. We varied workload
+parameters to observe a range of behaviors.
+The results of these experiments support the following conclusions:
+1. We confirmed the effectiveness of dynamic placement policies. Experimentally, the measured
+performance of the UMA versions of the workload programs running with appropriate tunings
+often approaches the performance of the hand-tuned NUMA versions. The modeling results
+show that the ideal and cache policies can improve the performance of some workloads over
+the performance with the static policy.
+2. Replication is an important feature. The model identifies workload characteristics for which
+multiple-copy policies perform significantly better than single-copy policies. The poor performance
+of the single-copy policies for such workloads is found to be the result of page
+bouncing, a phenomenon similar to the page thrashing sometimes encountered in traditional
+virtual memory paging systems. Varying the recent-mod parameter in DUnX which changes
+the preference for replication over migration shows the importance of providing replication
+for real workloads.
+3. Replication/coherency fault pairs can be used to migrate pages effectively. The extra overhead
+associated with this type of page migration, called an RC migration, was found to be fairly
+reasonable. This is a fortunate result, since intuition says that RC migrations are likely to
+be fairly common in real systems supporting multiple-copy page placement.
+4. Given the choice between too much dynamic placement activity (with its potential to lead to
+page bouncing) and too little (missing opportunities for local access), it appears better for
+a policy to be conservative. This is captured in the model by the difference between errors
+made on SS pages and errors on SP pages in the error policy. Errors handling SS pages
+with r SS ? k mig degrade performance from the ideal policy, but not worse than that of the
+static policy. Errors handling SP pages, on the other hand, can result in performance far
+worse than that of the static policy. Varying the freeze-window parameter in DUnX adjusts
+the aggressiveness of the policy to move pages. Our experimental results indicate that it is
+more important to limit bouncing behavior than to take advantage of every possible desirable
+migration or replication. This is consistent with the predictions of our analytic model.
+
+
+
+--R
+
+Weak ordering - a new definition
+Comparison of hardware and software cache coherence schemes.
+
+Scheduling and Resource Management Techniques for Multiprocessors.
+Competitive management of distributed shared memory.
+Competitive algorithms for replication and migration problems.
+Simple but effective techniques for NUMA memory management.
+NUMA policies and their relationship to memory architecture.
+Experience with mean value analysis models for evaluating shared bus throughput-oriented multiprocessors
+The implementation of a coherent memory abstraction on a NUMA multiprocessor: Experiences with Platinum.
+Memory access dependencies in shared-memory multiprocessors
+Performance evaluation of memory consistency models for shared-memory multiprocessors
+Memory consistency and event ordering in scalable shared-memory multiprocessors
+Page table management in local/remote architectures.
+Reference history
+
+
+
+
+
+
+
+Memory coherence in shared virtual memory systems.
+A hypercube shared virtual memory system.
+Critical factors in NUMA memory management.
+Dynamic page migration in multiprocessors with distributed global memory.
+Analysis of critical architectural and program paramters in a hierarchical shared-memory multiprocessor
+An accurate and efficient performance analysis technique for multiprocessor snooping cache-consistency protocols
+Performance analysis of hierarchical cache-consistent multiprocessors
+--TR
+Memory coherence in shared virtual memory systems
+An accurate and efficient performance analysis technique for multiprocessor snooping cache-consistency protocols
+Page table management in local/remote architectures
+A mean-value performance analysis of a new multiprocessor architecture
+Reference history, page size, and migration daemons in local/remote architectures
+Simple but effective techniques for NUMA memory management
+The implementation of a coherent memory abstraction on a NUMA multiprocessor: experiences with platinum
+Memory Access Dependencies in Shared-Memory Multiprocessors
+Performance analysis of hierarchical cache-consistent multiprocessors
+Analysis of critical architectural and programming parameters in a hierarchical
+NUMA policies and their relation to memory architecture
+Performance evaluation of memory consistency models for shared-memory multiprocessors
+Experience with mean value analysis model for evaluating shared bus, throughput-oriented multiprocessors
+Exploiting operating system support for dynamic page placement on a NUMA shared memory multiprocessor
+Comparison of hardware and software cache coherence schemes
+Experimental comparison of memory management policies for NUMA multiprocessors
+The robustness of NUMA memory management
+Page placement for non-uniform memory access time (NUMA) shared memory multiprocessors
+An analysis of dynamic page placement on a NUMA multiprocessor
+Weak orderingMYAMPERSANDmdash;a new definition
+Memory consistency and event ordering in scalable shared-memory multiprocessors
+Scheduling and resource management techniques for multiprocessors

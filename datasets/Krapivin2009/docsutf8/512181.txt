@@ -1,0 +1,597 @@
+--T
+Improving min/max aggregation over spatial objects.
+--A
+We examine the problem of computing MIN/MAX aggregates over a collection of spatial objects. Each spatial object is associated with a weight (value), for example, the average temperature or rainfall over the area covered by the object. Given a query rectangle, the MIN/MAX problem computes the minimum/maximum weight among all objects intersecting the query rectangle. Traditionally such queries have been performed as range search queries. Assuming that the objects are indexed by a spatial access method, the MIN/MAX is computed as objects are retrieved. This requires effort proportional to the number of objects intersecting the query interval, which may be large. A better approach is to maintain aggregate information among the index nodes of the spatial access method; then various index paths can be eliminated during the range search. In this paper we propose four optimizations that further improve the performance of MIN/MAX queries. Our experiments show that the proposed optimizations offer drastic performance improvement over previous approaches. Moreover, as a by-product of this work we present an optimized version of the MSB-tree, an index that has been proposed for the MIN/MAX computation over 1-dimensional interval objects.
+--B
+Introduction
+Computing aggregates over objects with non-zero extents has received a lot of attention recently
+([YW01, ZMT+01, PKZ+01, ZTG+01]). Formally, the general box-aggregation problem is dened
+as: \given n weighted rectangular objects and a query rectangle r in the d-dimensional space, nd
+the aggregate weight over all objects that intersect r". In this paper we examine the problem of
+computing the MIN and MAX aggregates (box-max) over spatial objects. Each object is represented
+by its Minimum Bounding Rectangle (MBR) and is associated with a weight (value) that we want to
+aggregate. A rectangle is also called a box and thus the name \box-aggregation". Since computing
+the MIN is symmetric, in the following discussion we focus on MAX aggregation. Moreover, we
+assume that objects are indexed by a spatial access method (SAM) like the R-tree or its variants
+Computer Science Department, University of California, Riverside, CA 92521. donghui@cs.ucr.edu
+y Computer Science Department, University of California, Riverside, CA 92521, tsotras@cs.ucr.edu. This work has
+ben supported by NSF grants IIS-9907477, EIA-9983445 and by the Department of Defense.
+[Gut84, BKS+90, SRF87].
+The box-max problem has many real-life applications. For example, consider a database that keeps
+track of rainfall over geographic areas. Each area is represented by a 2-dimensional rectangle and a
+query is: \nd the max precipitation in the Los Angeles district ". The database may also
+keep track of the time intervals of each rainfall, in which case we store 3-dimensional rectangles (one
+dimension representing the rainfall duration). A box-max query is then: \nd the max precipitation
+in the Los Angeles district during the interval [1999-2000] ".
+There have been three approaches towards solving box-aggregation queries. The straightforward
+approach is to simply perform a range search on the SAM that indexes the objects, and compute the
+aggregation as objects are retrieved. While readily available, this solution requires eort proportional
+to the number of objects that intersect the query rectangle, which can be large. Performance is
+improved if the SAM maintains additional aggregate information ([JL98, LM01, PKZ+01]). For
+example, the Aggregation R-tree (aR-tree) ([PKZ+01]) is an R-tree that stores the aggregate value
+of each sub-tree in the index record pointing to this sub-tree. While traversing the index, the
+aggregation information eliminates various search paths, thus improving query performance.
+The third approach uses a specialized aggregate index built explicitly for computing the aggregate
+in question [YW01, ZMT+01, ZTG+01]. This index maintains the aggregate incrementally. While
+it is an additional index, it is usually rather compact (since it does not index the actual data but in
+practice a much smaller representative set) and provides the best query performance.
+The main contributions of this paper are:
+We propose four optimizations for improving the MIN/MAX aggregation. One of our optimizations
+(the k-max) attempts to eliminate more paths from the index traversal when the aggregate
+is computed. As such, it can be used either on the SAM that indexes the objects, or, on a specialized
+aggregate index. The other optimizations (union, box-elimination and area-reduction)
+eliminate or resize object MBRs when they do not aect the MIN/MAX computation. Thus
+they apply only to specialized MIN/MAX aggregate indices.
+We present a specialized aggregate index, the Min/Max R-tree (MR-tree) that uses all four
+optimizations. We further present an experimental comparison among a plain R-tree, the aR-
+tree, the aR-tree with the k-max optimization and the MR-tree. Our experiments show drastic
+improvements when the proposed optimizations are used.
+As a by-product of this research, we discuss how a specialized aggregate index, the MSB-
+tree [YW00], can be optimized by applying the box-elimination optimization. The MSB-tree
+e-ciently solves the MIN/MAX problem for the special case of one-dimensional interval objects.
+Its original version needs to be frequently reconstructed.
+The rest of the paper is organized as follows. Section 2 discusses related previous work. Section
+3 identies the special characteristics of the box-max problem and presents the optimization tech-
+niques. Section 4 summarizes the MR-tree while section 5 presents the results from our experimental
+comparisons. Section 6 applies one proposed optimization technique to on the MSB-tree. Finally,
+section 7 provides conclusions and problems for further research.
+Related Work
+There are two variations of the box-aggregation problem, depending on whether objects have zero
+extent (point objects) or not. Aggregation over point objects is a special case of the orthogonal
+range searching which has received vast attention in the past 20 years in the eld of computational
+geometry. For more details, we refer to the surveys [Meh84, PS85, Mat94, AE98]. Most of the
+solutions utilize some variation of the range-tree ([Ben80]) following the multi-dimensional divide-
+and-conquer technique. In the database eld, [JL98] proposed the R
+a tree which stores aggregated
+results in the index. [Aok99] proposed to selectively traverse a multi-dimensional index for the
+problem of selectivity estimation (corresponding to the COUNT aggregate). [LM01] proposed the
+Multi-Resolution Aggregate Tree (MRA-tree) which augments the index records of an R-tree with
+aggregate information for all the points in the record's sub-tree. The MRA-tree also uses selective
+traversal to provide an estimate aggregation result. The result can be progressively rened. [JL99]
+proposes a performance model to estimate the performance of index structures with and without
+aggregated data.
+A special case of the point aggregation problem is the work on data cube aggregation for OLAP
+applications. A data cube ([GBL+96]) can be thought of as a multi-dimensional array. [RKR97]
+proposed the cubetree as a storage abstraction of the cube and realized it using packed R-trees to
+e-ciently support cube and group-by aggregations. [HAM+97] addressed both the box-max and the
+box-sum (for SUM, COUNT and AVG) queries over data cubes. The solution to the box-max query
+was based on storing precomputed max values in a balanced hierarchical structure. This solution was
+further improved by [HAM+97b]. The solution to the box-sum query was based on pre-computing
+the prex sum, which is the aggregate over a range covering the smallest cell of the array. This
+solution was improved by [GAE+99, CI99, GAE00]. Specically, [GAE00] proposed the dynamic
+data cube which has the best update cost. Recently, [CCL+01] proposes the dynamic update cube
+which further improves the update cost to O(log k u ) where k u is the number of changed array cells.
+For aggregations over objects with non-zero extents, [YW01] presented the SB-tree which solved the
+box-sum query in the special case of one-dimensional time intervals. The SB-tree was extended to the
+Multi-version SB-tree (MVSB-tree) in [ZMT+01] to e-ciently support temporal box-sum aggregation
+queries with key-range predicates. [ZTG+01] addressed box-sum aggregation over spatiotemporal
+objects. Furthermore, [YW00] presented the MSB-tree for the box-max query over one-dimensional
+interval objects. The aR-tree ([PKZ+01]) was originally proposed to index the spatial dimension in
+a spatial data warehouse environment, but can be used to solve both the box-sum and the box-max
+queries over spatial data with non-zero extent. The aR-tree is an R-tree which stores for each index
+record the aggregate value for all objects in its sub-tree. Since the aR-tree was built for the support of
+both box-sum and box-max queries, it is not fully optimized towards box-max queries. The aR-tree
+is used here as a starting point for our optimizations and it is included in our experimentation for
+comparison purposes. Also related is [AS90] which answers window queries on top of the pyramid
+data structure. Aggregations are used for the existence/non-existence of image features and the
+visibility in terrain data. Last, in the spatial-temporal data warehouse environment, [PKZ+01b]
+proposed the aggregate R-B-tree (aRB-tree) which uses an R-tree to index the spatial dimension and
+each record r in the R-tree has a pointer to a B-tree which keeps historical data about r.
+3 The Proposed Optimizations
+In this paper we focus our discussion on the MAX aggregate. The discussion for the MIN aggregates
+is symmetric and is omitted. Our goal is to solve the box-max problem, where we have a set of
+objects, each of which has a box and a value; given a query box q, we want to nd the maximum
+value of all objects intersecting q. Assume the objects are indexed by a tree-like structure (e.g. the
+R-tree) where the objects are stored in leaf nodes and where the MBR of an internal node contains
+the MBRs of all its children. Using such an index, a box-max query can be answered by performing
+a range search. In this section we propose four optimizations that improve the performance.
+We rst introduce some notations. An index/leaf record is an entry in an internal/leaf node of the
+tree. Given an leaf record r, let r:box and r:value denote the MBR and the value of the record,
+respectively. Given an index record r, let r:box denote its MBR, r:value denote the maximum value
+of all records in subtree(r) and r:child denote the child page pointed by r.
+3.1 The k-max optimization
+The aR-tree is an R-tree where each index record stores the maximum value of all leaf records in
+the sub-tree. If a query box contains the MBR of an index record, the value stored at the record
+contributes to the query answer and the examination of the sub-tree is omitted. However, note that
+at higher levels of the aR-tree, the index records have large MBRs. So the box-max query is not
+likely to stop at higher levels of the aR-tree. The k-max optimization is an extension that keeps
+constant number of leaf objects along with each index record such that even if the query box does
+not contain the MBR of an index record, the examination of the sub-tree may be omitted.
+The k-max optimization Along with each index record r, store the k objects (for a small constant
+which are in subtree(r) and have the largest values among the objects in the subtree. When
+examining record r during a box-max query, if the query box intersects with any of the k max-value
+objects in r, the examination of subtree(r) is omitted.
+Clearly, the k-max optimization allows for more paths to be omitted during the index traversal.
+However, the benet of k-max on the query performance is not provided for free. The overall space
+is increased (since each node stores more information) as well as the update time (eort is needed to
+maintain the k objects). Hence in practice the constant k should be kept small. In our experiments,
+we found large improvement in query time even for a small
+As pointed out, the next three optimizations apply for an index explicitly maintained for the
+MIN/MAX aggregation (to avoid confusion we call such an explicit index the MIN/MAX index).
+Since the MIN/MAX problem is not incrementally maintainable when tuples are deleted from the
+database [YW01], the following discussion assumes an append-only database (i.e., spatial objects are
+inserted in the database but never deleted). When a spatial object o with MBR o:box and value
+o:value is inserted in the database, o:box accompanied by o:value is inserted as a leaf record in the
+MIN/MAX index as well. However, as we will describe, some of these insertions may not be applied
+to the MIN/MAX index, or may cause existing MBRs to be deleted or altered from the MIN/MAX
+index. As such, we can use an R  -tree to implement the MIN/MAX index. The result after applying
+all four optimizations will be the MR-tree.
+3.2 The box-elimination optimization
+Consider two leaf records There is
+no need to maintain in the MIN/MAX index since it will not contribute to any MAX query. We
+thus say that becomes obsolete due to
+The box-elimination optimization If during the insertion of an object o, a (leaf or index) record
+r is found such that o:box contains r:box and o:value  r:value, remove r from the MIN/MAX index;
+if r is an index record, remove subtree(r) as well.
+The above optimization will reduce the size of the MIN/MAX index, since sub-trees may be removed
+during an insertion. There is a tradeo between the time to update the MIN/MAX index and the
+overall space occupied by this index. A newly inserted object may make obsolete more than one
+existing records which are on dierent paths from the root to leaves. The MIN/MAX index can be
+made very compact if all these obsolete records (and their sub-trees) are removed. However, this
+may result in expensive update processing. If the update is to be kept fast, we can choose to remove
+only the obsolete records met along the insertion path (which is a single path since we use a R  -tree
+to implement the MIN/MAX index). The complexity of the insertion algorithm remains O(log (n))
+where n is the number of MBRs in the MIN/MAX index (which in practice is much smaller than the
+total number of spatial objects in the collection). Another choice is to choose c paths and remove the
+obsolete records met along these paths, where c is a constant. The space occupied by the obsolete
+sub-trees can be re-used.
+3.3 The union optimization
+While the box-elimination optimization focuses on making obsolete existing records in the index, the
+union optimization focuses on making obsolete objects before they are inserted in the MIN/MAX
+tree. First we note that the MBR of an object should not be inserted in the MIN/MAX index if
+there is an existing leaf object in the index whose MBR contains it and has a larger value. Such
+an insertion can be safely ignored for the purposes of MIN/MAX computation. To fully implement
+this test, all the paths that may contain this object have to be checked; at worst this may check all
+leaf objects in the MIN/MAX tree. A better heuristic is to use the k max-value MBRs. If the new
+object is contained by any of the k max-value MBRs found along the index nodes in the insertion
+path, and has a smaller value, then there is no need to perform the insertion.
+Moreover, we observe that even if the MBR of an object to be inserted is not fully contained by any
+existing leaf object, we still might safely ignore it. This is the case when the new object's MBR is
+contained in the union of MBRs of several existing objects. As illustrated in gure 1, the shadowed
+box represents the new object to be inserted and the other two rectangles represent two objects
+already in the MIN/MAX index. Since the new object is contained in the union of the two existing
+objects with a smaller value, its insertion can be safely ignored.7
+Figure
+
+1: The new object becomes obsolete by the union of two existing objects.
+To implement this technique, each index record r in the MIN/MAX index stores (1) the union
+(denoted by r:union) of MBRs of all the leaf objects in subtree(r), and (2) the minimum value
+(denoted by r:low) of all the objects in the subtree(r). The overall optimization is described below:
+The union optimization If during the insertion of object o, an index/leaf record r is found such that
+o:box is covered by r:union/r:box and o:value  r:low/r:value, the insertion is ignored. Moreover,
+check whether some max-value object stored in r covers o:box and has a value no smaller than o:value;
+this also makes
+A remaining question with the above optimization is how to store the union of all leaf objects under
+an index record. At worst, this union may need space proportional to the number of leaf objects
+that create it. Given that each index record has limited space, we store an approximate union. In
+particular, we store a good approximation that can be represented with t boxes (MBRs), where t is
+a small constant. What is important is that the approximation should aect only the query time,
+but not the correctness of the query result. If the approximate union covers some area not covered
+by the actual union, it may erroneously make obsolete some new object. So the approximate union
+should be completely covered by the actual union. We formally state the problem as follows.
+Denition 1 Given constant t and a set of n boxes t. The covered
+t-union of S is dened as a set of t boxes such that (1)
+a i is maximal, i.e. there does not exist another set of t boxes fa 0
+satisfying the rst
+condition such that S t
+covers larger space than S t
+a i .
+To nd the exact answer with an exhaustive search algorithm in the two-dimensional case takes
+O(n 8t ) time, which is clearly unacceptable. So we need to nd an e-cient algorithm to compute a
+good approximation of the covered t-union. Again, in order for the box-max query to give correct
+result, we require that the approximate covered t-union be completely covered by the original n
+boxes. We hereby propose a O(n log n) algorithm.
+Algorithm CoveredUnion(Boxes src[1.n], Number n) Given a set of n boxes src, return an approximate covered
+t-union of src. Note that the algorithm uses small constants t, c and max try.
+1. seeds = the c  t boxes from src whose areas are the largest;
+2. Initialize the set of destination boxes dest to be empty;
+3. for every dimension d i
+4. Project all src boxes to dimension d i and sort the projected end points into array proj[d i ][1::2n];
+5. endfor
+6. for i from 1 to t
+7. Pick the box b from seeds which has the largest area not covered by the union of boxes in dest;
+8. loop max try times
+9. for each dimension d i
+11. TryExtend( b, d i , false );
+12. endfor
+13. if b cannot be enlarged by extending to any direction, break;
+14. else b = the extended box with the largest area;
+15. endloop
+16. Add b to set;
+17. endfor
+18. return dest;
+Algorithm TryExtend(Box b, Dimension d i , Boolean positive) Given a box b, a dimension d i and a boolean
+variable positive denoting whether b should be extended to the positive or negative direction along dimension d i , try
+to extend b and return it.
+1. if positive = true then // try to extend to the positive direction
+2. Find the smallest number w in proj[d i ] which is larger than the projection of b to dimension d
+3. Try to extend b to w in dimension d i ; shrink in the other dimensions if needed to make sure that b is covered
+by the union of src boxes; the extension is successful if the area of b grows.
+4. else
+5. // try to extend to the negative direction; similar; omit;
+6. endif
+7. return b;
+The idea of the algorithm CoveredUnion is to pick t boxes from the original n boxes and try to
+expand each one of them as much as possible. To choose the i th box (1  i  t), choose the one
+which has the largest area not covered by the i 1 boxes computed so far. To expand a chosen box,
+try to expand along all directions parallel to the axes. Trivial analysis shows that the complexity of
+the algorithm is O(n log n).
+In the following discussion the term union means the approximate covered t-union.
+3.4 The area-reduction optimization
+The last optimization we propose dynamically reduces the box area of the object to be inserted.
+The area-reduction optimization If during the insertion of object o, an index record r is found
+such that r:union intersects with o:box and r:low  o:value, we reduce the size of o:box by subtracting
+the area covered by r:union from it before inserting it to the lower levels. If the insertion reaches
+a leaf object which intersects the new object and has an equal or larger value, the area of the new
+object is reduced accordingly. The box of the new object is similarly reduced if some max-value object
+stored in an index record r exists whose box intersects with o:box and whose value is no smaller than
+o:value.
+This optimization reduces the MBR of an object only if the reduced part is covered by some existing
+records in the tree with larger or equal values. Hence the correctness of the MIN/MAX aggregates
+is not aected. One benet of this optimization is that overlapping among sibling records in the tree
+is reduced. Figure 2 shows an example. The two large boxes represent two index records r 1 and r 2 .
+Assume r 1 :union is equal to the MBR of r 1 . The combination of the light-shadowed and the dark-
+shadowed boxes represents an object to be inserted with value 8. The object should be recursively
+inserted into subtree(r 2 ). Without applying the area-reduction optimization, r 2 :box would need to
+be expanded to fully contain the new object. On the other hand, if we apply the optimization,
+the light-shadowed area is subtracted and thus we insert in subtree(r 2 ) a much smaller box (the
+dark-shadowed area) which is fully contained in r 2 :box and thus no expansion for r 2 is needed.r2 (min=7)
+
+Figure
+
+2: The area-reduction optimization helps to reduce overlaps.
+Another benet of the area-reduction optimization is that it can help to make new records obsolete.
+As an example, consider gure 2 again. It is possible that at some lower level in subtree(r 2 ), the
+dark-shadowed area is found obsolete. Since the light-shadowed area is already made obsolete by r 1
+due to the optimization, there's no need to insert the record at all.
+Note that the result of a box when some areas are subtracted from it may be a set of boxes rather
+than a single box. So an object to be inserted may be fragmented into several smaller boxes by this
+optimization. One choice to handle this is to follow the R + -tree ([SRF87]) approach, i.e. to insert
+every small box as a separate copy. But this choice increases the space overhead. Another choice is
+to maintain the list of small boxes in the execution of the insertion algorithm. As we go down the
+tree, some small boxes may become smaller or obsolete. Eventually at the leaf level, the MBR of the
+smaller boxes is inserted. Note that the MBR is at most as large as the original box to be inserted
+and in many cases, much smaller.
+4 The Min/Max R  -tree
+The MR-tree is a dynamic, disk-based, height-balanced tree structure. There are two types of
+pages: leaf pages and index pages. All pages have the same size. Since the MR-tree is based on
+the R  -tree, each page except the root has at most M records and at least m records. Each leaf
+record has the form hbox; v 1 i, where v 1 is the value of the record. Each index record has the form
+lowi. Here box and child has their usual meanings. The list
+(b is the k max-value leaf objects in the sub-tree of this index record, sorted by
+decreasing order of value. Here b i stands for the MBR and v i for the value of the leaf object with
+the i th largest value. The union stores t boxes (the approximate t-union over all leaf MBRs), and
+low is the minimum value over all leaf objects in the sub-tree.
+Algorithm BoxMax(Page N , Box b, Value v) Given a tree node N , a query box b and a running value v, the
+algorithm returns the box-max query result for the sub-tree rooted by N .
+1. for every record r in N where r:box intersects with b
+2. if r:v1 > v then
+3. if N is leaf then
+4.
+5. else if there exists i in [1, k] such that r:b i intersects with b
+6. Let i be the smallest one satisfying this condition;
+7. if r:v i > v, set
+8. else
+9. v =BoxMax(Page(r:child), b, v);
+10. endif
+11. endif
+12. endfor
+13. return v;
+BoxMax is a straightforward recursive algorithm. To nd the box-max over box b, we should
+call BoxMax(root page, b, -1). The main dierence between this algorithm and the range query
+algorithm in an R-tree is in steps 5-7, which corresponds to the k-max optimization. For an index
+record r, the algorithm checks the k max-value objects stored in r. If any of them intersects with b,
+there is no need to examine subtree(r).
+Algorithm Insert(Tree T , Box b, Value v) Given tree index T , a box b and a value v, the algorithm inserts an
+object with b and v into T .
+1.
+2. N =root page of T ;
+3. while ( N is not leaf ) do
+4. for every record r in N where r:box intersects with b
+5. if r:box is contained in b and r:v1  v then
+6. Remove subtree(r);
+7. else
+8. for every i such that r:v i  v
+9. Modify each box in S by subtracting r:b i from it;
+10. endfor
+11. if r:low  v, modify every box in S by subtracting r:union from it;
+12. endif
+13. endfor
+14. if N has zero record, goto step 19;
+15. if S is empty, goto step 20;
+17. endwhile
+18. Optimizations for a leaf page; similar to steps 4 through 13; omit;
+19. if S is not empty, insert hMBR(S), vi into N ;
+20. while ( N is not root ) do
+21. if N over
+ows then
+22. Split(N );
+23. else if N under
+ows then
+24. Remove N and reinsert the records from N into the tree at N 's level;
+25. endif
+26. Adjust the entry in Parent(N) pointing to N ;
+27. set N =Parent(N );
+28. endwhile
+29. if N over
+ows then
+30. Split old root and create a new root;
+31. else if N has only one record and N is not leaf then
+32. Remove N and set N 's child as the new root;
+33. endif
+Generally, the insertion algorithm follows a single path from the root down to a leaf. Reorganizations
+may follow the path back up to the root. The optimizations are applied when going down the tree.
+Steps 5 and 6 correspond to the box-elimination optimization which removes a sub-tree if the newly
+inserted object has a larger value and spatially contains the sub-tree. Steps 8 to 11 correspond to the
+area-reduction optimization which tries to reduce the size of the box to be inserted. Step 14 deals
+with the rare case when all sub-trees in some index page N become obsolete due to the insertion of
+an object. This may occur only when N is a root page, since otherwise the index record pointing to
+N in the parent page would be obsolete before N has a chance to be examined. For this case, the
+algorithm results in a tree with a single page and a single record. Step 15 means that the object to
+be inserted is obsolete and no recursive insertion into lower levels are needed. Step 16 chooses a child
+page to recursively insert into. We use the same algorithm as in the R*-tree. So the ChooseChild
+procedure is not discussed in detail here. In steps 20 to 28, the path of pages is examined backwards.
+The way to split an over
+owed page and to reinsert entries in an under
+owed page are identical to the
+approaches in the R*-tree, plus the maintenance of the additional information kept along with each
+index record. Steps 29 through 33 handle over
+ow/under
+ow of the root page. As a consequence,
+the tree height may increase/decrease.
+Performance
+We compare the performance of the proposed MR-tree against the plain R  -tree, the aR-tree and the
+aR-tree with the k-max optimization (denoted as aR-tree kmax ). All the algorithms were implemented
+in C++ using GNU compilers. The programs run on a Sun Enterprise 250 Server machine with two
+300MHz UltraSPARC-II processors using Solaris 2.8. The page size is 4KB. For space limitations
+we report the performance of the MR-tree only for is the number of max-value
+objects kept in each index record and t is the number of boxes used to represent a union. Similarly,
+the aR kmax uses 3. Each index utilizes an LRU buer and a path buer, which buers the
+most recently accessed path. The total memory buer we used for each program has 256 pages.
+We present results with two datasets, each containing 5 million square objects randomly selected
+in a two-dimensional space. The space in both dimensions is [1, 1 million]. The rst data set was
+used to test the performance in the presence of small objects. The size of each object was randomly
+chosen from 10 to 1000. The second data set contains medium sized objects. The size of each object
+was randomly chosen from 10 to 10,000.
+R* aR kaR MR2575125Query Rectangle Area (%)
+Query
+Time
+(#sec)
+(a) Index Sizes. (b) Query performance.
+
+Figure
+
+3: Comparing the performance for small object dataset.
+
+Figure
+
+3 compares the performance for the small object dataset. In the gure we use R*, aR, kaR,
+MR to represent the R*-tree, the aR-tree, the aR-tree kmax and the proposed MR-tree, respectively.
+The MR-tree uses about 25% less space (gure 3a) than the other methods. This is because some
+obsolete records were removed from the index. The aR-tree kmax occupies the most space, since
+compared with the R*-tree and the aR-tree it stores more information in each index record.
+To evaluate the query performance, the query rectangle area varies from 0.0001% to 50% of the
+whole space. For each query rectangle size, we randomly generated 100 square queries and measured
+the total running time. This running time was obtained by multiplying the number of I/Os by the
+average disk page read access time (10ms), and then adding the measured CPU time. The CPU
+time was measured by adding the time spent in user and system mode as returned by the getrusage
+system call. Figure 3b shows the average time per query for various query sizes. While all methods
+are comparable for small query rectangles (since few objects satisfy the query anyways), the MR-tree
+is clearly the best as the query rectangle size increases. Note that the query time scale is logarithmic,
+so the actual dierence in query speeds is drastic (for example, with query size of 1% the MR-tree is
+about 20 times faster than the aR-tree). The reason is that for large query rectangles, the MIN/MAX
+query has more chances to stop at higher levels in the MR-tree. In particular, the aR-tree will decide
+to omit examining a sub-tree only if the query rectangle contains the box of the whole sub-tree. On
+the other hand, the MR-tree search may omit traversing a sub-tree even if the query rectangle partly
+intersects with it. The usefulness of the k-max optimization can be seen when comparing the aR-
+tree kmax with the plain aR-tree. The MR-tree performs better than the aR-tree kmax for two reasons.
+First, due to the additional optimizations, the MR-tree stores fewer objects. Second, objects in the
+MR-tree have smaller area (the area reduction optimization), and thus achieve better clustering.
+R* aR kaR MR2575125Query Rectangle Area (%)
+Query
+Time
+(#sec)
+(a) Index Sizes. (b) Query performance.
+
+Figure
+
+4: Comparing the performance over medium objects.
+For medium-size objects, the performance improvement of the MR-tree over the other structures is
+even better (gure 4). The reason is that larger objects have more chances to contain other objects
+and thus make them obsolete; as a result, the MR-tree becomes more compact. This trend continued
+with datasets with larger objects (results not shown for brevity).
+We also compared the index generation time. For small objects (gure 5a), the MR-tree needs more
+CPU time to generate (about 2.5 times more), but a little less I/O time. This is to be expected.
+Although the MR-tree occupies less space, the generation of it needs more CPU time to maintain the
+extra information stored in the index records. For medium objects (gure 5b), the MR-tree takes
+R* aR kaR MR2575125IO
+CPU
+Creation
+Time
+kilo
+sec)
+R* aR kaR MR2575125
+IO
+CPU
+Creation
+Time
+kilo
+sec)
+(a) Small objects. (b) Medium objects.
+
+Figure
+
+5: Comparing the index creation time.
+about the same CPU time but less I/O time as compared with the other structures, since it is much
+smaller.
+6 Optimize the MSB-tree
+We rst review the MSB-tree which is proposed in [YW00] to answer the box-max query for 1-
+dimensional interval data. We then show how we can use one of the proposed optimization techniques
+to improve it.
+6.1 The MSB-tree
+The MSB-tree is a tree structure where any record r in a tree node has an interval r:i and a value
+r:v. The intervals of all records in a tree node do not intersect and the union of them is the interval
+of the index record which points to this node. An object o to be inserted also has an interval o:i and
+a value o:v. An index record r has an extra value r:u to be explained shortly.
+Again we focus on the discussion of the MAX aggregate. Initially, there is only one node which is
+a leaf node. To insert an object o into a leaf node L, every record r in L where r:i intersects o:i
+is examined. If o:v  r:v, the insertion has no eect; otherwise, if o:i contains r:i, set
+otherwise, split r in two (or three) records: one corresponding to the intersection of r:i and o:i, while
+the other(s) corresponding to the rest of r:i. If a leaf node L over
+ows, it is split into two pages and
+the records in it are evenly distributed into two pages based on their interval positions. To perform
+an box-max query in an leaf page is easy. We just locate all records intersecting with the query
+interval and return the maximum value of these records.
+Besides an interval i, an value v and a pointer child to the child page, an index record also has a value
+u. The meanings of u and v for an index record r are as follows. If subtree(r) were a stand-alone
+tree, r:v would be the lower bound of any box-max query, while r:u would be the upper bound. Since
+during a query, subtree(r) may not a stand-alone tree, we need to maintain a running value which
+corresponds to the box-max we get so far by examining the path from root to the page pointed by
+r. The nal query result is the larger value between the running value and the box-max query result
+for subtree(r). Thus to perform a box-max query with interval q:i on an index page I where the
+running value is current, we check all records r in I which intersects q:i. If r:u  current, nothing
+is done; otherwise, if q:i contains r:i, set current = r:u; otherwise, set current to be the query result
+on subtree(r).
+Now we discuss how to insert an object o into an index page I. Every record r in I where r:i intersects
+o:i is examined. First of all, if r:u < o:v, we need to set to keep r:u as the upper bound.
+Next, we check o:v against r:v. If o:v  r:v, nothing needs to be done; otherwise, if o:i contains r:i,
+simply set otherwise, we recursively insert
+Note that for any given level l of the MSB-tree and for any given interval i, there can be at most two
+records at level l which intersect i. So both the insertion algorithm and the query algorithm examine
+two paths of the tree, and thus their complexities are both O(log B m), where B is the page capacity
+in number of records, and m is the number of leaf records. Since each insertion splits at most two
+leaf records, we have is the number of updates ever performed. But m can be
+much smaller than n. To observe this, consider the insertion of object is the whole space
+and o:v is larger than any existing value in the tree. Obviously, after this insertion, although n can
+be arbitrarily large, the most compact tree will have only one leaf record, i.e.
+An MSB-tree is called compact if the number of leaf records in it is minimum. The MSB-tree
+update algorithm does not ensure the compactness of the tree. Since it is ideal to maintain a small
+m, [YW00] proposes to periodically reconstruct the MSB-tree. To reconstruct, the whole tree is
+browsed in a depth-rst manner to report every interval together with the aggregation value during
+this interval. The intervals thus reported are continuous to one another. Adjacent intervals with the
+same value are merged. All the intervals are then inserted into a second, initially empty MSB-tree
+which eventually replaces the original tree.
+6.2 Optimize the MSB-tree
+During the reconstruction phase, the MSB-tree is o-line, i.e. no new insertion can be made. We
+discuss how to apply the box-elimination optimization we proposed in section 3 to the MSB-tree to
+get a relatively much smaller tree while it remains on-line.
+The idea is that whenever the u and v values of an index record r becomes equal during an insertion
+process, remove the whole subtree(r). To implement this, for the modied insertion algorithm to
+insert an object o to an index page I, add the following steps to the original insertion algorithm: for
+each record r in I such that o:i contains r:i and r:u  o:v, remove subtree(r) and mark r as obsolete,
+i.e. it points to an obsolete page; combine adjacent obsolete records; propagate the obsolete records
+to leaf pages. It remains to discuss how to propagate an obsolete index record r to the leaf level. If
+r is the only record in a page, merge the page with a sibling page; otherwise, there exists a sibling
+record s which is not obsolete. Without lose of generality, suppose s:i is to the right of r:i. Merge
+r with s by extending s:i to contain r:i. Also, the rst record of every node in the leftmost path
+starting from s:child needs to be extended as well.
+Now let's analyze the complexity of the modied algorithm. At each level of the tree, the algorithm
+examines at most two pages. In each page, there are O(B) obsolete records. For each of these
+records, we need to follow a single path from the page containing the record to some leaf. Thus
+the worst case update complexity is O(B log B m) where m is the number of leaf records. Note that
+this discussion does not count the cost to free up the space occupied by the sub-trees pointed to by
+obsolete records. In fact, since these sub-trees are not needed in any update or query to be performed
+later, the garbage collection can be performed by a background process. Compared with the original
+MSB-tree update algorithm, the modied update algorithm is a little more expensive in the worst
+case. However, this does not happen often, since each time the modied algorithm spends more time
+in update, the tree is shrinked.
+The major benet of the optimized algorithm over the original one is that the optimized one results in
+a much smaller tree without periodic reconstruction. As an example, consider the previous example
+to insert an object o where o:i is the whole space and o:v is larger than that of every existing record.
+The original algorithm simply updates the u and v values of all root-level records and thus the
+number of leaf records does not change. On the other hand, the optimized algorithm immediately
+decides that the whole tree is obsolete and thus results in a very compact tree: a tree with only one
+leaf record.
+Conclusions
+We examined the problem of computing MIN/MAX aggregation queries over spatial objects with
+non-zero extents. We proposed four optimization techniques for improving the query performance.
+We introduced the MR-tree, a new index explicitly designed for the maintenance of MIN/MAX
+aggregates. The MR-tree combines all proposed optimizations. An experimental comparison showed
+that our approach provides drastic improvement especially when query sizes increase. As a by-
+product, we showed how one of the optimizations can be applied on an existing aggregation index
+(the MSB-tree).
+
+Acknowledgements
+
+We would like to thank D. Gunopulos for many helpful discussions. We also thank D. Papadias for
+providing us valuable input on related work including their own. Finally, we are grateful to B. Seeger
+for the R  -tree code.
+
+
+
+--R
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Computational Geometry: An Introduction
+
+
+
+
+
+
+--TR
+Computational geometry: an introduction
+The R*-tree: an efficient and robust access method for points and rectangles
+Geometric range searching
+Range queries in OLAP data cubes
+Cubetree
+Efficient processing of window queries in the pyramid data structure
+Multidimensional divide-and-conquer
+Efficient computation of temporal aggregates with range predicates
+Progressive approximate aggregate queries with a multi-resolution tree structure
+R-trees
+The Dynamic Data Cube
+Data Cube
+Incremental Computation and Maintenance of Temporal Aggregates
+Hierarchical Prefix Cubes for Range-Sum Queries
+The R+-Tree
+Dynamic Update Cube for Range-sum Queries
+Efficient OLAP Operations in Spatial Data Warehouses
+The R-tree
+PISA
+How to Avoid Building DataBlades(r) That Know the Value of Everything and the Cost of Nothing
+Relative Prefix Sums
+
+--CTR
+Jie Zhang , Michael Gertz , Demet Aksoy, Spatio-temporal aggregates over raster image data, Proceedings of the 12th annual ACM international workshop on Geographic information systems, November 12-13, 2004, Washington DC, USA
+Zhang , J. Tsotras, Optimizing spatial Min/Max aggregations, The VLDB Journal  The International Journal on Very Large Data Bases, v.14 n.2, p.170-181, April 2005
+Ines Fernando Vega Lopez , Richard T. Snodgrass , Bongki Moon, Spatiotemporal Aggregate Computation: A Survey, IEEE Transactions on Knowledge and Data Engineering, v.17 n.2, p.271-286, February 2005

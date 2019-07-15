@@ -1,0 +1,402 @@
+--T
+Loop re-ordering and pre-fetching at run-time.
+--A
+The order in which loop iterations are executed can have a large impact on the number of cache misses that an applications takes. A new loop order that preserves the semantics of the old order but has a better cache data re-use, improves the performance of that application. Several compiler techniques exist to transform loops such that the order of iterations reduces cache misses. This paper introduces a run-time method to determine the order based on a dependence-driven execution. In a dependence-driven execution, an execution traverses the iteration space by following the dependence arcs between the iterations.
+--B
+Introduction
+Despite rapid increases in CPU performance, the primary obstacles to achieving higher performance in current processor
+organizations remain control and data hazards. An estimate [5] shows that the performance of single-chip microprocessors
+are improving at a rate of 80% annually, while DRAM speeds are improving at a rate of only 5-10% in that same amount
+time [5] [8]. The growing inability of the memory systems to keep up with the processors increases the importance of cache
+data re-use to reduce traffic to main memory and pre-fetching mechanisms to hide memory access latencies. These
+technological trends pose a challenge to interesting scientific and engineering applications whose data requirements are much
+larger than the processor's cache.
+Because scientific and engineering applications spend most of their execution time in loops, most of the effort in locality
+optimizations has focused on restructuring loops. Changing the iteration order by restructuring loops can significantly
+improve the performance of an application. Re-ordering iterations of a loop are conventionally done at compile time by
+applying transformations such as loop interchange, skewing and reversal. Unfortunately, compile-time transformations do not
+apply to certain types of loops because these transformations must be provably correct without knowing the values of the
+variables, forcing the compiler to make conservative assumptions.
+In this paper, we present a hybrid compile-time/run-time method to re-order loop iterations using a dependence-driven
+execution model that is loosely based on the concept of systolic arrays [9,11] and coarse grain dataflow [3]. In a
+dependence-driven execution, the system enables a block of iterations when the dependence constraints on those iterations
+are satisfied. The immediate execution of newly enabled iterations produces a depth-first traversal of the iteration space
+which improves data re-use. We maintain symbolic data-dependence information based on array subscript expression found
+in the body of the loop which is evaluated at run-time. This meta-computation on symbolic dependences allows us to avoid
+an early commitment to any specific order, giving the system a greater flexibility, which in turn increases the class of loops
+that can be optimized by re-ordering iterations. Furthermore, by maintaining dependence information during run-time, the
+run-time system can pre-fetch the sinks of dependences to hide the latency of memory accesses.
+Conventional wisdom suggests that determining the iteration order dynamically would add too much computational
+overhead. However, there are other overheads in addition to computational ones, such as those overheads caused by control
+and data hazards. On previous generations of computers with a more balanced memory system, the cost may indeed have
+been unjustified. On contemporary processors, the CPU cycles are relative cheap in comparison to memory cycles which can
+be up two orders of magnitude more expensive. This imbalance suggests that computational overhead for logic to avoid cache
+misses may not be significant if this logic can reduce traffic to memory, or hide the latency of memory operations. Elsewhere
+[16], we discussed the parallelism and scalability of a dependence-driven execution on a multiprocessor. In this paper, we
+evaluate the efficacy of run-time loop ordering to improve temporal locality in a contemporary uniprocessor.
+Background and Related Work
+Many important numerical applications in science and engineering consist of composite functions of the form
+where the f i 's are functions that are not necessarily distinct, D is some large data set, much greater than the processor's cache
+size, and n denotes the number of times the function sequence is to be applied. Implemented in imperative languages, the
+composite function would appear as a nested loop with each f i being expressed as a simple loop iterating over the data space
+D. The semantics of loops in these languages orders the iterations lexicographically with respect to the induction variables
+forcing the computation to traverse the data space in a strict function-at-a-time order. This execution order leads to a poor
+re-use of cache data: Because D does not fit entirely in the cache, the cache contains only the last c bytes of D upon
+completion of some function f i , forcing f i+1 to re-load every byte of D on to the cache. It may be possible and desirable to
+execute the iterations in a different order to improve locality. How do we determine which are the desirable and legal orders?
+How do we specify or express these orders for efficient execution?
+Much of the work on locality optimization relies on compile-time transformations to re-order the iterations of loops.
+Unfortunately, these transformations apply only to loops that are perfectly nested (that is, loops in which all assignment
+statements occur only in the innermost loop) or loops that can be transformed into perfectly nested loops. Put differently,
+compile-time transformations are applicable to the case where all the f i 's are the same in equation 1 above. In this section,
+we briefly review compile time loop transformations. In the following section, we describe how loop re-ordering can be
+extended to composite functions where not all f i 's are the same.
+To discuss compile transformation, it is useful to define the notion of an iteration space. An iteration space is an
+n-dimensional space of integers that models nested loops of depth n. A loop iteration is a point in the iteration space
+described by a vector I, (i 1 ,i 2 ,.i n ) where each i p is an index variable delimited by the iteration range for the corresponding
+loop at depth p. A linear loop transformation is a transformation from the original iteration space to another iteration space
+with some desired properties such as better locality or parallelism. A sequence of loop transformations can be modeled as a
+product of a non-singular matrices, each matrix making a transformation, such as skewing, loop interchange, reversal, etc.
+Thus finding the possible and desirable iteration order can be formulated as a search for a non-singular matrix with some
+objective function satisfying some set of constraints. These transformations are also called unimodular transformations
+because they preserve the volume of the iteration space of integers.
+A loop transformation is legal if the transformation preserves the dependence relations. If there is a dependence between two
+points I and J in the iteration space, then the difference between vector J and vector I, J-I is called the dependence distance
+vector. The set of distance vectors makes up the data dependences that determine the allowable re-ordering transformation.
+Based on these dependences, optimizing compilers may make the following transformations to improve locality:
+Loop Interchange: Loop Interchange [19,1] swaps an inner loop with an outer loop. Optimizing compilers will apply
+this transformation to improve memory locality if the interchange reduces the array access stride.
+Blocking (or Tiling): Blocking [20,12,17] takes advantage of applications with spatial locality by traversing a
+rectangle of iteration space at a time. If most of the memory accesses in the application are limited to addresses within
+the rectangle and this rectangle of data fits wholly in the cache, the processor will access the cache line multiple times
+before it leaves the cache.
+Skewing: Blocking may not be legal on some iteration spaces if the distance vectors contain negative distances. In
+some cases, skewing [19] can be applied to enable blocking transformation. Skewing traverses the iteration space
+diagonally in waves.
+
+Figure
+
+1: Skewing and Tiling Transformations on
+Hyperbolic 1D PDE.
+From the transformed iteration space, the compiler generates code in the form of new loops. As an example, consider the
+hyperbolic 1D PDE. Figure 1 shows the dependences and the iteration space prior, to and after, the skewing and blocking
+transformation with a block size of two. While the generated code is more complex than the original, the new code has better
+locality and parallelism. A survey of compiler transformations for high performance computing can be found in [4,18].
+Dependence-Driven Execution
+Given the transformed iteration space, compilers must generate code that describes the traversal over the entire iteration
+space. This early commitment to a specific order limits flexibility. More specifically, compile time transformations have the
+following limitations:
+Unimodular transformation do not apply to composite functions with multiple distinct functions, that is, they do not
+apply to a large class of imperfectly nested loops.
+Some dependences in loop iterations involve unknown user variables in the subscript expressions. For example,
+consider the following loop:
+for (I=0; I < N1; I++) {
+for (J=1; J < N2; J++) {
+The compiler cannot apply unimodular transformations without knowing the values of K and L, or at the very least
+knowing whether the values are negative or positive.
+Because compilers must give a static specification of iteration order, the code generated for the transformed iteration
+space can become complex, as in the example of skewing and blocking transformation in figure 1. The complex code
+with many levels of nesting and conditionals causes control hazards which reduces instruction level parallelism on
+contemporary processors. Furthermore, it is difficult for compilers to apply other optimizations on complex code. For
+example, none of the compilers on various architectures with which we experimented were able to apply loop
+unrolling to the code generated in figure 1.
+Furthermore, compile time linear loop transformations do not give us a general technique to automate pre-fetching
+data to hide memory access latencies.
+In this section, we describe the DUDE (Def-Use-Descriptor Environment) run-time system. DUDE is meant to be used either as
+a target for optimizing compilers or as a set of library calls that programmers can use directly 1 to optimize their code. The
+basic model is loosely based on the underlying concept of systolic arrays. Like systolic arrays, computation in DUDE consists
+of a large number of processing elements (cells) which are of the same type. However, for efficient computation on
+commercial processors, the granularity of computation in DUDE is much coarser. In our implementation, these cells are
+actually C++ objects that consist of an operation and a descriptor describing a region of data to which the operation is
+applied. We term these objects Iterates and an array of these Iterates make up an IterateCollection. The procedures in the
+cells of systolic arrays may consist of several alternative options. Similarly, operators in the Iterates of a IterateCollection
+may be overloaded.
+Like the cells of systolic arrays, Iterates are interconnected through links. But unlike the interconnection between cells of
+systolic arrays which are physical, hardwired links, the links in DUDE are symbolic expression of indices from the index
+space of IterateCollections. The expression for symbolic links, called dependence rule, is derived from array access patterns
+in the statements of the original loop, and therefore it summarizes dependences in the iteration space. The symbolic
+meta-computation on the dependence rule determines the path of execution through the iteration space.
+Also like the computation in systolic arrays, data is processed and transfered from one element to another by pipelining.
+Since there is only one physical processing element on a uniprocessor, there is no computational speedup due to pipelining.
+However, because of the temporal locality that this model offers, we can expect a performance improvement even on an
+uniprocessor. Unlike the computation in systolic arrays, the computations in DUDE are not synchronized by a global clock
+(and in that sense, our model is closer to wavefront arrays [10]). The asynchronous computation, together with the pipelining
+of the function applications, allows the system to apply multiple functions to the same block of data before that data block
+leaves the processor's cache.
+
+Figure
+
+2: Dependence-driven Execution Model
+Describing Loops in DUDE
+A goal of the run-time system is to be able to optimize complex loops of the form shown in equation 1. To achieve these
+goals, we have taken an object-oriented loops and blocks of iterations are extensible first class objects which
+can be put together to describe complex loops. By putting together and specializing these objects, the user specializes the
+system to create a "software systolic array" for the application at hand. This object-oriented model is based on AWESIME
+[7] and the Chores [6] run-time systems. The following is a list of objects in DUDE:
+Data Descriptor: Data Descriptors describe a subsection of the data space. For example, a matrix can be divided into
+sub-matrices with each sub-matrix being defined by a data descriptor. The methods on this object, SX(), EX(), SY(),
+EY(), etc., retrieve the corners of the sub-matrix.
+Iterate: An Iterate is a tuple <data descriptor, operator>. The user specializes an Iterate by overloading the default
+operator with an application specific operator consisting of statements found in the body of a simple loop. The system
+applies the virtual operator to the data described by the descriptor.
+IterateCollection: An IterateCollection, as the name implies, is an array of Iterates. An IterateCollection represents a
+simple loop in a nested loop (or a simple function in a composite function) that performs an operation on the entire
+data space. The dimensionality of an IterateCollection is normally the same as that of the data array on which it
+operates.
+LOOP: LOOP is a template structure used to describe a composite function by putting together one or more
+IterateCollections. The user relies on the following methods provided by the LOOP object to glue together different
+IterateCollections and begin the computation:
+makes IterateCollection the nth simple function in the composite function.
+defines the symbolic link dep, from IterateCollection IC1 to IC2. This symbolic
+link is expressed in terms of a dependence rule with variables that range over the index space of the
+IterateCollections.
+Execute() executes the entire loop nest described by the loop descriptor.
+Because loops are objects, they can be created and defined at run-time, giving the system the flexibility to describe and
+compute complex loop nests. Figure 2 shows the basic model that the run-time system uses. Initially, the system pushes only
+the unconstrained Iterates onto to the system LIFO Queue. This allows the scheduler to pop off an Iterate to perform the
+operation with which that Iterate is associated. The completion of an Iterate can potentially enable other Iterates based on the
+data dependences specified in SetDependence() and based on what other Iterates have completed. This creates a cycle shown
+in figure 2 which the system repeats until the entire loop nest is completed.
+Example: Red/Black SOR
+We now describe a dependence-driven execution with respect to the example of Red/Black SOR which has the form , (Red
+(D) where N is the number of time steps. Note that since the loops for the Red and Blk operations are not nested within
+each other, they are not perfectly nested and hence unimodular transformation does not apply.
+
+Figure
+
+3: Multi-Loop Dependences on Red/Black
+
+Figure
+
+4: Red/Black SOR on DUDE
+
+Figure
+
+3 shows the original code and the inter-loop dependences. The Red and the Blk operations in the loop body simply
+take the average of an element's neighboring point creating the dependence shown in the figure. Figure 4 shows the
+application as it would appear when written for DUDE. For this application, there are two Iterates, the RED and the BLK
+with corresponding BLK::main and RED::main methods that overload the operator to specialize the Iterate for this
+application. These Iterates compose the RedColl and BlkColl collections. Finally, these collections themselves are combined
+in the loop descriptor to create a composite function that iterates up to 10 iterations.
+The Execute() function of loop in figure 4 starts the system by pushing all of the initially unconstrained Iterates of the
+RedColl collection onto the system LIFO queue. In a dependence-driven execution, the memory locality of the entire
+execution of the nested loop is sensitive to the order in which the initially unconstrained Iterates are loaded. For applications
+which have block memory access patterns such as this one, the system loads the Iterates in Morton order [15].
+Now the computation begins. After the initial Iterates have been loaded, the system scheduler pops off a (Red) Iterate from
+the system LIFO queue and applies the main operator to the data described by the descriptor for that Iterate. When
+completed, the system determines the list of sinks of the dependences arcs for that Iterate based on the dependence rule. For
+each sink, the system decrements the counter in the destination Iterates which at this point in the execution, are Blk Iterates.
+If the count is zero, the Iterate becomes unconstrained or enabled. The dependence satisfaction engine pushes these enabled
+Iterates onto the system LIFO queue. Because of the LIFO order, the next time the scheduler pops off an Iterate from the
+LIFO queue, it would be a Blk Iterate. Continuing, the completion of a Blk Iterate can further enable a Red Iterate from
+second time step, and so forth. This describes a depth-first traversal of the iteration space since a Blk operation can begin
+before all of the Red operations are completed. Note that using a FIFO queue would enforce a breadth-first traversal order of
+the iteration space as would the order produced by the original source loop.
+
+Figure
+
+5: Iteration order for Hyperbolic 1D pde using DUDE
+Having described the run-time system, we are now in a position to compare it with the compile-time transformations.
+Because compile-time optimization cannot transform the loop structure for Red/Black SOR, we now revert back to the
+example of Hyperbolic 1D PDE to compare the iteration order of a loop nest as it would run on DUDE with a compile-time
+loop re-ordering.
+
+Figure
+
+5 shows the snapshot of the iteration order of the Hyperbolic 1D PDE as it runs on DUDE. The code shown below the
+diagram is the body of the operator for the PDE Iterate. Note that this code is much simpler than the code required for
+skewing/tiling shown in figure 1. Simpler code with less conditionals runs more efficiently on contemporary processors with
+deep pipelines. It also enables the possibility of further optimizations. As shown in figure 1, there are really two orderings to
+consider in a dependence-driven execution: intra-Iterate order (indicated by numbers) and inter-Iterate order (enforced by
+arrows). While the inter-Iterate order is determined by the dependence rule, the order within an Iterate is exactly the same as
+that in the original source loop. Note that the given dependence rule causes a diagonal traversal of the Iterates, much like the
+skewing transformation.
+Support for Automated Pre-fetches
+So far we have discussed methods to reduce the number of cache misses. How do we hide memory access latency when
+cache misses are unavoidable? In this section, we discuss how DUDE inserts pre-fetch instructions to mask the memory
+accesses latencies with useful computation for cases when a cache miss is unavoidable. Figure 2 shows where the pre-fetch
+logic fits into the dependence-driven model. Just before the system executes the currently ready Iterate C the pre-fetch logic
+tries to predict what the next Iterate N to execute would be, based on C and the dependence rule. This prediction simply
+simulates what the dependence satisfaction engine does to enable new Iterates with the following exception: instead of
+pushing the newly generated Iterates N onto the LIFO queue, the pre-fetch logic invokes the pre-fetch command on the
+region of data that the Iterate N is associated with. This causes the data needed by N to be delivered to processor cache while
+the system is executing Iterate C with the intention that when the system finally executes N, the data for N would be available
+in the processor's cache.
+Experimental Results and Analysis
+We measured the performance of six applications: Red/Black SOR, Odd-Even sort, Multi-grid, Levialdi's Component
+labeling algorithm, Hyperbolic 1D PDE, and Vector chain addition. One would not ordinarily run some of these algorithms
+on a uniprocessor since more efficient scalar algorithms exist. Our aim is to ultimately run these algorithm on a
+multiprocessor but by conducting these experiments on a uniprocessor, we isolate the benefits of increased parallelism in a
+dependence-driven execution from the benefits of improved temporal locality.
+All experiments were conducted on a single processor DEC 21164 running at 290 MHz with 16KB of first level cache and 4
+MB of second level cache. The cache penalties for the two caches are 15 cycles and 60 cycles respectively. All programs
+were compiled with DEC C++ (cxx) compiler with -O5 option.
+To determine where the cycles (cache miss, branch mis-predict, useful computation, etc.) were spent, we used the Digital
+Continuous Profiling Infrastructure (DCPI) [2] available on the Alpha platforms. DCPI runs on the background with low
+overhead (slowdown of 1-3%) and unobtrusively generates profile data for the applications running on the machines by
+sampling hardware performance counters available on the Alphas. The cycles are attributed to the following categories:
+Computation: This is the cycles spent in doing useful computation.
+Static Stalls: These are stalls due to static resource conflicts among instructions, dependencies to previous
+instructions, and conflicts in the functional units.
+D-Cache Miss Stalls: These are dynamic stalls caused by D-cache misses.
+Other Dynamic Stalls: Other sources of dynamic stalls are missed branch predictions, I-cache misses, ITB and DTB
+misses.
+
+Figure
+
+Cycles Breakdown for Various
+Applications
+
+Figure
+
+6 shows a breakdown of where the cycles were spent for the six applications. Because some of the methods are not
+relevant to certain applications, some graphs compares fewer methods than others. All measurements are averages of 15 runs
+with negligible standard deviations.
+Red/Black SOR
+
+Figure
+
+7: Analysis of SOR (2048x2048) Running
+on DUDE
+This application has good spatial locality since each element only accesses its neighboring elements. It also has the potential
+for temporal locality if we pipeline the iterations from different time steps. We compared using a dependence-driven
+execution to three other methods: unoptimized, tiling by row and tiling by block. We chose a matrix size of 2048x2048
+(64-bit floats) to insure that the entire matrix did not entirely fit into the processor's cache. For each method, we used the
+optimal block size for that method which were 256x2048 for tiling by row, 256x256 for block and 32x32 for DUDE. Since the
+time steps in Red/Black SOR are normally controlled by a while loops, we use the following
+while (!done) {
+for (i=0; i<10; i++)
+
+
+Figure
+
+6 shows that the Red/Black SOR using the unoptimized method spends as much as 76% of time on D-cache stalls.
+This is not surprising given how expensive memory accesses are relative to cpu cycles. Since tiling by row creates the same
+iteration order as the unoptimized case, there is little benefit in using tiling by row.Due to its access patterns (access of north,
+south, west, and east neighbors), tiling by block does a little better because of spatial locality.
+As shown in the figure, DUDE incurs the greatest overhead in terms of number of instructions executed. The run-time
+dependence satisfaction is partly responsible for these overheads. Another source of overheads are caused by the use of
+smaller block sizes (32x32) which increases the number of loops and hence the number of instructions. Comparing these
+overheads with the cycles spent in D-cache stalls, it is clear that these overheads are relatively insignificant. Neverthless,
+there is a tension between the overheads caused by smaller block sizes and the benefits of greater temporal locality; a smaller
+block allows the algorithm to explore deeper into time steps improving temporal locality, but it also increases the total
+overhead. The right hand side of figure 7 shows the effect of grain sizes on this application.
+To further analyze the cache behavior of SOR using various method, we used ATOM [14] to instrument this application. The
+left-hand side of the figure shows the total number of references, L1 cache, misses and L2 cache misses that we derived from
+instrumenting the executables. As expected, there are more memory references required for DUDE, but it also suffers the least
+from L2 cache misses. The working set for this application is too large for the dependence-driven execution to entirely fit in
+L1 causing a DUDE slight increase in L1 cache misses over the tiling by block method.
+Hyperbolic 1D PDE
+To compare the run-time method with skewing and blocking compiler transformation, we also measured the breakdown in
+cycles of the Hyperbolic 1D PDE, which is a wavefront computation with a perfectly nested loop. Figure 6 shows the
+performance of the three methods. Both the static and run-time re-ordering optimization significantly improve locality. The
+static skewing transformation has the best locality, but introduces more overhead than the dependence-driven execution. The
+control hazards introduced in the compiler generated code (right side of figure 1) increase the static stalls as shown in the
+figure. Further analysis of the skewing code using DCPI also revealed that this method suffered from resource conflict stalls
+due to all the integer arithmetic in the subscript expression required by the compiler-transformed code (see right side of
+figure 1).
+Component Labeling
+Levialdi's algorithm [13] for component labeling is used in image processing to detect connected components of a picture. It
+involves a series of phases, each phase consisting of changing a 1-pixel to a 0-pixel if its upper, left, and upper-left neighbors
+are 0-pixels. A 0-pixel is changed to a 1-pixel if both its upper and left neighbors are 1-pixels. Comparison of the
+performances of various methods are shown in figure 6. Again, we see that the higher overhead for determining the iteration
+order dynamically is small compared to the benefits of avoiding stalls.
+Odd-Even Sort
+Because the overheads in a dependence-driven execution are proportional to the number of dependence arcs emanating from
+an Iterate, and because this application has only two arcs per Iterate, DUDE dramatically outperforms the unoptimized
+method. We do not include the performance of tiling methods because tiling would not change the iteration order in this
+one-dimensional problem. Compile-time skewing transformation does not apply here because there are two functions, the odd
+and the even operations.
+Multi-Grid
+Multi-grid is another iterative PDE solver but it is an interesting one because it has five distinct operators (smooth even
+elements, smooth odd elements, restrict, form, and prolong) and different dependence relations between these operations. The
+dimension of the data space also changes depending on what level of the multi-grid pyramid you are in.
+Vector Chain Additions
+To measure the performance of DUDE when a purely static method can determine the same iteration order, we analyzed the
+performance of simply adding 14 vectors each of length 1048576 double floats. In the unoptimized version, two vectors were
+added in their entirety before adding the next vector. In the tiled versions, vectors were broken into chunks containing
+elements which gave the best performance. Elements 0.31 of all the 14 vectors were added before adding elements
+and so forth. Finally, in DUDE, we used a chunk size consisting of 512 elements with the Dependence Rule set to .
+While DUDE incurs slightly more overhead for determining the iteration order, it also benefits from data pre-fetches.
+Effect of Pre-fetching
+To study how well the system pre-fetches data, we 1) inspected the footprint of the execution, and 2) compared the cycles
+breakdown of the applications with or without enabling pre-fetch instruction. There are two pre-fetch instruction on the
+Alphas, fetch(M) instruction which is documented but not implemented on the 21164 and the instuction to load (ldt or ldl) to
+the zero register which is implemented but not documented. Since we were running our experiments on the 21164, we used
+the load to the zero register to generate our pre-fetches. By looking at the the footprint of an execution of what the system
+was pre-fetching and what the system was executing, we were able to verify that the system was indeed pre-fetching the next
+Iterate while executing the current one. However, the performance result that we observed showed that there was little benefit
+from pre-fetching for some of the applications at which we looked. The left sided of 7 gives us a clue as to why pre-fetching
+was not very effective on some applications. This figure shows that there were hardly any L2 misses, but a lot of L1 misses.
+This implies that the working set for a dependence-driven execution was too large to fit in L1. Pre-fetching the next iterate
+may help reduce L2 cache misses (which is not really the source of most stalls), but it does not help misses to L1 because of
+the conflicts with the working set of the current Iterate. We can reduce the size of the working set by reducing granularity,
+but this would increase the total overhead.
+
+Figure
+
+8: Effect of Pre-fetch on Odd-Even Sort
+and Vector Chain Addition
+For applications with small working sets, we were able to get about a 7% performance improvement by pre-fetching as
+shown in figure 8. The working set for Odd-Even sort consists of only the left and right neighbors on an one-dimensional
+array while the working set of vector chain addition consist of only the vector containing the total sum and the current vector
+that is being added. We expect that the efficacy of pre-fetching would be greater if L1 was sufficiently big enough to fit the
+working set. Pre-fetching at the granularity of dependence-driven execution is more suited for distributed shared memory
+systems with larger caches and larger latencies. Nevertheless, our preliminary experiment indicates that pre-fetching can be
+automated in a dependence-driven execution.
+Conclusion
+Compile-time optimizations have the advantage that compilers can apply the optimizations with little overhead ( in most
+cases) to the total execution time. Run-time optimization have the advantage that there is more information available
+(assuming information from compile-time is kept until run-time). This information includes the state of computation such as
+values of the variables, dependences that are satisfied, and dependences that are yet to be satisfied. Having this information,
+the run-time can be more flexible. This flexibility comes at the cost of more instructions executed and more cpu cycles.
+However, on modern commercial machines, processor cycles are cheap. If the additional cycles can be used to use the
+memory system more effectively, then we can reduce overall execution time of an application. We have described a run-time
+system that uses symbolic dependence information to determine loop-order during run-time. We have also shown that a
+computation that is driven by dependences significantly reduces the number of cache miss stalls while adding relatively
+insignificant overhead. Furthermore, when cache misses cannot be avoided, we have shown that the system can also be used
+to pre-fetch data to avoid memory access latencies. As memory access costs become more expensive; cpu speeds continue to
+get faster; the size of caches continue to get larger; and as the mechanism for pre-fetching becomes better supported - the
+overhead for a dependence-driven execution becomes more justified.
+
+
+
+--R
+
+Automatic loop interchange.
+Continuous profiling: Where have all the cycles gone?
+Parallel processing with large-grain data flow techniques
+Compiler transformations for high-performance computing
+Keynote address.
+Enhanced run-time support for shared memory parallel computing
+A users guide to AWESIME: An object oriented parallel programming and simulation system.
+Computer Architecture: a Quantitative Approach.
+Systolic arrays (for VLSI).
+Wavefront array processors.
+VLSI Array Processors.
+The cache performance and optimization of blocked algorithm.
+On shrinking binary picture patterns.
+
+The Design and Analysis of Spatial Data Structures.
+
+Improving locality and parallelism in nested loops.
+High Performance Compilers for Parallel Computing.
+Optimizing supercompilers for supercomputers.
+More iteration space tiling.
+--TR
+VLSI array processors
+More iteration space tiling
+Computer architecture: a quantitative approach
+The design and analysis of spatial data structures
+The cache performance and optimizations of blocked algorithms
+Chores: enhanced run-time support for shared-memory parallel computing
+Link-time optimization of address calculation on a 64-bit architecture
+Continuous profiling
+On shrinking binary picture patterns
+Automatic loop interchange
+Compiler Transformations for High-Performance Computing
+Optimizing supercompilers for supercomputers
+
+--CTR
+Suvas Vajracharya , Dirk Grunwald, Dependence driven execution for multiprogrammed multiprocessor, Proceedings of the 12th international conference on Supercomputing, p.329-336, July 1998, Melbourne, Australia
+Suvas Vajracharya , Steve Karmesin , Peter Beckman , James Crotinger , Allen Malony , Sameer Shende , Rod Oldehoeft , Stephen Smith, SMARTS: exploiting temporal locality and parallelism through vertical execution, Proceedings of the 13th international conference on Supercomputing, p.302-310, June 20-25, 1999, Rhodes, Greece

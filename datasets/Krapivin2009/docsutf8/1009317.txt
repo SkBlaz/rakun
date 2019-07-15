@@ -1,0 +1,1029 @@
+--T
+Mining Constrained Gradients in Large Databases.
+--A
+Many data analysis tasks can be viewed as search or mining in a multidimensional space (MDS). In such MDSs, dimensions capture potentially important factors for given applications, and cells represent combinations of values for the factors. To systematically analyze data in MDS, an interesting notion, called "cubegrade was recently introduced by Imielinski et al. [CHECK END OF SENTENCE], which focuses on the notable changes in measures in MDS by comparing a cell (which we refer to as probe cell) with its gradient cells, namely, its ancestors, descendants, and siblings. We call such queries gradient analysis queries (GQs). Since an MDS can contain billions of cells, it is important to answer GQs efficiently. In this study, we focus on developing efficient methods for mining GQs constrained by certain (weakly) antimonotone constraints. Instead of conducting an independent gradient-cell search once per probe cell, which is inefficient due to much repeated work, we propose an efficient algorithm, LiveSet-Driven. This algorithm finds all good gradient-probe cell pairs in one search pass. It utilizes measure-value analysis and dimension-match analysis in a set-oriented manner, to achieve bidirectional pruning between the sets of hopeful probe cells and of hopeful gradient cells. Moreover, it adopts a hypertree structure and an H-cubing method to compress data and to maximize sharing of computation. Our performance study shows that this algorithm is efficient and scalable. In addition to data cubes, we extend our study to another important scenario: mining constrained gradients in transactional databases where each item is associated with some measures such as price. Such transactional databases can be viewed as sparse MDSs where items represent dimensions, although they have significantly different characteristics than data cubes. We outline efficient mining methods for this problem in this paper.
+--B
+Introduction
+Recently, there have been growing interests in multidimensional analysis of relational databases, transactional
+databases, and data warehouses. Most of such analysis involve data cube-based summary or
+transaction-based association analysis. However, in many interesting applications one may want to
+analyze the changes of measures in multidimensional space. For example, one may want to ask what
+are associated with significant changes of the average house price in the Vancouver area in year 2000
+compared against 1999, and the answer could include statements of the form "the average price for
+those sold to professionals in the West End went down by 20%, while those sold to business people in
+Metrotown went up by 10%, etc." Expressions such as "professionals in the West End" correspond to
+cells in data cubes, and describe sectors of the business modeled by the data cube.
+The problem of mining changes of sophisticated measures in a multidimensional space was first
+proposed by Imielinski, et al. [IKA02] as a cubegrade problem, which can be viewed as a generalization
+of association rules and data cubes. It studies how changes in a set of measures (aggregates) of
+interest are associated with changes in the underlying characteristics of sectors, where changes in
+sector characteristics are expressed in terms of dimensions of the cube and are limited to specialization
+(drill-down), generalization (roll-up), and mutation (a change in one of the cube's dimensions). For
+example, one may want to ask "what kind of sector characteristics are associated with major changes in
+average house prices in the Vancouver area in 2000," and the answer will be pairs of sectors, associated
+with major changes in average house prices, including for example "the sector of professional buyers
+in the West End area of Vancouver" vs. "the sector of all buyers in the entire area of Vancouver" as a
+specialization.
+The cubegrade query is significantly more expressive than association rules since it captures the
+trends in data and handles arbitrary measures, not just COUNT, as association rules do. The problem
+is interesting and has broad applications, such as trend analysis, answering "what-if " questions, discovering
+exceptions or outliers, etc. However, it also poses serious challenges on both understandability
+of results and on computational e#ciency and scalability, as illustrated below.
+1. A data cube may have many dimensions. Even though each dimension may involve only a small
+number of values, the total number of cells of the data cube may still be quite huge. For example,
+a data cube with 20 dimensions each containing 99 distinct values has
+and high level cells. Even if there is only one nonempty cell in every cells, the cube will
+huge to be precomputed and stored with reasonable resources. In
+a transactional database, if we consider each item (such as milk or bread) as one independent
+dimension, as in [IKA02], we may need to handle thousands of dimensions, and the curse of
+dimensionality will be even worse than that of classical data cubes which usually contain only
+dozens of dimensions. An e#ective compromise to this problem is to compute iceberg cubes
+instead of the complete cubes [BR99]. To this end, we need to introduce a significance constraint
+for pruning the huge number of trivial cells in the answer set.
+2. The cubegrade problem needs to compare each cell in the cube with its associated cells generated
+by specialization, generalization, and mutation. Even when considering only iceberg cubes, it may
+still generate a very large number of pairs. Since for each analysis task, a user is often interested
+in examining only a small subset of cells in the cube, it is desirable to enforce certain probe
+constraints to select a subset of cells (called probe cells) from all the possible cells as focus points
+for examination. Using such constraint, one is focused only on these cells and their relationships
+with corresponding siblings, ancestors, and descendants.
+3. A user is usually interested in only certain types of changes between the cells (sectors) under
+comparison. For example, one may be interested in only those cells whose average profit increases
+by more than 40% compared to that of the probe cells, etc. Such changes can be specified as
+a threshold in the form of ratio/di#erence between certain measure values of the cells under
+comparison. We will call the cell that captures the change from the probe cell the gradient cell,
+and call such constraints the gradient (interestingness) constraints.
+From this discussion, one can see that to mine interesting gradients in a multidimensional space,
+it is often necessary to have the following three kinds of constraints: (1) significance constraint, which
+ensures that we produce only cells which have certain statistical significance in the data, such as those
+containing at least certain number of base cells or at least certain total sales; (2) probe constraint, which
+confines the set of probe cells that our gradient analysis will focus on; and (3) gradient constraint,
+which specifies the user's range of interest on the gradient (i.e., measure change). In this paper, we
+consider significance constraints that can be specified using thresholds on measures and that are anti-monotone
+or weakly anti-monotone (see Section 2), and we restrict probe constraints to non-nested
+SQL queries. Enforcing these constraints may lead to interesting, clearly understandable answers as
+well as possibility to derive e#cient methods for gradient analysis in a multidimensional space. In this
+context, the problem of multidimensional gradient analysis with such constraints represents a confined
+but interesting version of the cubegrade problem, which we call the constrained (multidimensional)
+gradient analysis.
+In this paper, we study e#cient and scalable methods for constrained gradient analysis in multi-dimensional
+space. Our study is focused on mining constrained gradients in data cubes. However, we
+will also examine how to extend the method to mining constrained gradients in transactional databases.
+For mining constrained gradients in data cubes, we first consider a naive approach which computes
+such gradients by conducting a search, for the gradient cells, once per probe cell 1 . This approach
+is ine#cient because there is a large amount of repeated work for di#erent probe cells. To avoid
+this problem, we propose an e#cient algorithm, called the LiveSet-Driven algorithm, which utilizes
+constraints early on and during computation, for computing pairs of cells. The algorithm first computes
+the set of significant probe cells, and then processes the potential gradient cells from low dimensional
+cells to high dimensional ones. The computation for a set of probe cells is bundled together, and the
+set of live probe cells is used for pruning. We introduce a method to determine the optimal set of probe
+cells that needs to be used for pruning a potential gradient cell and its descendants, which takes into
+consideration the dimensional relationship between cells and the gradient constraint with respect to a
+set of probe cells. Moreover, a compressed hyper-tree structure is used to represent the base table of
+a data cube, and an H-cubing method is used to achieve "maximal" sharing of computation among
+di#erent cells. Even though the naive algorithm also prunes as much as possible, the LiveSet-Driven
+algorithm is much better because it uses (i) set-oriented processing, (ii) set-oriented pruning, and (iii)
+a one-pass search for all probe-gradient pairs. Our performance study shows that the LiveSet-Driven
+algorithm makes good use of constraints and is e#cient and scalable for large data sets.
+Finally, we extend our scope of study to e#cient mining of constrained gradients in transactional
+databases and outlined a probe-based FP-growth method for constrained gradient mining.
+The rest of the paper is organized as follows. Section 2 defines the constrained gradient analysis
+problem and presents an example. Section 3 presents the methods for mining constrained gradients in
+data cubes, including the LiveSet-Driven algorithm, which covers the techniques for pruning probe cells
+and gradient cells. Section 4 reports the results of our experiments and performance study. Section
+1 Since the gradient constraint is on pairs of cells whereas the significance and probe constraints are on individual cells,
+we believe that the significance and probe constraints combined are usually more restrictive than the gradient constraint.
+So we only consider approaches that first use the significance and probe constraints to restrict the search space.
+5 discusses variations of the method, extends our scope of study to mining constrained gradients in
+transaction databases, and compares with the related work. Finally, we conclude our study in Section
+6.
+Problem Definition and Assumptions
+Let D be a relational table, called the base table, of a given cube. The set of all attributes A in D
+are partitioned into two subsets, the dimensional attributes DIM and the measure attributes M (so
+#). The measure attributes functionally depend on the dimensional
+attributes in D and are defined in the context of data cube using any of these five SQL aggregate
+functions: COUNT, SUM, AVG, MAX, and MIN.
+A tuple with schema A in a multi-dimensional space (i.e., in the context of data cube) is called a
+cell. Given three distinct cells c 1 , c 2 and c 3 , c 1 is an ancestor of c 2 , and c 2 a descendant of c 1 i#
+on every dimensional attribute, either c 1 and c 2 share the same value, or c 1 has value "#" (where "#"
+indicates "all", i.e., aggregated to the highest level on this dimension); c 2 is a sibling of c 3 , and vice
+versa, i# c 2 and c 3 have identical values in all dimensions except one dimension in which neither has
+value "#". A cell which has k non-* values is called a k-d cell.
+A tuple c # D is called a base cell. A base cell does not have any descendant. A cell c is an
+aggregated cell i# it is an ancestor of some base cell. For each aggregated cell c, its values on the
+measure attributes are derived from the complete set of descendant base cells of c.
+As mentioned in Section 1, the specification of a constrained gradient analysis problem requires three
+constraints: a significance constraint C sig , a probe constraint C prb , and a gradient constraint C grad .
+Both C sig and C prb are unary (defined over cells). A cell c is a significant cell i# C sig (c) = true, and a
+cell c is a probe cell i# c is significant and C prb true. The complete set of probe cells is denoted
+as P.
+Significance constraints are usually defined as threshold conditions on measure attributes. These
+constraints do not have to be anti-monotonic 2 , and can be for example, on a measure defined by the
+AVG aggregate function. In [HPDW01], methods for deriving weaker anti-monotonic constraints 3 from
+2 Anti-monotonicity is very useful for pruning. It states that if a cell c does not satisfy an (anti-monotonic) significance
+constraint Csig , none of c's descendants can do so. For example, the constraint ``count > 10'' is anti-monotone. Anti-
+monotonicity-based pruning forms the foundation for most algorithms for computing iceberg cubes.
+3 We will call those constraints from which one can derive weaker anti-monotone constraints the weakly anti-monotone
+non-anti-monotonic constraints and for e#ciently computing iceberg cubes were discussed. We will use
+such weaker anti-monotonic constraints for pruning candidate cells.
+We assume that a probe constraint is a one-level SQL query (without nested query), which will
+"select" a set of user-desired cells. The query can involve the dimensional attributes as well as the
+measure attributes.
+A gradient constraint is binary (defined over pairs of cells). It has the form C grad (c
+is in {<, >, #}, v is a constant value, and g is a gradient function. g(c g , c p )
+is defined c g is either an ancestor, a descendant, or a sibling of c p . A gradient cell c g is interesting
+with respect to a probe cell c p # P i# c g is significant and C grad (c g , c p
+In this paper we mainly consider gradient constraints defined using the ratio of two measure values
+such as "m(c g )/m(c p ) # v", where m(c) is a measure value for a cell c. Most of the results derived for
+ratio can be easily extended to di#erence, "m(c g ) -m(c p ) # v" (see Section 5).
+Problem definition. Given a base table D, a significance constraint C sig , a probe constraint C prb ,
+and a gradient constraint C grad (c g , c p ), the constrained gradient analysis problem is: Find the
+complete set of all interesting gradient-probe pairs (c g , c p ) such that C grad (c g , c p
+Example 1 (Constrained average gradient) Let the base table D be a sales table with the schema
+city, cust grp, prod grp, cnt, avg price)
+Attributes year, city, cust grp, and prod grp are the dimensional attributes; and cnt and avg price
+are the measure attributes.
+
+Table
+
+1: A set of base and aggregated cells
+
+Table
+
+1 shows a set of base and aggregated cells. Tuple c 1 # D is a base cell, while tuple c 2 is an
+aggregated cell. Here, the value of cnt in an aggregated cell c is the sum of the corresponding values in
+the complete set of descendant base cells of c, and the value of avg price of c is the average price of
+the complete set of descendant base cells of c.
+constraints.
+Tuple c 3 is a sibling of c 2 , c 4 is an ancestor of c 2 , and c 1 is a descendent of c 2 .
+Suppose the significance constraint is C sig # (cnt # 100). All cells (including base and aggregated
+ones) with cnt no less than 100 are regarded as significant. Suppose the probe constraint is C prb #
+cust #). The set of probe cells P contains the set
+of aggregated tuples about the sales of the Business customer group in Vancouver, for every product
+group, provided the cnt in the tuple is greater than or equal to 100. It is easy to see c 2 # P.
+Let the gradient constraint be C grad (c 1.4). The constrained
+gradient analysis problem specified by the three constraints is: Find all pairs (c g , c p ), where c p is a
+probe cell in P, c g is a sibling, ancestor, or descendant of c p , c g is a significant cell, and c g 's average
+price is at least 40% more than c p 's. #
+If a data cube is completely materialized, that is, all the aggregated cells are computed and stored
+without considering constraints, the query posed in Example 1 becomes a relatively simple retrieval of
+the pairs of computed cells that satisfy the constraints. Unfortunately, the number of aggregated cells
+is often too huge to be precomputed and stored. Thus we assume only the base table is available, and
+it is our task to compute from it the gradient-probe pairs e#ciently.
+To confine our discussion, we first develop e#cient methods for computing constrained average
+gradients, as posed in Example 1, and then extend our scope to more general cases in Section 5.
+3 Mining Constrained Gradients in Data Cubes
+In this section we examine e#cient methods for mining constrained gradients in data cubes. First,
+we outline a relatively rudimentary algorithm, All-Significant-Pairs, and analyze its deficiencies. Then
+we propose a better algorithm, called LiveSet-Driven, which uses a set of relevant probe cells, called
+LiveSet, to prune potential gradient cells during iterative exploration. Moreover, an H-tree structure
+is developed for e#cient computation with minimal replication of data. A rough analysis is given in
+the last subsection to compare the runtime of the two algorithms.
+As discussed in Section 1, we believe that it is often the case that the significance and probe
+constraints combined are more restrictive than the gradient constraint. So we only consider approaches
+that first use the significance and probe constraints to restrict the search space.
+3.1 A Rudimentary All-Significant-Pairs
+Constrained gradients can be mined by a rudimentary algorithm, called All-Significant-Pairs. It
+first computes iceberg cube P consisting of all significant probe cells from D using the significance
+constraint C sig and the probe constraint C prb , and then for each probe cell, c p # P, computes the set
+of gradient cells from D by using the gradient constraint C grad (c g , c p ).
+Both steps are carried out by using an e#cient iceberg method, and they use the constraints to
+prune the search. One can use e#cient iceberg cube computation algorithm, such as BUC [BR99] or
+H-Cubing [HPDW01] (see brief descriptions in Section 3.4). In our implementation we used the latter
+method. The computation in the first step should use the significance constraint C sig and the probe
+constraint C prb .
+The computation in the second step uses the gradient constraint C grad (c g , c p ). Optimization can
+be explored to prune the search for ancestors and/or descendants of a probe cell c p based on the anti-monotonic
+relationships between them. If the gradient measure is an anti-monotonic function, such as
+count and sum of positive items, one can explore the following property: if the measure m of a cell c is
+no greater than # , none of c's descendants can have the measure m greater than # ; and if the measure
+m of a cell c is no less than # , none of c's ancestor can have the measure m less than # . If the gradient
+measure is not an anti-monotonic function, such as average and sum of positive or negative elements,
+one can explore a weaker but anti-monotonic constraint to prune its ancestors and/or descendants. For
+example, for average, one can explore the property of top-k average 4 [HPDW01]: if the top-k average of
+the base cells in a cell c is no greater than # , where k is the significance constraint threshold value, then
+none of c's significant descendants can have the average value greater than # . Similarly, one can derive
+many other interesting properties to facilitate pruning for constraints involving some other complex
+measures.
+Example 2 (All-Significant-Pairs) Let's examine how to perform constrained gradient analysis
+for the problem specified in Example 1, using the All-Significant-Pairs method.
+First, we compute all the significant probe cells in the data cube by applying an e#cient iceberg cube
+computation algorithm, such as H-Cubing [HPDW01], for the significance constraint C sig # (cnt # 100)
+and the probe constraint C prb # cust
+4 For a multi-set of values, we define its top-k average as the average of the top-k values of the multi-set. For example,
+the top-3 average of the multi-set {2, 4, 5, 5, 8} is 6. The top-k average for a cell is the top-k average of the measure values
+in the cell.
+will yield a set of probe cells, e.g. c
+Business, PC, 800, $1900), and so on. Let the set of significant probe cells be P.
+For each probe cell, c p # P, we compute the set of gradient cells by using the gradient constraint
+performing possible pruning of ancestors and/or descendants of the gradient cell
+currently under examination. The computation proceeds from top-level down (i.e., first computing
+high-level cells and then their descendants). If a cell c g 's top-k average value 5 (where 100, the
+minimum support threshold, i.e., significance constraint) is no more than c p - 1.4, then c g and all of
+its descendants can be pruned since none of them can satisfy the gradient constraint. #
+The algorithm is summarized as follows.
+Algorithm 1 (All-Significant-Pairs)
+Input: A base relational table D, a significance constraint C sig , a probe constraint C prb , and a gradient
+constraint C grad .
+Output: The complete set of gradient-probe pairs in the data cube derived from D that satisfy the
+three constraints.
+1. Apply the iceberg cube computation algorithm H-Cubing, to compute the set P from D using
+significance constraint C sig and the probe constraint C prb .
+2. For each probe cell, c p # P, compute its ancestor, descendant, and sibling cells based on the
+cell gradient constraint, C grad (c g , c p ). The computation is also carried out in a way similar to
+H-Cubing, and the search for c p 's descendants and ancestors can be pruned if c p does not satisfy
+certain (transformed) constraints obtained from C grad (c g , c p ) and c p 's measures. #
+This algorithm su#ers from the following major deficiency:
+. The search for gradient cells is done in a one-search-loop-per-probe-cell fashion. A huge amount
+of repeated work is performed for probe cells which are similar. It may involve computing the
+set of gradient cells |P| times, where |P| is the number of probe cells in P, which is costly.
+In the subsequent discussion, we will propose a better algorithm to overcome these deficiencies.
+5 The e#cient computation of top-k average has been discussed in [HPDW01] and will be detailed also in Section 4.
+3.2 The LiveSet-Driven Algorithm
+To avoid the waste of resource for computing cells unrelated to the probe cells, it could be more
+preferable to first compute the set of iceberg probe cells P from D, using both the probe and significance
+constraints. The second step is to use the set of derived iceberg probe cells P to e#ciently constrain
+the search for interesting gradient-probe cell pairs, using the gradient constraint. This is similar to
+the golden rule of pushing selection deeply in relational query processing. We aim to design such
+an algorithm, with the additional bonus that, in the second step, the algorithm will not check more
+significant cells than All-Significant-Pairs, it will examine each significant cell only once (i.e., one pass),
+and it will use the probe cells to constrain the search in an "optimized" way.
+To make the computation of the second step e#cient, several techniques are developed as outlined
+below.
+1. Using sets of probe cells to constrain the processing: To avoid the costly repetition of computation in
+the All-Significant-Pairs algorithm, we propose to use set-oriented processing and optimization.
+Roughly speaking, we associate with each gradient cell the set of all possible probe cells that
+might co-occur in interesting gradient-probe pairs with some descendants of the gradient cell,
+and use that set to prune future gradient cell search space.
+2. Low-to-high dimension growth: The multi-dimensional space should be explored in a progressive
+and confined manner, using an "iceberg growth approach": Start at lower dimensional cells and
+proceed to higher dimensional ones. This is advantageous because there are usually a smaller
+number of lower dimensional cells than that of the higher dimensional ones. The anti-monotonicity
+property of significance constraints (or their weaker versions) and the (transformed) gradient cell
+constraints can be used to prune the remaining search space: if a k-d cell fails to satisfy a
+constraint, so will all of its descendants (higher dimensional cells). All three types of constraints,
+i.e., the probe, significance and gradient constraints, are used in this iceberg growth process.
+3. Dynamic pruning of probe cells during the growth: During the dimension growth process, increasingly
+more probe cells fail to be associated with the higher dimensional gradient cells due to
+dimension value mismatch or the relevant measure value being out of the gradient range. Thus,
+one can prune the set of probe cells associated with the gradient cells in the growth. The search
+terminates when either no significant gradient cells can be generated or none of the probe cells
+can proceed further. The pruning of probe cells increases the power to prune gradient cells.
+4. Incorporation of compressed data structure, H-tree, and e#cient iceberg growth algorithm, H-cubing:
+For e#cient computation of iceberg cubes, we also incorporate a compressed data structure,
+H-tree, and extend an e#cient iceberg growth algorithm, H-cubing. This data structure and
+algorithm were shown to be highly e#cient for computing iceberg cubes with complex measures
+[HPDW01]; they allow us to do maximal sharing between cells in the computation. This further
+enhances the e#ciency of constrained gradient analysis.
+3.2.1 Pruning gradient cells and probe cells using gradient constraints
+Suppose P, the set of probe cells, has been computed. The next step in the computation is to determine
+which cell (as gradient cell) should be associated with which probe cell to produce valid gradient-probe
+pairs. The computation will start from low dimensions and then proceed to higher dimensions, in a
+depth-first manner. Information on low dimension gradient cells will be used to prune higher dimension
+cells.
+To study how the pruning should be performed, we need to introduce the concepts of LiveSet for
+probe cells and potential cell for gradient cells.
+1 The live set of a gradient cell c g , denoted as LiveSet(c g ), is the set of probe cells c p
+such that it is possible that (c g # , c p ) is an interesting gradient-probe pair, for some descendant cell c g #
+of c g .
+From this definition it is clear that the smaller LiveSet is, the more gradient cells can be pruned.
+The determination of LiveSet involves the gradient constraint and the matches between dimensions
+of gradient and probe cells. This section only deals with the former, and the next section extends to
+deal with the latter.
+Interestingly, pruning can be done in both directions between LiveSet(c g ) and c
+(a) Obviously, LiveSet(c g ) can be used to determine if c g and its descendants have the potential to
+be interesting gradient cells w.r.t. (any probe cell in) LiveSet(c g ); if not, c g can be pruned.
+(b) Information about c g can also be used to prune probe cells c p in LiveSet(c g ). This involves
+checking whether c g and its descendants have the potential to be interesting gradient cells w.r.t. c p .
+If the answer is no, c p can be pruned from the LiveSet(c g ).
+We now make precise the meaning of "having potential to be interesting gradient cells w.r.t. a set
+of probe cells."
+be a gradient cell, C p a set of probe cells, and C grad the gradient constraint. We
+say c g and its descendants have potential to be interesting gradient cells w.r.t. C p if the following is
+true:
+(1) If the gradient constraint is anti-monotone (such as the sum constraint), then C grad (c g , c p ) is
+satisfied for some c p # C p .
+(2) If the gradient constraint is not anti-monotone, such as (avg price(c g )/avg price(c f
+then a transformed, weaker constraint can be potentially satisfied for some c p # C p , such as
+represents top-k average and k is the minimum
+support threshold (i.e., significance constraint). Observe that the avg k constraint is a weaker
+anti-monotonic constraint constructed for the non-anti-monotonic avg constraint.
+We say a gradient cell c g is a potential cell, or has potential to grow, if (i) c g is significant and
+(ii) c g or its descendants have potential to be interesting gradient cells w.r.t. LiveSet(c g ).
+Observations: Some non-antimonotonic constraint, though itself cannot be used for pruning, can be
+transformed into a weaker, anti-monotonic constraint for pruning. For (2) above, we use avg k price(c g )
+as an upper estimate of avg price(c g # ) for all significant descendant cells c g # of c g .
+We illustrate these with an example.
+Example 3 Using the schema of Example 1, suppose C grad (c
+1.4). Assume the set of probe cells P has been derived using some two constraints C sig and C prb . Let
+c g be the 1-d cell (00, #), which is assumed to be significant.
+Suppose that initially 6 LiveSet(c g ) is the following subset {c
+"V ancouver", "Business", #, 2800, $1500), c p 2
+"T oronto", "Education", PC, 450, $2000).
+We will illustrate with two scenarios.
+has potential to grow. However, because 2500/3000 < 2500/2000 < 1.4, c p 2
+and c p 3
+can both be pruned
+from LiveSet(c g ).
+6 The next section will discuss how LiveSet is derived.
+does not have potential to grow, and can thus be pruned. #
+Let's consider how to use a set C p of probe cells to prune gradient cells, where avg price(c p ) is
+known for every c p in C p . Given a gradient cell c g , clearly it is not e#cient to check against all
+individual probe cells c p in LiveSet whether the condition avg k price(c g )/avg price(c p ) # 1.4 holds.
+Fortunately, one can derive an overall gradient cell constraint for set C p , C gcell (C p ), which specifies
+a range of measure values (such as average prices) for c g and which must be satisfied by a gradient
+cell c g if c g might co-occur in interesting gradient-probe pairs with any probe cell in C p . For example,
+if the minimal avg price for all c p # C p is $1200, then the (optimal) gradient cell constraint should
+be C gcell (C is an upper estimate of avg(c # ) for all
+significant descendant cell of c g , if avg k (c g ) cannot satisfy the constraint avg k (c g ) # $1680, then none
+of its descendants can satisfy it either. So c g can be pruned by such a gradient constraint analysis.
+In general, we have the following:
+Property 3.1 (gradient cell constraint for a set of probe cells) If C grad # (m(c g )/m(c p ) # v),
+where # is in {<, >, #}, v is a constant value, and m(c p ) > 0, then the gradient cell constraint
+corresponding to a set of probe cells C p is C gcell (C p ), where
+This property can be used to derive a gradient cell constraint from a set of probe cells.
+3.2.2 Pruning probe cells by dimension matching analysis
+In the previous subsection we described how to use the gradient constraint to prune probe cells and
+gradient cells. In this subsection we describe what probe cells should be associated with a gradient
+cell, and how to prune the associated probe cells when the processing goes from a gradient cell to a
+descendant one; both will be from a dimension-matching perspective.
+The dimension matching analysis is made possible under the assumption that we are only interested
+in gradient-probe pairs involving ancestor-descendant, descendant-ancestor, and sibling-sibling pairs.
+Let c g be a gradient cell. Recall that LiveSet(c g ) denotes the set of probe cells c p such that it is
+possible that (c g # , c p ) is an interesting gradient-probe pair for some descendant cell c g # of c g . Hence, from
+a dimensional perspective, a probe cell c p can be in LiveSet(c g ) if (i) c p is an ancestor or descendant
+of c g , or c g itself; or (ii) c p is a sibling of some descendant of c g or a sibling of c g . It turns out that
+these conditions can be captured by a notion of "matchable," defined next.
+be a probe cell and c gradient cell. The
+number of solid-mismatches between the two cells c p and c g is the number of dimensions in which
+both values are not # but are not matched (i.e., of di#erent values). The number of #-mismatches
+between c p and c g is the number of dimensions in which c p is # but c g is not. (Observe that the notion
+of #-mismatches is not symmetric and the cells are playing certain roles.) A probe cell c p is matchable
+with a gradient cell c g if either c g and c p have no solid-mismatch, or they have exact one solid-mismatch
+but no #-mismatch.
+We now give an example to illustrate the notion of "matchability."
+Example 4 Consider the 4-d probe cell c is matchable with its ancestor gradient
+cell c d) since c g1 contains neither #-mismatch nor solid-mismatch; c p is matchable with its
+sibling c d) since c g2 contains only one solid-mismatch but no *-mismatch; c p is matchable
+with c #, d) since c g3 contains one solid-mismatch but no #-mismatch (observe that c g3 is a
+sibling of a parent of c p ); c p is matchable with c d) since c g4 contains no solid-mismatch
+(observe that c p and c g4 have a common descendant, (a, b, c, d)); and also c p is matchable with its
+descendant c d) since c g5 contains only one #-mismatch. However, it is not matchable with
+e, d) since c g6 contains one solid-mismatch and one #-mismatch. #
+Property 3.2 (correctness of dimension analysis) c p is matchable with c g i# c p is c g , an ancestor
+of c g , a descendant of c g , or it is a sibling of c g or of some descendant of c g .
+Rationale. For the "only if ": Suppose c p is matchable with c g . Two cases arise: (a) c g and c p have no
+solid-mismatch. Let c # be obtained by taking the more specific value, for each dimension, from c g and
+c p . (Non-* values are not comparable, and each non-* value is more specific than the * value.) Then
+c # is a descendant of c g and c # is a descendant of c p . Hence c p is an ancestor of some descendant of c g .
+There are special cases here: if c is an ancestor of c .
+(b) c g and c p have exactly one solid-mismatch but no #-mismatch. Let c # be obtained by taking
+the more specific value, for each dimension, from c g and c p , except that c # takes the value of c g for the
+dimension of the solid-mismatch. So c # is a descendant of c g . Since there is no *-mismatch between c p
+and c g , each of the specific value also occurs in c p . Clearly c p and c # have exactly one solid-mismatch,
+and so c p is a sibling of c # . Observe that c # can be c g ; in that case c p is a sibling of c g .
+We omit the details of the "if." The non-trivial cases are illustrated in Example 4. #
+We now discuss how dimension analysis is used for pruning LiveSet when the processing goes from
+a gradient cell to a descendant one.
+Property 3.3 (relationship between livesets of ancestor-descendant cells) Let c g1 and c g2 be
+two gradient cells such that c g2 is a descendant of c g1 . Then LiveSet(c g2
+Rationale. Let c p be a probe cell such that (c g3 , c p ) might exist as an interesting gradient-probe cell
+pair for some descendant cell c g3 of c g2 . Since c g3 is a descendant of c g1 as well, the fact in the last
+statement implies that c p is also in LiveSet(c g1 ). #
+This property ensures that we can produce the LiveSet of a descendant cell from that of the ancestor
+cell. The way to do that is simply to do a dimension matching analysis, plus a gradient-based pruning.
+We illustrate the dimension-matching based pruning using the following example:
+Example 5 Let c #) be a gradient cell and let c which is a descendant
+of c g1 . Suppose LiveSet(c g1
+i.e. it is the result of pruning (#, b1, c1, #)
+from LiveSet(c g1 ). #
+Notice that if the expansions of gradient cells follow a particular order (which is usually the case),
+then more pruning of the probe cells can be done. For example, if the dimensions are expanded from
+left to right, some descendants of c g will be processed before c g is processed (observe that the ancestor-descendant
+relationship is many-to-many). For instance, for c #), the
+only descendant of c g which is a sibling of c p is (a, b, c1, #), which would have been processed earlier
+than c g in the depth-first order, and thus c p will not be counted in the LiveSet of c g . To deal with
+this issue algorithmically, we can call c g # a depth-first descendant 7 of c g if c g # is a descendant of c g and
+7 We can provide a syntactic definition of "depth-first descendant". Let
+be two m-dimensional gradient cells. Roughly speaking, cd is a depth-first descendant of cp if cd is an expansion of cp on
+the left, i.e., if they have a common su#x and cd is the result of instantiating some #'s in the remainder of cp . Formally,
+cd is a depth-first descendant of cp i# there exists an i such that 1 < i # m, (p1 , p2 , . ,
+c g # is processed later than c g in the depth-first order. In the dimension-based analysis, we just need to
+further restrict the LiveSet of a cell c to those depth-first descendants of c.
+In this study, we assume that the set of probe cells, and hence the LiveSet, is usually a small
+set, which can be sorted in value ascending order according to certain measure values (see the next
+subsection) to facilitate pruning using gradient constraint. In case there is a large set, tree structure
+or hash table can be adopted for fast accessing.
+3.3 The LiveSet-Driven Algorithm
+Based on the above discussion, the LiveSet-driven algorithm is worked out for computing all the
+gradient-probe pairs which satisfy all the constraints. We first give an informal description using an
+example and then a formal algorithm. E#ciency issues regarding the data structure (H-tree) and its
+manipulation (H-cubing) will be discussed in the next subsection.
+Our method starts with the 0-d cell of the cube, carrying the initial set of probe cells, P, as its
+LiveSet, and proceeds to higher dimensional gradient cells. Along the way, it uses the given constraints
+to prune the gradient cells which cannot satisfy the LiveSet, and to prune the cells in the LiveSet
+which cannot pass either gradient constraints or dimensional matching analysis. The processing along
+any branch terminates when the LiveSet becomes empty, or when the gradient cell has no potential
+to generate any interesting pairs.
+Let's examine an example in more detail.
+Example 6 (LiveSet-Driven) For the same base table schema D in Example 1, we examine how to
+perform constrained gradient analysis by the LiveSet-Driven algorithm. Let the gradient constraint
+be C grad (c g , c p ) # (ave price(c g )/avg price(c p ) # 1.2), and the significance constraint be C sig # (cnt #
+100).
+Let the set P of probe cells be given in Table 2, sorted in avg price ascending order. Notice this
+order is important since once a probe cell in the table cannot satisfy the gradient constraints, all the
+cells following it cannot satisfy it either (since they carry an even larger measure value) and thus can
+all be pruned immediately.
+The set of all probe cells P is the initial LiveSet for the 0-d gradient cell c
+1500 is the lowest avg price value among all current probe cells, it is taken as the global gradient
+lower bound. Suppose the top-100 average of the 0-d cell c 0 is 4000 and its count is 50000. Then
+(#, Montreal, Business, PC, 1500, 8000)
+(#, Edmonton, #, Ski, 2000, 10000)
+(#, W hisler, #, Ski, 1000, 10050)
+
+Table
+
+2: The set of probe cells, P.
+c 0 has potential to grow, because 4000 # 1.2 - the top-100
+average of c 0 is used to prune the probe cells to generate a tighter LiveSet for c 0 : Since the fourth cell
+(#, Edmonton, #, Ski, 2000, 10000) cannot satisfy the gradient constraint due to 4000 < 1.2 - 10000,
+this cell and all probe cells with avg price higher than 10000 in the LiveSet will be pruned. The actual
+average value of c 0 will decide which probe cell will be paired with this cell to become an interesting
+gradient-probe pair.
+The computation then proceeds to process 1-d cells, 2-d cells, and so on, in a depth first manner.
+To avoid repetition and for the sake of clarity, we now show how the processing is done for a typical
+3-d cell.
+Suppose the first three probe cells are all alive after processing the 2-d gradient cell c
+T oronto, #), and the processing goes from this 2-d cell to the 3-d cell c
+Probe cell # of mismatches
+(#, Montreal, Business, PC, 1500, 8000) 1, 1#
+
+Table
+
+3: Number of mismatches in probe cells.
+. We first prune the LiveSet of c 2 using dimensionality matching with c 3 . The number of mis-matches
+of each probe cell w.r.t. c 3 is presented in Table 3, where 1 indicates that there is one
+solid mismatch, and 1# indicates that there is one *-mismatch. Table 3 indicates that the first
+two probe cells remain alive with respect to the 3-d gradient cell c 3 .
+. The actual average value of c 3 decides which probe cell should be paired with this cell to become
+an interesting gradient-probe pair. If avg price(c 3 and the first probe cell form
+an interesting gradient-probe cell pair, but not c 3 and the second.
+. This minimum average of the cells in LiveSet, 1500, and the top-100 average of c 3 , will decide if
+we will continue processing with the descendants of c 3 . If the top-100 average of c 3 is less than
+computation stops for this branch. If the top-100 average of c 3 is higher than
+or equal to computation continues. Suppose the top-100 average of c 3 is 1900.
+Then we go back to prune the current LiveSet of c 3 . Because 1900 < 1800 # 1.2, we can indeed
+prune the second probe cell, namely (99, T oronto, #, PC, 4000, 1800), from the LiveSet.
+In summary, we can see that the processing of a gradient cell c involves these steps: Derive an initial
+LiveSet from the LiveSet of the ancestor of the cell c, using dimension matching. The necessary
+measures and top-k average measures of c are computed, and checked against the LiveSet for answers
+and to decide if descendants of c may require processing. If processing of descendants is needed, then
+we prune LiveSet using the gradient constraint and the top-k average values. #
+We now present the LiveSet-Driven algorithm.
+Algorithm 2 (LiveSet-Driven)
+Input and Output: The same as that of Algorithm 1.
+1. Apply an iceberg cube computation algorithm to compute the set of iceberg probe cells P from
+using significance constraint C sig and probe constraint C prb ;
+2. Derive gradient cell constraint C gcell for
+3. Initialize the potential gradient cell to
+4. Use a bottom-up, depth-first iceberg cubing method to find all interesting gradient-probe pairs. In
+depth-first processing, values in each dimension are ordered, and the dimensions are also ordered.
+for every value in each dimension do{
+If c is significant, for each live probe cell c p in LiveSet(c), output the gradient-probe pair
+(c, c p ) if the pair passes the gradient cell constraint.
+2 Use the measure (or transformed measure such as top-k) value of c to prune LiveSet(c).
+3 If LiveSet(c) is empty or c has no potential to grow, terminate this branch and backtrack
+to process the next cell according to the depth-first order.
+4 If c has potential to grow, expand it to the next level, according to the depth-first order.
+If a descendant cell c # of c is processed from this expansion, derive LiveSet(c # ) from LiveSet(c)
+using the matchability test.
+3.4 H-Cubing: E#cient Data Storage and Manipulation Via H-tree
+As shown in [BR99, HPDW01], bottom-up computation in cubes is e#cient because it allows us to use
+low-dimension cells to prune high dimension cells. One important issue for realizing this e#ciency is
+how much data is to be copied around and how much computation is to be shared. In this section, we
+review the spirit of a hyper-tree (called H-tree) structure and of an H-cubing algorithm, which allows
+us to use "minimal" copying of data and "maximal" sharing of computation. These tools have been
+useful for computing iceberg queries [HPDW01] and constrained gradient analysis; we believe that they
+will be useful for many other types of data cube computations.
+The back-bone structure of H-tree is a basic tree, which gives a compressed representation of a
+base table. It uses some auxiliary structures to store necessary information that facilitates sharing of
+computation.
+Roughly speaking, nodes in the hyper tree are labeled by attribute values and prefix sub-paths
+in the tree are shared whenever possible. Auxiliary structures include header tables, side-links, and
+quantitative information (quant-info). Quant-info can be used to help incrementally maintain the information
+needed for checking expensive constraints, using their weaker versions (such as top-k average).
+One design of quant-info for the top-k average constraint is to use a small number of "bins" to estimate
+safe lower bound of the top-k average value (more details can be found in [HPDW01]).
+We illustrate the tree using an example with a small base table schema, (customer-group, month,
+city, price). The hyper-tree for the four tuples of t
+Jan, T oronto, 1200), t
+520), inserted in this order, is shown in Figure 1. The quant-info shown is designed to deal with top-k
+average measures.
+Given a base table T with attributes A 1 , . , Am , M , the H-tree is defined as
+follows.
+1. Attributes A 1 , . , Am are sorted in cardinality-ascending order R : A j 1 , . , A jm (to promote
+quant-info
+Business .
+Household .
+Education sum: 2285.
+attribute value quant-info side-link
+Montreal .
+Vancouver .
+Feb .
+Jan .
+Toronto .
+Header Table
+ROOT
+Household
+Education Business
+Jan March Jan Feb
+Toronto Vancouver Toronto Montreal
+bins
+
+Figure
+
+1: An H-tree.
+sharing, since the number of values for an attribute is roughly proportional to the number of
+nodes in the level for the attribute).
+2. H-tree has a root node labeled "null". Every other node in the tree is labeled by an attribute
+value. A quant-info and a side-link can be attached to a node if necessary, as explained above.
+3. H-tree has a header table H with three fields: attribute-value, quant-info and side-link. Each
+attribute-value pair has one row in H; we omitted the attributes in Figure 1 for conciseness.
+4. For each tuple t in table T , t is inserted into the tree as follows.
+(a) A tuple t . , a jm , p) is derived by projecting t on attributes A j 1 , . , A jm , M .
+(b) A path ROOT -a j 1
+-a jm is used to register tuple t # . Its maximal prefix already existent
+in the tree is used, and only the path or lower sub-path not existing in the tree is created.
+(c) Use p to update quant-info in (1) the leaf node of the path, and (2) the entries of a j 1 , . , a jm
+in the header table H.
+5. All leaf nodes with a common label are linked together as a queue by side-links. The side-link
+field of row for a jm # A jm in header table H is the head of the queue for a jm # A jm . #
+The H-tree has several interesting properties which can facilitate computation with a data cube.
+In particular, it can be constructed by scanning the database only once, and, because of sharing of
+paths, its size is usually very small. (In fact, the actual size of the tree is notably smaller, as shown
+by experimental results in section 6 of [HPDW01].) Moreover, one can easily reconstruct all the
+information of the original table from the H-tree.
+To obtain e#cient sharing in carrying out data cube computations, we associate multiple header
+tables with one basic tree. Each header table will register the information corresponding to the computation
+for a group of cells (sharing some common structure). For example, in Figure 2, the header
+table on the left is associated with cells such as (#, T oronto), . , and (#, Montreal), whereas the
+the header table on the right is associated with the cells (#, Jan, T oronto), (#, F eb, T oronto), .
+Business
+Feb
+Montreal
+Household
+ROOT
+Jan
+Toronto
+Education
+Jan
+Toronto
+March
+Header Table H
+Education
+Household
+Business
+Jan
+Feb
+March
+Toronto
+Montreal
+Attr-val quant-info side-link
+Education
+Household
+Business
+Jan
+Feb
+March
+Header Table H Toronto
+Attr-val quant-info side-link
+
+Figure
+
+2: H-tree for (#, T oronto)
+We first illustrate how computing is done using H-tree. Suppose we wish to process the cell
+(#, T oronto). This can be done using the H-tree of Figure 1. The quant-info of the H-tree tells
+us the top-k average and average of cells of the form (#, c), for each city c. From the row T oronto in
+the header table H in H-tree, we get the avg k (price) and avg(price) for (#, T oronto).
+We now discuss how "reuse" of computation is achieved in H-cubing with H-tree. We first do this
+by considering the processing of (#, Jan, T oronto), a descendant of (#, T oronto). For this, we will
+create a new header table, which we call HT T oronto (Figure 2) and the associated side-links. These will
+contain information about all paths of the tree related to city Toronto.
+The side-link for T oronto in header table H links all paths related to the city Toronto. By traversing
+the side-links only once, we can (1) make a copy of quant-info in every leaf-node labeled T oronto to
+its parent node in the tree, (2) build a new header table H T oronto , which collects quant-info for every
+attribute-value w.r.t. city Toronto, and (3) link all parent nodes, of leaf-nodes labeled T oronto, having
+identical labels. The updated tree is shown in Figure 2.
+Every parent node of a leaf node labeled T oronto in Figure 2 has a copy of quant-info
+from its T oronto leaf node. In the new header table H T oronto , only attribute values for dimension
+Customer group and Month are needed. The quant-info in row Jan collects complete quant-info for
+sales in January and Toronto.
+We now illustrate how computation is reused by considering the processing of (#, Jan, #), a descendant
+of (#). This involves a "roll-up of the quant-info" to dimension Month. Every leaf node in
+H-tree merges its quant-info into that of its parent node. (Before accepting quant-info from its children,
+a parent node resets its quant-info.) All nodes labeled by a common month, no matter what children
+they have, should be linked by side-links and also linked to corresponding row in header table H.
+As an optimization, if the quant-info in a child node indicates that avg k (child) passes the average
+measure threshold, the parent node can be marked "top-k OK"; only sum and count information are
+collected for such nodes, and no binning is needed, since they pass top-k average checking already. In
+further quant-info rolling up, parent nodes of nodes marked top-k OK should also be similarly marked.
+Even though H-tree compresses a database, we do not assume that an H-tree for an arbitrary
+database can always be held in main memory. A discussion on how to address the problem of handling
+large databases is given in [HPDW01].
+3.5 A Rough Comparison of the Two Algorithms
+Since the execution of the two algorithms depend on the data and the parameter settings, it is hard
+if not impossible to give closed formulas for their runtime. However, we are able to o#er a rough
+comparison of their runtime as follows.
+Observe that both algorithms use the H-cubing algorithm, and the di#erence in performance is due
+to the one-pass set-oriented processing and pruning of LiveSet-Driven and the repeated computation of
+All-Significant-Pairs. Let P denote the set of all probe cells to be considered. For each probe c p in P,
+let C(c p ) denote the set of all gradient cells that are examined by the All-Significant-Pairs algorithm.
+Let C denote the set of all gradient cells that are examined by the LiveSet-Driven algorithm. Then
+C should be equal to # cp#P C(c p ). However, note that the All-Significant-Pairs algorithm may examine
+each gradient cell a number of times; let rp denote the average of these numbers. Moreover, note
+that the LiveSet-Driven algorithm incurs some overhead in order to do the set-oriented processing and
+pruning; let ovhd denote the average overhead for a gradient cell. Then we see that the runtime of
+LiveSet-Driven is roughly (1 the runtime of All-Significant-Pairs is roughly rp|C|.
+Hence the speedup by the LiveSet-Driven algorithm is roughly rp
+1+ovhd
+. Our experiments show that the
+speedup is usually approximately 10 fold.
+Performance Analysis
+In this section, we report our experimental results on computing gradients in data cubes. The results
+show that the LiveSet-Driven algorithm is scalable and much faster than the All-Significant-Pairs
+algorithm.
+As we will see soon, the speed up is roughly proportional to the number of probe cells. As noted
+earlier, both algorithms use the probe and significance constraints to restrict the set of probe cells. The
+di#erence in their execution times is due to the following reasons: The All-Significant-Pairs algorithm
+does an independent search for each probe cell. As a result, it leads to much "repeated search" for
+di#erent probe cells. On the other hand, the LiveSet-Driven algorithm bundles the gradient-cell search
+for all probe cells in one pass, and uses techniques for two-way pruning (i.e. the pruning of probe cells
+using information about a gradient cell under consideration, and the pruning of gradient cells using
+the set of probe cells).
+All experiments were conducted on a PC with an Intel Pentium III 700MHz CPU and 256M main
+memory, running Microsoft Windows/NT. All programs were coded in Microsoft Visual C++ 6.0.
+The experiments were conducted on synthetic data sets generated using the data generator described
+in [HPDW01]. Parameters for the generator include: the number n of tuples in the base table, the
+number m of dimensions, the cardinality of each dimension, m min and m max for the range of the
+measure, a repeat factor # which dictates the number of tuples to be generated based on some model
+tuples with uniform distribution, and a noise factor in percentages to represent the fraction of the n
+tuples to be generated using a random distribution (to distort the repeat factor). The generator uses
+rand(), a function which generates numbers in the range of [0, 1] following uniform distribution. It
+works by repeatedly adding number of new tuples t # 1 , - , t # r , until we get enough tuples,
+using steps (1-4) as follows:
+, . , D i d
+be d dimensions randomly picked from D 1 , . , Dm , where
+(2) let a i 1 , . , a i d
+be d values randomly picked from dimensions D i 1 , . , D i d
+, to be used as the
+"repeating" values;
+randomly generate t # i
+randomly generate measure values of t # 1 , - , t # r , with normal distribution with mean
+We conducted experiments on various synthetic datasets generated by this generator. The results
+are similar. Limited by space, except for performance with respect to the number of tuples, we report
+here only results on some typical data sets, with 10 dimensions and between 10, 000-20, 000 tuples.
+The cardinality for every dimension is set to 10 8 . The measures are in range of [100, 1000]. The noise
+factor is set to 20% and repeat factor is 200.101000
+Runtime
+Number of probes
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+3: Scalability over number of
+probe cells100 50 100 150 200
+Runtime
+Significance threshold
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+4: Scalability w.r.t. significance
+threshold
+The first data set we used has 10, 000 tuples. We tested the scalability of the algorithms with
+respect to number of probes in Figure 3, significance threshold in Figure 4, and gradient threshold in
+
+Figure
+
+5.
+
+Figure
+
+3 shows the scalability of the two algorithms, All-Significant-Pairs and LiveSet-Driven, with
+respect to the number of probe cells. We set the significance threshold to 10, the number of bins to 3
+for top-k average, and the gradient threshold is 2. The number of probes varies from 1 to 1, 000. When
+the number of probes is small, both algorithms have similar performance. However, as the number of
+probes grows, the pruning power of LiveSet-Driven algorithm takes e#ect. In in one pass, it combines
+the searches for all probe cells and prunes unfruitful searches, and so it keeps the runtime low. In
+contrast, the All-Significant-Pairs algorithm does not scale well under large number of probes, because
+it does one independent search for each probe cell.
+
+Figure
+
+4 shows the scalability of both algorithms with respect to the significance threshold. The
+gradient threshold is set to 1.2, the number of bins to 3 and the number of probes to 50. LiveSet-Driven
+achieves good scalability by pruning many cells in the search whereas All-Significant-Pairs checks a huge
+number of pairs of cells.
+8 The smaller the cardinality, the denser the data cube, and thus the larger number of cells satisfy the constraints.
+Runtime
+Gradient threshold
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+5: Scalability w.r.t. gradient
+Runtime
+Number of tuples (thousands)
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+Scalability w.r.t. number of
+tuples
+
+Figure
+
+5 shows the scalability of All-Significant-Pairs and LiveSet-Driven with respect to various
+gradient thresholds. We fixed the significance threshold to 10, number of bins to 3 and number of
+probes to 50. As the gradient threshold goes down, the number of cells that All-Significant-Pairs has
+to check increases dramatically, and thus its runtime increases dramatically as well.
+
+Figure
+
+6 shows a scaling-up experiment with respect to various number of tuples, varying up to
+20, 000. We set the significance threshold to 1% of the number of tuples, the gradient threshold to
+1.2, the number of bins to 3 and the number of probes to 100. While both algorithms are scalable,
+LiveSet-Driven naturally is more e#cient.1000001e+07
+Number
+of
+cells
+explored
+Gradient threshold
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+7: Using gradient in pruning5000001.5e+062.5e+063.5e+06
+Number
+of
+cells
+explored
+Significance threshold
+All-Pairs
+LiveSet-Driven
+
+Figure
+
+8: Significance threshold and
+pruning
+We also analyzed the number of cells explored by each algorithm during the mining process on a
+10, 000-tuple dataset with 50 probe cells. Figure 7 presents the number of cells that the two algorithms
+explored with respect to various gradient thresholds. It confirms that LiveSet-Driven achieves better
+pruning than All-Pairs. As shown in the figure, LiveSet-Driven on average explores only about one
+tenth of the cells All-Significant-Pairs does. That explains the di#erence of e#ciency and scalability
+between the two algorithms.
+Similar statements can be made about Figure 8, where the significance threshold varies from 10 to
+1, 000. LiveSet-Driven explores a substantially smaller set of cells than All-Significant-Pairs does.
+In this section, we examine various alternatives of constraints and gradients for gradient mining in data
+cubes, extend our scope to mining constrained gradients in transactional databases, and discuss the
+related work.
+5.1 Variations for mining constrained gradients in data cubes
+The last two sections presented an e#cient method for mining constrained gradients in multi-dimensional
+space. Here we discuss possible extensions and refinements of the method in various kinds of alternative
+situations, as follows.
+1. Finding constrained gradients among only ancestors, descendants, or siblings.
+Algorithm 2 (LiveSet-Driven) searches for three kinds of relationships: ancestors, descendants,
+and siblings, at the same time. In some applications, people may be interested in only one or
+two kinds but not all kinds. How should we modify the algorithm to ensure e#cient computation
+when we want to find only siblings, only ancestors, or only descendants?
+This can be easily addressed by modifying the definition of LiveSet for potential gradient cells.
+For each special case, we will remove more probe cells than the general case in accordance with
+user-restrictions on what cells are "comparable", and there is no need to change other parts of
+the algorithm. As a result, the algorithm will be more e#cient.
+Similar extensions can be worked out if a user would like to find the constrained gradients only in
+relevance to a small subset of dimension combinations, such as {D i , . , D j } in a data cube. In
+this case, starting with the 0-d cell, (#), the set of (non-*) gradient cells to be considered
+and tested will be confined to only those in a subset of dimensions {D i , . , D j }.
+2. Finding multi-dimensional gradients constrained by an "interval".
+Our algorithm searches for multi-dimensional gradients by checking a single gradient constraint,
+such as C grad (c is in {<, >, #}, v is a constant value, and
+g is a gradient function. In many cases, the desired constraint could be an interval, such as
+2.5. In such cases, one can modify the gradient testing part of the algorithm
+by testing not only the lower bound on the top-k average of the measure (i.e., no less than
+also the upper bound on the bottom-k average of the measure (i.e., no more
+than 2.5 - avg(c p )). Clearly, the computation for the bottom-k average will be similar to that
+for the top-k average. Whether it is more e#cient to prune the search space using both upper
+and lower bounds or using only one of them and postponing the evaluation of the other after the
+constraint evaluation will depend on the gradient constraint values and the data set.
+3. Replacing ratio-based gradients by di#erences as "gradient" constraint.
+Although our algorithm handles ratio-based gradients, with some slight modification, one can
+handle gradients defined with di#erences. Suppose the new gradient constraint is
+C dif
+grad
+Let
+grad
+Basically, we will only need to change the algorithm for C div
+grad
+by replacing 1.4 with 400, and
+- with +, respectively. For example, avg price(c g ) # 1.4 - avg price(c p ) will be replaced by
+The algorithm and our previous discussion still hold.
+4. Finding similar (or stable) patterns, i.e., the measures which are similar when some
+dimension values change.
+"Similar" (or stable) can be defined in one of the following two ways:
+grad
+grad
+Observe that similar cells are expected to have similar measure values. Hence the number of
+similar cells is normally large, and so most of the pairs of similar cells will not be interesting.
+To find interesting pairs, one should impose some other constraints so that the uninteresting
+pairs are eliminated. Our algorithm can be adapted to deal with such constrained similar cell
+queries. (It may be better to compute the non-constrained similar cell query as displayed above
+as a number of range queries.)
+5. What will happen if we replace avg by sum and count?
+We have been using the measure "average" in our gradient analysis because it is natural to define
+interesting gradients as substantial changes on the measure "average". However, if we replace
+avg by sum and count, an ancestor cell should naturally have much bigger sum or count values
+than its descendants. In this case, the simple gradient definition, such as g(c g , c p ) # v may not
+be so interesting.
+In this case, some "normalized" definition of gradients will make more sense. For example, one
+may compare the cells (siblings, ancestors, or descendants) with only relatively comparable size
+(i.e., containing almost the same number of cells), or the expected values of sum/count based
+on the proportional size (which is similar to average). Only those which are substantially larger
+or smaller than the expected values will be caught as "interesting" cells. In this context, our
+algorithm can also be made to work with minor modifications.
+6. Other ways to define "comparable cells."
+Our discussion has been confined to finding large ratios or di#erences among ancestors, descen-
+dants, and 1-d siblings. There could be many other ways to define "comparable cells." For
+example, one may want to find comparable cells in 2-dimensional mutations, or find groups of
+comparable cells with user-specified explicit constraints. Some corresponding modifications of the
+definition and rules for derivation of LiveSet will make our algorithm adaptable to these cases.
+5.2 Mining constrained gradients in transactional databases
+We now examine how to extend our model to mining constrained gradients in transactional databases.
+In comparison with mining transaction-based association rules [AIS93, AS94], a distinct feature for
+mining constrained gradients is that its measure is not confined to frequency counting (i.e., support)
+but extended to complex measures, such as sum of the sales, average sales price, profit, and so on.
+Let's examine such an example.
+Example 7 (Gradient mining in transactional databases) Suppose a database in E-City stores
+a large set of customer shopping history. Each tuple (representing one customer) contains a set of items
+bought, together with a sales price of each item. A few of such tuples are shown below.
+customer items bought
+c
+
+Table
+
+4: A set of "transactions" (customer shopping history) in the E-city database
+An example constrained gradients query can be: find situations where the average sales price of
+one kind of product (such as digital camera) may be substantially higher than that at some other
+situations. One may find that the following relationships could be interesting: (1) the average price
+of digital cameras sold is 20% higher than usual when customer also bought (or will buy) laptop pcs,
+and (2) the average price of color tvs sold is 60% higher when customers also bought or will buy
+dvd players in comparison with situations where customers also bought or will buy repair kit.
+In such a transactional database, the significance constraint may correspond to the minimum number
+of transactions containing the itemset under consideration, the probe constraint can be user's inter-
+est, which can be single items, such as digital camera, or itemsets, such as {color tv, dvd player}, and
+the gradient constraint can be a ratio such as # 1.2 (which means at least 20% higher of one average
+sales price than the other). From this point of view, one can see that the (constrained) transaction
+gradient problem shares a lot of similarities with the (constrained) cube gradient problem discussed
+above. #
+Can we mine constrained gradients in a transaction database using the same method as we developed
+for mining constrained gradients in data cubes? In principle, our model and algorithm developed for
+constrained gradients in data cubes should be still applicable to mining transaction-based gradients
+with complex measures. However, since a transaction database may contain a large number of distinct
+items which may correspond to a huge number of dimensions, and since a transaction usually contains
+only a very small portion of possible items in a transaction database (i.e., very sparse), a data cube-based
+method may not lead to an e#cient solution. Moreover, the previously proposed H-tree structure
+is not appropriate for storing and mining of such gradients due to the sparsity of the data and the large
+number of dimensions.
+To overcome this di#culty, we propose a probe-based FP-growth method described below.
+1. Scan the transaction database once to find frequent single items and sort these single items in
+item-frequency descending order to obtain an f list.
+2. For each probe itemset p, construct p's FP-tree as follows. For each transaction containing p,
+following the f list ordering, insert every frequent item i other than p into the tree, and update
+the corresponding node i by (1) incrementing the count, and (2) adding the current price to the
+sum of p's sales. (Notice that the sum of p's sales of a new node is first initialized to zero).
+3. Call the FP-growth algorithm [HPY00], or other similar frequent pattern mining algorithms to
+calculate count and sum of sales for itemsets in p's FP-tree and print those whose both support
+and gradient are no less than their corresponding thresholds.
+Note: To ensure that we cover all ancestor-descendant pairs of the desired probe itemsets, we
+also build an FP-tree for each subset of each probe itemset.
+4. As an optimization, each node may store p's count and sum of sales partitioned according to their
+price range in a few bins, in the same way as we discussed before. Then top-k optimization can
+be explored to prune the search, based on the heuristic: if the top-k average of an itemset s is
+less than avg(p) - gradient threshold, its projected database will not need to be mined.
+The correctness and e#ciency of this method can be easily verified in a similar way as we discussed
+in Section 3, and will be left to interested readers as an exercise.
+5.3 Related work
+The closest work related to our study on multi-dimensional gradient analysis is that on the cubegrade
+problem by Imielinski, et al. [IKA02]. A cubegrade query asks for association-type rules that describe
+changes in measure values associated with changes in dimension descriptions of cuboids. It deals with
+questions such as "what cube changes are associated with significant measure changes." Cubegrade
+queries can also have constraints that restrict the attributes in the gradient cells, other than those
+allowed by roll-up, drill-down and mutation. Our constrained gradient analysis does not have user-defined
+constraints on gradient cells. However, as shown in our discussion, they can be easily dealt
+with by adding more power to prune LiveSet. Thus adding user-defined constraints will actually lead
+to more e#cient processing.
+The main contributions of [IKA02] are the cubegrade framework and the proposed language. It
+considered a relativized notion of monotonicity (w.r.t. a cube or a constrained cube), the so-called
+structural monotonicity, which can be tested quite e#ciently. The evaluation strategy proposed in that
+paper uses multiple loops: for each probe cell, search through the entire space for potential gradient
+cells. It will have a serious e#ciency problem if we generalize the notion of "comparable" cells as we
+discussed above, because the search space per probe cell will be large, and this search will be repeated
+once per probe cell. While constraints may have been used for pruning, the e#ect of this pruning on
+e#ciency is not clear in the paper.
+In general, the proposed method in [IKA02] is similar to our all-significant-pairs approach (Al-
+gorithm 1). Based on our performance analysis, our LiveSet-Drive method leads to a more e#cient
+solution. This is due to grouped processing of live probe cells and pruning of search space by pushing
+various kinds of constraints deeply.
+There are also a few other studies on e#cient exploration of interesting cells in data cubes or
+interesting rules in multi-dimensional space.
+Reference [SAM98] considers discovery-driven exploration of OLAP data cubes. It computes anticipated
+values for a cell using the neighborhood values of the cell, and a cell is considered an exception
+if its value is significantly di#erent from its anticipated value. This is rather di#erent from what has
+been studied in this paper where "interestingness" is defined based on a user-specified gradient ratio
+in relevance to the cell's ancestors, descendants, and siblings. Therefore, the computational methods
+adopted in two studies are rather di#erent. The former ([SAM98]) is based on the statistical analysis
+of neighborhood values of a cell to determine whether it is an exception; whereas the latter (our study)
+is cube-based computation of constrained gradients. Also, the former is on interactive exploration of
+computed cube cells; whereas the latter is on computing (nonmaterialized) cells (more exactly, pairs
+of cells) satisfying certain constraints. Both definitions may find their corresponding applications. It
+is an interesting issue to see whether our computation can be used as a filtering process and feed
+the results into the statistical analysis of neighborhood cells to reduce the overall processing cost of
+discovery-driven exploration of OLAP data cubes.
+More recently, [SS01] considered the so-called "intelligent rollup" operation on datacubes, which
+allows an analyst to discover the most specific generalizations of a pair of cells with some interesting
+properties. The approaches proposed by the authors are di#erent from ours.
+[DL99] considers the mining of the so-called emerging patterns, patterns whose frequency change
+ratio between two datasets is larger than a certain threshold. In a data cube environment, two base
+tables are first extracted from the base data cube, one with base cells satisfying one property and
+the other with base cells satisfying another property. Emerging patterns are then the aggregated cells
+where the measure changes significantly between the two corresponding data cubes. Notice unlike the
+model constructed in our study, the method developed in [DL99] cannot handle arbitrary measures,
+such as avg. It is still a research issue on how to e#ciently compute such complex gradients in an
+association mining environment.
+considers how statistics (a measure) of one group of tuples di#ers from the same measure of
+a supergroup. It shows that, by adopting such di#erence or ratio measure, the number of association
+rules can be reduced substantially and only the interesting rules are preserved. This shares a similar
+motivation as our study here. However, our study provides a general mechanism to specify constraints
+and any kind of measures and/or gradients in relevance to ancestors, descendants and siblings, and thus
+provides a more general model, as well as an e#cient constraint-pushing and computation method. We
+believe that our method can serve as an e#cient preprocessing step for subsequent statistical studies
+on mined interesting gradients or rules.
+Our study is also closely related to (1) data cube and iceberg cube computation methods proposed
+in previous studies, such as [HRU96, AAD
+HPDW01], as well as (2) constraint-based data mining methods, such as [SVA97, NLHP98, GLW00,
+PHL01]. This study can be considered as (1) an extension of data cube computation to mining interesting
+gradients, and (2) an extension of constraint-based mining toward mining constrained gradients
+in data cubes. Thus it is an extension and integration of both mechanisms towards e#cient, multi-
+dimensional, constrained gradient analysis.
+6 Conclusions
+In this paper, we have studied issues and methods on e#cient mining of multi-dimensional, constrained
+gradients in data cubes. Constrained gradients are substantial changes in a set of measures (aggregates)
+of interest associated with the changes in the underlying characteristics of cube cells, where changes in
+characteristics are expressed in terms of the dimensions and are limited to specialization, generalization,
+and 1-d mutation. To ensure only interesting changes of relevant cells are studied, we show that it
+is necessary to introduce three kinds of constraints: significance constraints, probe constraints, and
+gradient constraints.
+An e#cient algorithm, LiveSet-driven, has been developed which explores set-oriented processing
+and the maximal pushing of the constraints as deeply as possible in the early stage of the mining process
+to prune the search space. Moreover, we also adopt a compressed hyper-tree structure to represent the
+base table of a data cube, and to achieve "maximal" sharing of computation among di#erent cells. Our
+performance study shows that this method is e#cient and scalable. It outperforms another method
+which relies on the iceberg cube computation of all-significant-pairs.
+Furthermore, we have briefly introduced the mining of constrained gradients in transaction databases,
+as well as a few alternatives in gradient mining. The integration of constrained gradient mining with
+discovery-driven exploration of data cubes [SAM98] is an interesting issue for future research.
+
+
+
+--R
+
+On the computation of multidimensional aggregates.
+Mining association rules between sets of items in large databases.
+A statistical theory for quantitative association rules.
+Fast algorithms for mining association rules.
+
+An overview of data warehousing and OLAP technology.
+
+Computing iceberg queries e
+Data cube: A relational aggregation operator generalizing group-by
+
+
+Mining frequent patterns without candidate generation.
+Implementing data cubes e
+Generalizing association rules.
+Exploratory mining and pruning optimizations of constrained associations rules.
+Mining frequent itemsets with convertible constraints.
+Fast computation of sparse datacubes.
+
+Intelligent rollups in multidimensional OLAP data.
+Mining association rules with item constraints.
+An array-based algorithm for simultaneous multidimensional aggregates
+--TR
+
+--CTR
+Topological approaches to covering rough sets, Information Sciences: an International Journal, v.177 n.6, p.1499-1508, March, 2007
+Riadh Ben Messaoud , Sabine Loudcher Rabasda , Omar Boussaid , Rokia Missaoui, Enhanced mining of association rules from data cubes, Proceedings of the 9th ACM international workshop on Data warehousing and OLAP, November 10-10, 2006, Arlington, Virginia, USA

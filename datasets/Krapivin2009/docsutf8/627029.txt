@@ -1,0 +1,1278 @@
+--T
+Distributed Memory Compiler Design For Sparse Problems.
+--A
+AbstractThis paper addresses the issue of compiling concurrent loop nests in the presence of complicated array references and irregularly distributed arrays. Arrays accessed within loops may contain accesses that make it impossible to precisely determine the reference pattern at compile time. This paper proposes a run time support mechanism that is used effectively by a compiler to generate efficient code in these situations. The compiler accepts as input a Fortran 77 program enhanced with specifications for distributing data, and outputs a message passing program that runs on the nodes of a distributed memory machine. The runtime support for the compiler consists of a library of primitives designed to support irregular patterns of distributed array accesses and irregularly distributed array partitions. A variety of performance results on the Intel iPSC/860 are presented.
+--B
+Introduction
+On modern scalable multicomputers it is widely recognized that, in addition to detecting
+and exploiting available parallelism, reducing communication costs is crucial in achieving
+good performance. Existing systems such as DINO [34], Fortran D [12], Superb [44],
+and communication optimizations only in the presence of regular
+array reference patterns within loops, such as message blocking, collective communications
+utilization, and message coalescing and aggregation. Parallel loop nests, however, often
+contain array references that cannot be analyzed at compile time. Such array references
+are classified as irregular.
+Methods are described here that deal with parallel loops and loops that contain reduction
+type output dependencies. The methods work for loops that do not contain cross-
+processor loop-carried dependencies or cross-processor loop-independent dependencies. A
+cross-processor dependence is one whose end points cross processors. A loop-carried dependence
+involves a write to a location in one iteration, followed by a read to the same
+location at a later iteration. A loop-independent dependence involves a write to a location
+followed by a read to the same location in the same loop iteration. Data parallelism is
+achieved by partitioning arrays across the nodes of the machine and each processor performs
+computations on a part of the array. When parallelism is achieved by partitioning
+loop iterations between processors, cross processor loop independent dependences will not
+occur.
+Runtime optimization techniques have been developed that are designed to reduce communication
+costs for irregular references in the following ways:
+judicious partitioning of data and computational work,
+ffl combining element messages into a larger message thereby reducing the number of
+messages transmitted, and
+eliminating redundant communication of array elements.
+To demonstrate that these optimizations can be performed automatically by a compiler,
+a prototype compiler called ARF (Arguably Fortran) was developed. ARF accepts a simplified
+Fortran 77 program enhanced with specifications for distributing data. It outputs
+a program that executes directly on the nodes of a distributed memory machine, in this
+case the Intel iPSC/860. The compiler partitions computations and analyzes array references
+to classify them as regular or irregular. For irregular references it performs runtime
+optimizations to reduce communication costs.
+Since the development of ARF a significant amount of work has been done in standardizing
+extensions to the Fortran language. The High Performance Fortran Forum (HPFF),
+a joint effort between the academic community and industry, has agreed on a preliminary
+set of data parallel programming language extensions [16], [20]. It has been heavily influenced
+by experimental languages such as Fortran D [12], Vienna Fortran [45], Crystal
+[7], [24], [23], [25], Kali [22], DINO [32], and CM Fortran [9]. The HPFF decided to
+defer consideration of language extensions targeting irregular problems; over the next few
+years, the HPFF plans to consider possible irregular problem language extensions.
+1.1 Overview of PARTI and ARF
+These runtime optimizations are implemented using PARTI (Parallel Automated Runtime
+Toolkit at ICASE) runtime preprocessing procedures which can be embedded by the com-
+piler. These procedures (1) support a shared name space, (2) provide the infrastructure
+needed to implement non-uniform data mappings efficiently, (3) coordinate interprocessor
+data movement, and (4) manage the storage of, and access to, copies of off-processor data.
+The compiler consists of two distinct layers. The bottom layer is the library of PARTI
+runtime procedures that are designed to support irregular patterns of distributed array
+accesses efficiently. The top layer is a compiler that carries out program transformations
+by embedding calls to the PARTI primitives in the original program. PARTI procedures
+support a variety of operations on globally named distributed array indices. The distributed
+arrays can be partitioned in a non-uniform manner where each distributed array element is
+assigned to an arbitrary processor. The operations include: off-processor data fetches, data
+stores, and accumulations to off-processor memory locations. A multicomputer program
+is generated in which all distributed memory accesses are carried out using embedded
+procedures.
+We emphasize that the goal of this project is not to develop a production quality
+compiler, but to demonstrate that run time optimizations can be generated automatically
+and efficiently by a compiler. Most of the complexity of this system is in the PARTI
+procedures. The PARTI procedures have been developed so that transformations needed
+to embed the appropriate primitives can be implemented with relative ease in distributed
+memory compilers.
+This paper begins with a description of the language that is accepted and how it
+relates to Fortran D. An outline of the compiler phases is described in Section 3. Section
+4 describes the PARTI run time primitives that have been implemented and incorporated
+in the runtime systems employed by the compiler. Section 5 provides details of the code
+generation and optimizations performed by the compiler. The compiler is described in the
+context of two example code kernels. The kernels are written in ARF and are translated
+by the compiler to message passing code. Section 6 reports experimental performance
+measurements for the codes compiled by ARF. Section 7 describes the relationship between
+this research and other related projects.
+The ARF compiler was developed to demonstrate the feasibility of our approach for irregular
+problem compilation; consequently, the ARF language extensions are limited in scope.
+For the sake of clarity and better understanding we show how our language extensions are
+related to a real data-parallel language like Fortran D. We first describe the syntax of the
+Fortran D language extensions that provide the same functionality as the ARF extensions.
+We then go on to describe the corresponding ARF language extensions.
+2.1 Fortran D Language
+Fortran D is a version of Fortran 77 enhanced with data decomposition specifications. In
+this section, we present a brief description of the features of Fortran D that can be used
+to support irregular problems. ALIGN and DECOMPOSITION are two key Fortran D data
+decomposition constructs. A DECOMPOSITION is an abstract problem domain. ALIGN is
+used to map arrays with respect to a decomposition. ALIGN guarantees that if elements
+from different arrays are mapped to the same element of a decomposition, they will reside
+on the same processor. The simplest alignment occurs when an array is exactly mapped
+onto a decomposition. The DISTRIBUTE statement specifies the mapping of a decomposition
+to a physical machine. Distributions can be regular, for example, consider the BLOCK
+distribution. If we have n$proc processors and N elements in a decomposition (where
+n$proc divides N), BLOCK distribution divides a decomposition into contiguous chunks of
+size N/n$proc, assigning one block to each processor. Fortran D also allows user specified
+irregular distributions through the use of a mapping array, which itself is typically dis-
+tributed. A mapping array contains processor numbers used to specify the processor that
+owns each individual decomposition element.
+Below is an example that specifies an irregular partitioning in Fortran D:
+S5
+. set values of map array using a mapping method .
+S6 ALIGN x, y with irreg
+In this example, arrays x and y are the data arrays and map is the mapping array. The
+array map is mapped onto decomposition reg (statement S4). Decomposition reg in turn
+is distributed by blocks across the processors (statement S5). Arrays x and y are aligned
+with the decomposition irreg (statement S6). Finally, decomposition irreg is irregularly
+partitioned across processors using the distributed mapping array map (statement S7). The
+result of the above statements is that array elements x(i) and y(i) are assigned to processor
+map(i).
+It is sometimes convenient to ignore certain array dimensions when mapping an array
+to a decomposition. All array elements in the unassigned dimensions are collapsed and
+mapped to the same index of the decomposition. For instance, ALIGN z(i,j) with map(j)
+means that the the second dimension of z is aligned with map. In this example it means
+that we map column j of z to processor map(j).
+Fortran D also provides a directive, the on clause [21], to specify a processor which
+will execute each iteration of a loop. For instance, if we have n$proc processors
+do i=1,n on mod(i,n$proc)
+do
+assigns loop iterations to processors in a round-robin fashion.
+2.2 ARF Extensions
+Distributed arrays declared in ARF can either be partitioned between processors in a
+regular manner (e.g. equal sized blocks of contiguous array elements assigned to each
+processor) or in an irregular manner. ARF extensions explicitly specify how each array is
+partitioned between processors; ARF does not make use of decomposition statements like
+the ones found in Fortran D. ARF arrays are irregularly partitioned across processors using
+a distributed mapping array. Below is an ARF code fragment that has the same effect as
+the first code fragment presented in the previous section. Irregular distribution is specified
+as follows:
+distributed regular using block integer map(1000)
+. set values of map array using a mapping method .
+distributed irregular using map real x(1000),y(1000)
+Statement S1 declares an integer array map and states that the array will be distributed
+blockwise across processors. Statement S2 declares real arrays x and y and assigns array
+elements and y(i) to processor map(i).
+ARF arrays can only be distributed in a single dimension; the distributed dimension
+must be the last declared array dimension. For instance, the ARF statement:
+distributed irregular using map real x(10,1000)
+would assign column i of x to processor map(i).
+ARF also contains an on clause, for example:
+distributed do i=1,n on partition
+means that work associated with iteration i is to be carried out on processor partition(i).
+3 Compiler Support for Irregular Computations
+Compile time analysis can make it possible to generate highly efficient code when a compiler
+can gather enough information through analysis of the source code. In order to generate
+efficient code, a compiler needs to have tractable representations of array subscript func-
+tions. It also needs tractable representations of how data and computational work are to
+be partitioned [18], [15], [19], [35].
+For instance, consider the Fortran D example:
+ALIGN x,y with blocks
+S5 DO i=1,750
+Assume that each processor is responsible for computing values of data it owns (i.e.
+the owner computes rule [18]). If we have 4 processors, each processor will own contiguous
+chunks of 250 elements of arrays x and y. Since the subscript function for x(i) is the identity,
+the owner computes rule implies that each of three processors will execute 250 iterations of
+loop S5. In this example, it is clear by inspection that non-local accesses occur during each
+processor's last two loop iterations. In addition, it is easy to determine which non-local data
+must be obtained. For instance, the processor responsible for loop iterations 1 through 250
+will need the first two values of y stored on the processor responsible for loop iterations 251
+through 500. A variety of researchers [18], [15] have implemented techniques to generate
+optimized calls to message passing routines given compile-time information about array
+subscript functions, array distribution and the distribution of loop iterations.
+This paper deals with situations where compile time analysis fails because crucial information
+is not available until a program executes. There are a variety of applications in
+which array subscript functions cannot be known at compile time. In many cases, these
+subscript functions are given by integer arrays; consider the reference y(ia(i)) in the code
+fragment below.
+ALIGN x,y,ia with blocks
+S5
+. ia gets assigned values at runtime .
+S6 do i=1,750
+S8 end do
+Compile time analysis is difficult to do when we have irregular array distributions or
+irregular partitions of loop iterations. In the example below, it is impossible to predict at
+compile time the data that needs to be communicated because the distribution of x and y
+are not known until runtime.
+S5
+. set values of map array using a mapping method .
+S6 ALIGN x, y with irreg
+S8 do i=1,750
+do
+The ARF compiler is able to handle parallel loops (marked by distributed do) in
+which array references have subscripts that are given by functions of:
+1. the loop index,
+2. scalars that are not redefined in the loop body.
+3. arrays indexed by just the loop index.
+Examples of such index functions are: (assuming that i is the index of a distributed do
+that ia could be distributed in a regular or an
+irregular manner. The ARF compiler cannot, in general, handle loops in which reference
+patterns are not of this simple form. For instance, the compiler presented here could not
+deal with the following loop:
+distribute do i= 1,100 on partition
+S5 end do
+S6 end do
+One difficulty arises in the reference x(col(j)) in statement S4. The values of the
+subscript array col(j) are computed in statement S3. Statement S3 in turn lies within a
+loop S2 whose upper bound is itself determined by the values taken on by array num. Das
+et. al. [11] describes program slicing techniques that can be used to extend the methods
+described here to a broader set of constructs.
+Except for one special case, the ARF compiler is unable to handle loops with loop
+carried dependencies. The special case involves accumulation type dependencies. The
+decision to include this special case greatly expands the number of irregular application
+codes to which these methods apply. The ARF compiler is able to recognize accumulations
+to an indirectly addressed array as shown in the following example.
+distribute do partition
+do
+The commutative and associative property of the "+" operator allows the ARF compiler
+to postpone all accumulations to the distributed array x until the end of the loop
+computation.
+3.1 The Inspectors/Executors
+Inspectors and executors perform optimizations to reduce communication costs for non-local
+accesses arising from irregular array references. Each processor pre-computes which
+data it will have to send or receive. Communication volume can be reduced by pre-fetching
+a single copy of each off-processor datum, even if it is referenced several times. The number
+of messages can be reduced by pre-fetching large quantities of off-processor data in a single
+message.
+3.2 Inspector
+The inspector loop carries out the preprocessing needed to reduce the volume of communication
+and the number of messages transmitted. Figure 1 illustrates how the inspector is
+generated by the ARF compiler for a parallel loop. Hash tables, called hashed-caches, are
+used for temporary storage. Run time primitives initialize the hashed caches, store and
+retrieve data from them and flush the hashed caches when appropriate. During program
+execution, a hash table records off-processor fetches and stores them enabling the user to
+recognize when more than one reference is being made to the same off-processor distributed
+array element. This way only one copy of that element must be fetched or stored.
+During the inspector phase, we carry out a set of interprocessor communications that
+allows us to anticipate exactly which send and receive communication calls each processor
+must execute before and after executing the loop.
+To carry out the inspector loop described above, we must be able to find the owner of
+each distributed array element. Regular distributions comprise those that require simple
+functions to compute the processor and local offset of a particular array element. For
+example, if a one dimensional array is distributed in a block manner, a simple function can
+be used to compute the processor and local offset of a particular array element. On the
+other hand, irregular distributions are those where we attempt to partition in a way that
+balances the following two objectives:
+1. to have each processor perform approximately the same amount of work, and
+2. to minimize communication overhead.
+Foreach processor P
+ffl Generate a clone of the partitioned loop nest
+ffl Insert code to perform the following:
+Foreach rhs irregular array references:
+generate list of off-processor data to be fetched
+Foreach lhs irregular array reference:
+generate list of data to be stored off-processor
+Exchange messages with other processors to determine copies
+of non-local data to be sent and received during executor phase
+
+Figure
+
+1: Simplified Inspector for a single loop nest
+Typically, it is not possible to express the resulting array partitions in a simple way. By
+allowing an arbitrary assignment of distributed array elements to processors, we take on
+the additional burden of maintaining a data structure that describes the partitioning. The
+size of this data structure must be the same as the size of the the irregularly distributed
+array. We call this data structure a distributed translation table. Distributed translation
+tables are partitioned between processors in a simple manner (described in Section 4.3).
+Distributed translation tables are accessed during the inspector phase to determine where
+each data element resides.
+Once the preprocessing is completed, every processor knows exactly which non-local
+data elements it needs to send to and receive from the other processors. Once finished, we
+are in a position to carry out the necessary communication and computation.
+3.3 Executor
+The loop is transformed into an executor loop. Figure 2 outlines the steps involved (the
+nature of the distributed array distribution does not affect the executor). The initial
+data exchange phase follows the plan established by the inspector. When a processor
+obtains copies of non-local distributed array elements, the copies are written into the
+processor's hashed cache. Once the communication phase is over, each processor carries
+out its computation. Each processor uses locally stored portions of distributed arrays
+along with non-local distributed array elements stored in the hashed cache. When the
+Insert code before loop to
+ffl communicate local data to be referenced by other
+processor
+ffl receive non local data to be referenced locally
+Insert code inside loop to
+ffl obtain non local data from hashed cache
+ffl store non local writes to hashed cache
+Insert code after loop to
+ffl update off-processor stores
+
+Figure
+
+2: Executor for a single loop nest
+computational phase is finished, distributed array elements to be stored off-processor are
+obtained from the hashed cache and sent to the appropriate off-processor locations. In the
+next section, we describe the details of the PARTI run time primitives that may be invoked
+during the inspector and executor phases.
+4 PARTI primitives
+The PARTI run time primitives can be divided into three categories; primitives that may
+be invoked during the inspector phase, the executor phase, or both the inspector and
+executor phase. The scheduler primitive, invoked during the inspector phase, determines
+the send and receive calls that are needed during the executor phase. These calls may be
+to scatter data, gather data or perform reduction operations during the executor phase.
+The distributed translation table mentioned earlier is used during the inspector phase. The
+hashed cache primitives are used during both the inspector and executor phases. This next
+section describes the details of the scheduler, distributed translation table, scatter, gather,
+reduction, and the hashed cached primitives.
+4.1 The Scheduler Primitive
+We will use a simple example to illustrate the preprocessing carried out by the scheduler.
+Assume we have a distributed array a that is partitioned among three processors in an
+irregular fashion as depicted in Figure 3 and a loop computation such that the access
+local array a 0
+offsets 2142Global array a
+Processors P(3)
+
+Figure
+
+3: Mapping of a Global Array to Processors
+pattern of array a is as shown in Figure 4. Each processor stores its elements of distributed
+array a in a local array a. Thus processor P 1
+needs to fetch array element a(3) or element
+a 0
+(2) of the local array from processor P 2
+and processors P 2
+and P 3
+need to fetch a(4) or
+element a 0
+(2) of the local array from P 1
+. Recall that the task of the scheduler is to anticipate
+exactly which send and receive communications must be carried out by each processor. The
+scheduler first determines how many messages each processor will have to send and receive
+during the data exchange that takes place in the executor phase. To gather this information
+each processor needs to know the total number of processors executing the code. Defined
+on each processor P i is an array nmsgs
+i . Each processor sets its value of nmsgs
+i (j) to 1
+if it needs data from processor j or to 0 if it does not. The scheduler then updates nmsgs
+on each processor with the element-by-element sum nmsgs i (j) /
+(j). This
+operation uses a fan-in tree to find the sums. At the end of the fan-in, on all processors,
+the entries of nmsgs are identical. The value nmsgs(j) is equal to the number of messages
+that processor P j
+must send during the exchange phase. In our example scenario, we see
+that at the end of the fan in, the value of nmsgs on each processor will be [2,1,0] (Figure
+5). Thus P 1
+is able to determine that it needs to send data to two other (as yet unspecified)
+processors,
+needs to send data to one processor and P 3
+does not need to send any data.
+At this point, each processor transmits to the appropriate processor, a list of required
+array elements. This list contains the local offsets of the global array elements. In our
+Irregular access pattern of array a21
+local array a 0
+Global array a
+Processors P(3)
+
+Figure
+
+4: Irregular Access Pattern
+example,
+sends a message to P 2
+requesting element 2 of the local array a 0
+and P 3
+send a message to P 1
+requesting element 2 of the local array a 0
+. Each processor now has
+the information required to set up the send and receive messages that are needed to carry
+out the scheduled communications (Figure 6).
+The schedule generated by the scheduler can be reused. A schedule can also be used
+to carry out identical patterns of data exchange on several different identically distributed
+arrays. The same schedule can be reused to carry out a particular pattern of data exchange
+on a single distributed array, and any of the data exchange primitives can make use of a
+given schedule.
+4.2 Data Exchange Primitives
+Data exchangers can be called by each processor to:
+ffl gather data from other processors,
+ffl scatter data to other processors, or
+ffl perform global reduction operations.
+These exchangers use state information stored by the scheduler. As described in the previous
+section, the scheduler determines the send and receive calls needed to carry out data
+all processors
+distributed to
+sum tree
+Output from
+tree
+Input to sum
+data from
+needs
+data from
+needs
+data from
+needs
+
+Figure
+
+5: Computing the number of Send Messages
+exchanges. The scheduler is not given any information about memory locations - it involves
+only processors and local indices.
+When a processor P calls a data exchanger, it passes to the exchanger routine the
+starting address of the first local array element in its memory. We call this address A P .
+The exchanger routines use A P as base address to read or write distributed array elements.
+4.3 The Translation Table
+We allow users to assign globally numbered distributed array elements to processors in an
+irregular pattern, using a distributed translation table. Recall that the scheduler and the
+data exchangers deal with indices of arrays that are local to each processor. The translation
+primitives, however, assume that distributed array elements have been assigned global
+indices.
+The procedure build-translation-table constructs the distributed translation table. Each
+processor passes to build-translation-table a set of globally numbered indices for which it
+will be responsible. The distributed translation table may be striped or blocked across
+the processors. With a striped translation table, the translation table entry for global
+Data sent by the processors: local array a '
+Messages sent by the processors2Send
+Receiving Processors P(3)
+Processors P(3)
+
+Figure
+
+Final Message Pattern
+index i is stored on processor i mod P , where P represents the number of processors. In a
+blocked translation table, translation table entries are partitioned into a number of equal
+sized ranges of contiguous integers; these ranges are placed in consecutively numbered
+processors.
+Dereference accesses the distributed translation table constructed in
+build-translation-table. For a given distributed array, dereference is passed a set of global
+indices that need to be accessed in the distributed memory. Dereference returns the processors
+and memory locations where the specified global indices are stored.
+We will illustrate these primitives using a simple two processor example where Processor
+is assigned indices 1 and 4, and Processor P 2
+is assigned indices 2 and 3. In this example,
+we assume that the translation table is partitioned between the two processors by blocks.
+We depict the translation table data structure in Table 1. Each entry of the translation
+table assigns a processor and a local array index to each globally indexed distributed array
+element. In our example, translation table information about global indices 1 and 2 is
+stored in Processor 1, while information about global indices 3 and 4 is stored in Processor
+2.
+To continue our example, assume that both processors use the dereference primitive
+to find assigned processors and local indices corresponding to particular global distributed
+
+Table
+
+1: Translation Table Entries
+global assigned local
+index processor index
+Processor 1
+Processor 2
+
+Table
+
+2: Results obtained from Dereference
+processor global assigned local
+number index processor index
+array indices. In Table 2 we depict the results obtained when Processor 1 dereferences
+global indices 1 and 3, and Processor 2 dereferences global indices 2, 3 and 4.
+4.4 The Hashed Cache
+The usefulness of the PARTI primitives described in Section 4 can be enhanced by coupling
+these primitives with hash tables. The hash table records the numerical value associated
+with each distributed array element. The hash table also records the processor and local
+index associated with the element.
+Dereference uses the hash table to reduce the volume of interprocessor communication.
+Recall that dereference returns the processor assignments and the memory locations that
+correspond to a given list of distributed array indices. Each distributed array index may
+appear several times in lists passed to dereference. The hash table is used to remove these
+duplicates.
+Lists of off-processor distributed array elements passed to the scheduler may contain
+multiple references to the same element. The scheduler uses the hash table to identify
+unique off-processor data references.
+The data exchange procedures use hash tables to store copies of off-processor distributed
+array elements. The gather-exchanger fetches copies of off-processor distributed
+array elements and places the values in a hash table. Similarly, the scatter-exchanger obtains
+copies of off-processor distributed array elements from a hash table and writes the
+values obtained into a specified local array element on a designated processor. Primitives
+to support accumulations to non-local memory use hash tables in the same way as the
+scatter-exchanger.
+PARTI supplies a number of other primitives that support reading from, as well as
+writing and accumulating to, hash tables. When off-processor accumulations must be
+performed, we first carry out all possible accumulations to copies of distributed array
+elements in the hash table, then we perform an accumulation data exchange.
+We use a hash function that for a hashed cache of size 2 k , masks the lower k bits of the
+key. The key is formed by concatenating the processor-local index pair that corresponds
+to a distributed array reference.
+4.5 Summary of the PARTI primitives
+In this section we summarize the PARTI primitives that we have described and present an
+example of how they are used. We consider the following PARTI procedure calls:
+ttable build translation table(distribution,mapping,num elements
+call dereference(ttable id,global indices, processors,local indices,num indices)
+call setup hashed-cache(hashed-cache, processors, local indices)
+call scheduler(id,n,hashed-cache,local indices,processors)
+call gather-exchanger(id,hashed-cache,local-array).
+In this example, a processor P arranges to obtain copies of specified off-processor data
+elements, and these copies are placed in the hash table hashed-cache.
+All processors call the build translation table function with the data mapping. This
+function returns a pointer to a structure which stores the data layout. P calls the dereference
+function to find the local addresses corresponding to the global indices it requires. The
+dereference call returns the processor number and local address corresponding to each of
+the global indices. P calls the function setup hashed-cache with the information returned
+by dereference to allocate the hashed table. P passes to scheduler a list of off-processor local
+array indices. The scheduler will build a schedule that will make it possible for P to obtain
+data elements. P will obtain data element i, 1 - i - n from processor processors(i),
+local index local indices(i). A previously allocated hash table hashed-cache is used
+to eliminate duplicate off-processor indices. In most irregular problems, the data access
+pattern in loops is such that the same data point is referenced multiple times. Partitioning
+of such loops cause duplicate off-processor references. The scheduler returns an integer id
+which will be used by the subsequent call to gather-exchanger.
+Each processor then calls gather-exchanger. On each processor, the gather-exchanger
+primitive is passed a pointer to the schedule (id), generated by the previous call to the
+scheduler, a pointer to the allocated hash table (hashed-cache) and the base address
+of its portion of the array local-array. After the execution of the gather-exchanger
+call, copies of the off-processor elements from array local-array reside in the hash table
+hashed-cache.
+5 The ARF Compiler
+The ARF compiler transforms the source program into a single program multiple data
+(SPMD) form. Data distribution specifications are used to partition the program and
+generate appropriate communication. The compiler incorporates the PARTI primitives to
+carry out the computations on each processor efficiently. The kernels presented here have
+been coded in Fortran 77, enhanced with ARF data distribution statements, compiled and
+run on an iPSC/860. Section 6 presents performance data obtained from both kernels. We
+describe a compilation algorithm that is slightly more general than the algorithm actually
+used in the ARF compiler. The two algorithms produce equivalent code on the test data
+sets.
+5.1 Code Generation by the ARF Compiler
+This compiler uses distribution specifications to generate code to set up the distributed
+translation tables; calls to build translation table are embedded in the sequential code. One
+call is generated for each distribution. The translation table pointer for an array is stored
+in the symbol table.
+If the array is distributed in a regular manner, then the translation table contains a
+function, which is evaluated at runtime to find the processor and local index of a particular
+datum. If the array is irregularly distributed, for each index both the processor and the
+local index is stored explicitly in the distributed translation table.
+In order to describe the algorithm used to generate the inspector and executor for a
+do
+do
+
+Figure
+
+7: Simple Irregular Loop
+loop, an s descriptor must be defined:
+s descriptor An s descriptor is a tuple which gives the complete description of a subscript
+and consists of the following components:
+where, for an s descriptor sd,
+name of the array indexed by the subscript,
+identifies how an array is distributed (BLOCK, CYCLIC,
+IRREGULAR, etc.)
+Type: the type of reference where the subscript expression is used. It can
+be any one of the exchanger types; gather, scatter or accumulation.
+List of subscript expression: the expressions used to determine the array in-
+dex. For our implementation we assume that only a single dimension is accessed
+using the type of index functions shown in Section 3.
+In
+
+Figure
+
+7, arrays x, y, ia and ib are all distributed. The arrays ia and ib are used to
+index the arrays x and y respectively. At compile time it is not possible to figure out the
+indices of x and y that are accessed because they are dependent on the values stored in
+the arrays ia and ib. This data access pattern becomes available at runtime.
+For the algorithm, it is assumed that the loops do not have cross-processor loop carried
+dependencies. Later in this section we will describe how loops that contain reductions are
+handled. First, the basic algorithm to produce the inspector and executor for a given loop
+is presented.
+For any loop l,
+ffl Find all array references. For the loop in Figure 7, the array references are x(ia(i))
+and y(ib)).
+ffl Using these references and the subscript expressions form a list of s descriptors oe SD .
+For the loop shown in Figure 7 two s descriptors are generated, one for the reference
+x(ia(i)) and the other for y(ib(i)).
+After generating the list oe SD , we are ready to generate the inspector and the executor
+code. For each sd 2 oe SD ,
+ffl Generate a declaration statement for a temporary array temp to store the values that
+will be assigned to the subscript corresponding to sd, i.e. sd(4), inside l. Note for the
+two s descriptors generated for the example loop the storing of the reference trace in
+a temporary array can be skipped and the arrays ia and ib can be used directly to
+do the dereferencing.
+ffl Generate a clone of loop l, loop l 0 , before l
+ffl The body of the loop l 0 consists of a statement that records into temp each value
+taken on by the subscript expression sd(4).
+ffl Generate a call to dereference passing array temp and the translation table pointer
+associated with array sd(1). For the example loop the dereferencing is done with the
+arrays ia and ib.
+ffl Next generate a call to the scheduler using the arrays PA and LA that are returned
+by dereference to form the schedule S.
+ffl If gather then a call to the gather-exchanger is generated using schedule S.
+At runtime this obtains the off-processor data and puts the data in the hash table
+. For the example loop the off-processor y values are gathered. If
+then a call to the scatter-exchanger is generated using schedule S. This call to scatter-
+exchanger, at runtime, takes the data from the hash table H S and sends it to the
+other processors. For the example loop the data values from the array x are scattered.
+If accumulation then a call to the scatter-op exchanger is generated using
+schedule S. This call to scatter-op exchanger, at runtime, takes the data from the
+hash table H S and accumulates it in the other processors.
+do
+do
+
+Figure
+
+8: Irregular Loop with Staged Indirect Indexing
+ffl Replace the subscript expression that indexes the array sd(1) inside the loop l by the
+temporary array temp.
+The ARF compiler was tailored to recognize an idiom that is used to index distributed
+arrays in many irregular codes (see for example Figure 8). A programmer assigns an
+expression that would have otherwise been used to subscript an array reference to a scalar
+s. The s is then used as a array subscript. In this type of indexing pattern, a scalar s is
+defined inside a loop and then it is used to index distributed arrays. More precisely,
+ffl A scalar s is defined once each iteration of the loop. The definition of s may be a
+function of:
+a. The loop index.
+b. Scalars that are not defined in the loop body.
+c. Arrays indexed by just the loop index.
+ffl s is used to index the distributed dimension of distributed arrays in the loop body.
+When one carries out forward substitution, subscript expressions in loops written using this
+idiom have the properties outlined in Section 3. Note that forward substitution transforms
+the example in Figure 8 to the example in Figure 7.
+5.2 Optimizations
+Two main optimizations are performed. The first optimization reduces the scheduling
+overhead by identifying sets of distributed array references that can make use of the same
+Optimization Array Distribution Subscript Type
+Name Expression
+Common Schedule
+Elimination Don't Match Match Don't
+care care
+Common
+Exchanger Match Match Match Match
+Elimination
+
+Table
+
+3: Optimization Patterns
+schedule. The second optimization reduces data transfer costs by identifying distributed
+array references that can make use of precisely the same exchanger invocation.
+These optimizations are carried out by sorting s descriptors into equivalence classes.
+Several distributed array references can share the same schedule as long as all arrays in
+question are: 1) identically distributed and 2) have matching subscript expressions. A
+set of distributed array references can share the same exchanger call if all references have
+identical s descriptors. Table 3 summarizes these conditions.
+5.3 ARF Compiler Examples
+In this section we present two examples used to demonstrate how the ARF compiler works.
+Section 5.3.1 presents how ARF was used to program a distributed memory block sparse
+matrix vector multiply kernel. Section 5.3.2 presents an example from computational fluid
+dynamics.
+5.3.1 Sparse Block Matrix Vector Multiply
+
+Figure
+
+presents an ARF program that carries out a block sparse matrix vector multiply.
+This kernel is from an iterative solver produced for a program designed to calculate fluid
+flow for geometries defined by an unstructured mesh [40]. The matrix is assumed to have
+size 4 by 4 blocks of non-zero entries. Statements S4 and S5 are loops that sweep over the
+non-zero entries in each block. It is assumed that the array partition is passed to the
+sparse matrix vector multiply kernel after having been generated elsewhere.
+
+Figure
+
+presents specification of the data decomposition for the sparse block matrix
+vector multiplication example written in Fortran D. If Fortran D is used to write the example
+the only change to Figure 10 is replacement of statements S1 and S2 with statements S1
+through S10 from Figure 11. The array map in Figure 11 specifies the mapping of the data
+arrays. Of all the data arrays a single dimension is distributed and the rest are compressed.
+In
+
+Figure
+
+10 the integer array partition is local to each processor and enumerates a
+list of indices assigned to the processor. As mentioned earlier, the current implementation
+partitions only one dimension: the last dimension of the array. PARTI primitives, however,
+support a broader class of array mappings [6]. Thus partition describes the partitioning
+of the last dimension of the arrays declared in statements S1 and S2. The ARF compiler
+uses the information in partition to make calls to primitives that initialize the distributed
+translation tables. These distributed translation tables are used to describe the mapping
+of x, y, cols, ncols and f (statements S1 and S2).
+The partitioning of computational work is specified in statement S3 using an on clause.
+In this example, the distributed array partition is used to specify the loop iterations to
+be carried out on each processor. The reference x(m,cols(j,i)) in S6 may require off-
+processor references. ARF consequently generate an inspector to produce a schedule and
+a hash table to handle accesses to the distributed array x. A reference to the irregularly
+distributed array f occurs in statement S6. Note that distributed array f is irregularly
+distributed using array partition and that partition is also used by the on clause
+to partition loop iterations in S3. Therefore, it can be deduced that the reference to f
+in statement S6 is on-processor; partition specifies how distributed array elements and
+loop iterations are to be distributed between processors. A separate partitioning routine
+generates partition.
+The ARF compiler generates an inspector and an executor to run on each processor.
+The code executed on each processor to generate the inspector is shown in Figure 9. The
+statement S1 shows the generation of the translation table using the partition array.
+Statement S2 shows the dereference call made to figure out the address of the various data
+elements. The next two statements in the inspector code generates the data communication
+schedule and the hash table structure.
+The executor generated by ARF on processor P is depicted in Figure 12. Fortran 90
+notation is used where appropriate to enhance readability. Off-processor elements of x are
+gathered and placed in hash table H (step I, Figure 12). Values from x are obtained from
+H or from local memory (step IIa, Figure 12). Arrays PA and LA are used to distinguish
+build translation table using the mapping defined by array partition
+call dereference to find processor assignments, PA and local indices, LA for consecutive
+references to x(m; cols(j; i)), employing T partition
+call setup hashed-cache(hashed-cache, PA, LA)
+call scheduler(id,n,hashed-cache,LA,PA)
+
+Figure
+
+9: Inspector generated from ARF for Sparse Block Matrix Vector Multiply
+local from off-processor array accesses. In step IIb, we accumulate to y. Note that the
+declarations in S1 and S3 in Figure 10 allow the compiler to determine that accumulations
+to y are local.
+5.3.2 The Fluxroe Kernel
+This kernel is taken from a program that computes convective fluxes using a method based
+on Roe's approximate Riemann solver [41], [42]; referred to as Fluxroe kernel in this paper.
+Fluxroe computes the flux across each edge of an unstructured mesh. Fluxroe accesses
+elements of array yold, carries out flux calculations and accumulates results to array y.
+As was the case in the sparse block matrix vector multiply kernel, four sections of each
+array are distributed and accessed in an identical manner. Figure 13 depicts an outline
+of the Fluxroe kernel. The indices of the two vertices that comprise edge i are noted as
+To compute the fluxes f lux(k) across the ith edge,
+access yold(k; n1) and yold(k; n2), for 1 - k - 4 (part I, Figure 13). Once the fluxes
+have been computed, add the newly computed flux values f lux(k) to y(k; n1) and subtract
+f lux(k) from y(k; n2) (part III, Figure 13). Note that arrays y and yold are irregularly
+distributed using y-partition, and that distributed array node is irregularly distributed
+using edge-partition. Since the on clause in the distributed do statement also uses
+edge-partition to specify how loop iterations are to be partitioned, no off-processor
+references are made to node in part I, Figure 13.
+In the inspector, compute a schedule S n1 for the off-processor additions to y(k; n1)
+(part IIIa, Figure 13), and a different schedule S n2 for the off-processor subtractions from
+distributed irregular using partition real*8 x(4,n), y(4,n),f(4,4,maxcols,n)
+distributed irregular using partition integer cols(9,n), ncols(n)
+. initialization of local variables .
+distributed do partition
+do
+do
+S5 do
+distributed enddo
+
+Figure
+
+10: ARF Sparse Block Matrix Vector Multiply
+S5 ALIGN map with reg
+S7 ALIGN f(i,j,k,l) with map(l)
+S8 ALIGN ncols(i) with map(i)
+
+Figure
+
+11: Fortran D Data Distribution Statements for Sparse Block Matrix Vector Mul-
+I. call gather-exchanger using schedule S to obtain off-processor elements of x
+gather-exchanger places gathered data in hash table H
+II. for all rows i assigned to processor P
+do
+do k= 1,4
+IIa. if (PA(count) == P ) then
+else
+Use PA(count), LA(count) to get vx(1:4) from hashtable H
+endif
+do m=1,4
+IIb.
+
+Figure
+
+12: Executor generated from ARF for Sparse Block Matrix Vector Multiply
+distributed irregular using y-partition real*8 yold(4,Number-nodes), y(4,Number-
+nodes)
+distributed irregular using edge-partition integer node(2,Number-edges)
+. initialization of local variables .
+distributed do 1,Number-edges on edge-partition
+I.
+do k=1,4
+Ia.
+Ib.
+II. Calculate flux using Va(k), Vb(k)
+III. do k=1,4
+IIIa.
+IIIb.
+distributed enddo
+
+Figure
+
+13: ARF Kernel From Riemann Solver
+build translation table using the mapping defined by array y-partition
+call dereference to find processor assignments, PA n1 and local indices, LA n1 for consecutive
+references to y(k; n1), employing T y\Gammapartition
+call dereference to find processor assignments, PA local indices, LA consecutive
+references to y(k; n2), employing T y\Gammapartition .
+call setup hashed-cache(hashed \Gamma cache n1
+S5 call setup hashed-cache(hashed \Gamma cache
+S7 call scheduler(id,n,hashed \Gamma cache
+
+Figure
+
+14: Inspector generated from ARF for Fluxroe Kernel
+Figure 13). When parallelized, Fluxroe reads, as well as accumulates,
+to off-processor distributed array locations. Any of the data exchange primitives can use
+the same schedule. Schedule S n1 to gather off-processor references from yold(k; n1) (part
+Ia,
+
+Figure
+
+can be used, and schedule S can be used to gather off-processor references
+from yold(k; n2) (part Ib, Figure 13).
+The inspector code generated by the ARF compiler for the Fluxroe Kernel is shown
+in
+
+Figure
+
+14. Statement S1 shows the call to the build translation table function to store
+the information of how the array y is partitioned. Statements S2 and S3 are calls to the
+dereference function to find the addresses of the various references to the y array. Both
+these dereference calls use the translation table setup in Statement S1. Statements S4 and
+S5 generates the hash table structure. The last two statements in the code fragment shows
+the building of the communication schedules.
+
+Figure
+
+15 outlines the executor produced by ARF on processor P . In Figure 15
+Fortran 90 notation is used where appropriate to enhance readability. In step Ia and Ib
+two sets of off-processor elements of yold are gathered using schedules S n1 and S n2 . In
+step II the appropriate elements of yold are accessed either from local memory or from
+the appropriate hash table; and in step III yold values are used to calculate fluxes. If the
+newly computed fluxes are to be accumulated to a local element of distributed array y, the
+appropriate addition or subtraction is carried out at once ( steps IVa and IVc, Figure 15).
+When a flux must be accumulated to an off-processor element of y, accumulate the flux to a
+copy of y stored in a hash table (steps IVb and IVd, Figure 15). When all fluxes have been
+calculated and all local accumulations completed, call the scatter-add and scatter-subtract
+exchangers. These exchangers carry out the needed off-processor accumulations.
+The current version of the ARF compiler attempts to minimize the number of schedules
+to be computed. A single schedule for all off-processor yold data accesses could have been
+produced. Computing a single schedule for all references to yold will lead to a more
+efficient executor at the cost of a more expensive inspector.
+5.4 Memory Utilization
+In this section an overview of some of the memory requirements exacted by the methods
+described is given, and suggestions made of some ways in which these requirements can be
+reduced. Many sparse and unstructured programs use large integer arrays to determine
+reference patterns. In this respect, the kernels depicted here are typical. In Figure 10,
+a 9n element integer array cols is used for this purpose; while in Figure 13, a size
+array node is employed. The executors depicted in Figure 12 and
+
+Figure
+
+replace cols and node with local arrays that store the processor assignments
+and the local indices for references to irregularly distributed arrays. In the kernels in
+
+Figure
+
+the sum of the number of elements used in all processors to store both processor
+assignments and local indices is no larger than 18n. In Figure 13 the parallelized code uses
+a total of 4   Number \Gamma edges elements.
+The amount of additional storage needed for the parallelized code can be reduced in
+the following simple manner. The iterations I of a loop are divided into two disjoint sets.
+The first set of iterations is I local , where all memory references are locally stored array
+elements. The second set is I off\Gammaprocessor
+, in which each iteration contains some off-
+processor distributed array reference. In this case listing processor assignments for loop
+iterations I off\Gammaprocessor is necessary. Since it is frequently possible to map problems so
+that most memory references are local to a processor, a substantial memory savings results.
+The schemes described thus far would use very large quantities of extra memory when
+attempting to handle a loop in which a small number of distributed array elements are
+accessed many times. For instance, consider the following loop where f is a function
+defined so that 1 - f(i) - 2 for any i.
+Ia. call gather-exchanger using schedule Sn1 to obtain first set of off-processor elements of yold
+gather-exchanger places data in hash table H n1
+Ib. call gather-exchanger using schedule Sn2 , to obtain second set of off-processor elements of
+yold
+gather-exchanger places data in hash table H
+II. for edges i assigned to processor P
+do i=1,Number of edges assigned to P
+if (PAn1 (count) == P ) then
+else
+get va(1:4) from hash table H n1
+endif
+if (PAn2 (count) == P ) then
+else
+get vb(1:4) from hash table H
+endif
+III. calculate fluxes flux(1:4) using va(1:4) and vb(1:4)
+IV. if (PAn1 (count) == P ) then
+IVa. yold(1:4,LA n1
+else
+IVb. Accumulate flux(1:4) to hash table H n1
+endif
+if (PAn2 (count) == P ) then
+IVc. yold(1:4,LA
+else
+IVd. Accumulate flux(1:4) to hash table H
+endif
+Va. Call scatter-add exchanger using schedule S n1
+and hash table H n1
+Vb. Call scatter-subtract exchanger using schedule S
+and hash table H
+
+Figure
+
+15: Executor generated from ARF for Fluxroe Kernel
+distributed irregular partition y
+do
+. y(f(i))
+do
+The reference pattern of distributed array y is determined by f. At most two distinct
+elements of y are referenced in the loop. Loops of this sort can be handled by using a hash
+table to store processor and local index assignments for each distinct memory reference. In
+this example, each processor would store processor and local index assignments for no more
+than two references to distributed array y. There is a performance penalty for using a hash
+table to find processor and local index assignments for distributed array elements. After
+examining a variety of sparse and unstructured codes, it was decided not to implement the
+method described in this section in the ARF compiler. See the analysis in [30] for the time
+and space tradeoffs outlined in this section.
+6 Experimental Results
+This section presents a range of performance data that summarizes the effects of preprocessing
+on measures of overall efficiency. Also discussed is the performance effects of problem
+irregularity and partitioning. The computational experiments employed the Fluxroe kernel
+and the block sparse matrix vector multiply kernel. Both kernels were coded in ARF;
+the parallelized benchmark numbers were obtained from programs generated by the ARF
+compiler. Note that the syntax accepted by the ARF compiler differs in minor ways from
+what was presented in previous sections.
+The experiments described in this paper used either a 32 processor iPSC/860 machine
+located at ICASE, NASA Langley Research Center or a 128 processor iPSC/860 machine
+located at Oak Ridge National Laboratories. Each processor had 8 megabytes of memory.
+The Greenhill 1.8.5 Beta version C compiler was used to generate code for the 80860
+processors.
+6.1 Unstructured Mesh Data
+Input data from variety of unstructured meshes were used; including actual unstructured
+meshes obtained from aerodynamic simulations and synthetically generated meshes.
+Unstructured Meshes from Aerodynamics: Two unstructured meshes generated
+from aerodynamic simulations were used.
+Mesh A: A 21,672 element mesh generated to carry out an aerodynamic simulation
+involving a multi-element airfoil in a landing configuration [28]. This
+mesh has 11,143 points.
+Mesh B: A 37,741 element mesh generated to simulate a 4.2 % circular arc
+airfoil in a channel [14]. This mesh has 19,155 points.
+Each mesh point is associated with an (x; y) coordinate in a physical domain. Domain
+information was used to partition the mesh in three different ways: strips, orthogonal
+binary dissection algorithm [5], [13], and another mesh partitioning algorithm jagged
+partitioning [38]. The partitioning of the meshes are done sequentially and mapping
+arrays are generated for distribution of the data structures.
+Synthetic Mesh from Templates
+A finite difference template links K points in a square two dimensional mesh. This
+connectivity pattern is distorted incrementally. Random edges are introduced subject
+to the constraints in the new mesh; each point still requires information from K other
+mesh points.
+This mesh generator makes the following assumptions:
+1. The problem domain consists of a 2-dimensional square mesh of N points,
+2. Each point is initially connected to K neighbors determined by a finite difference
+template,
+3. With probability q, each mesh link is replaced by a link to a randomly chosen
+mesh point.
+Note that when q is equal to 0:0, no mesh links are modified and no changes are
+introduced. When q is equal to 1:0 a random graph is generated. Two templates
+are used. One template connects each point to its four nearest neighbors (K=4); the
+other template connects each point to both its four nearest neighbors and to each
+of its four diagonal neighbors (K=8). The is referred to as a five
+point template and the K=8 template as a nine point template. In the experiments
+described in this section, a 256 by 256 point mesh was employed.
+6.2 Overall Performance
+Data is presented to give an overview of the performance obtained on the iPSC/860 from the
+ARF compiler output. A block distributed translation table was used. Table 4 presents
+a) the inspector time: time required to carry out the inspector preprocessing phase, b)
+computation time: the time required to perform computations in the iterative portion of
+the program, and c) the communication time: the time required to exchange messages
+within the iterative portion of the program. The inspector time includes the time required
+to set up the needed distributed translation table as well as the time required to access
+the distributed translation table when carrying out preprocessing. Unstructured Meshes A
+and B were partitioned using orthogonal binary dissection. In these experiments, the ratio
+of the time required to carry out the inspector to the time required for a single iteration
+communication time) ranged from a factor of 0.7 to a factor of 3.6.
+Most of the preprocessing time represents set up and use of the distributed translation
+table. For instance, consider the block matrix vector multiply on 64 processors using
+the 21,672 element mesh. The total preprocessing cost was 122 milliseconds, of which
+milliseconds represent work related to the translation table. Parallel efficiency for
+a given number of processors P is defined as sequential time divided by the product of
+the execution time on P processors times P. The sequential time was measured using a
+separate sequential version of the each kernel run on a single node of the iPSC/860. The
+algorithm of the sequential code was the same as that of the parallel code. Table 4, under
+the column single sweep efficiency, depicts the parallel efficiencies that would have been
+obtained with the requirement to preprocess the kernel each time the calculations were
+carried out. In reality, preprocessing time can be amortized over multiple mesh sweeps. If
+the time required to preprocess the problem in computing parallel efficiencies is neglected,
+the second set of parallel efficiency measurements is obtained. The executor efficiency is
+presented in Table 4. The executor efficiencies for 64 processors ranged from 0.48 to 0.59,
+while the single sweep efficiencies ranged from 0.10 to 0.17.
+In the experiments depicted in Table 4, computing time is at least a factor of 2 greater
+than the communication time. The executor efficiencies are effected by the fact that the
+computations in the parallelized codes are carried out less efficiently than those in the
+sequential program. The parallel code spends time accessing the hashed cache. It also
+needs to perform more indirections than the sequential program.
+
+Table
+
+4: Performance on different number of processors
+nprocs inspector comp comm single sweep executor
+time(ms) time(ms) time(ms) efficiency efficiency
+Sparse Block Matrix Vector Multiply - Mesh A
+Sparse Block Matrix Vector Multiply - Mesh B
+
+Table
+
+5, summarizes the performance of the Fluxroe kernel for meshes with varying
+degrees of regularity and for varying mesh mappings. This experiment was conducted using
+processors. Table 5 depicts synthetic meshes derived from 5 and 9 point stencils with
+probability of edge move q equal to either 0:0 or 0:4. These meshes were mapped by 1-D
+strips or by 2-D blocks. As one might expect for the synthetic meshes, the communications
+costs increase dramatically for increasing q. These dramatic increases are present because
+both the volume of communication required and the number of messages sent per node
+are much higher for large q. Preprocessing costs also increased with q but while the
+communications costs went up by at least a factor of 16, preprocessing costs went up by
+at most a factor of 1.8.
+
+Table
+
+5 summarizes results from Meshes A and B which were partitioned in three ways:
+strips, the orthogonal binary dissection algorithm, and jagged partitioning. Both binary
+dissection and the jagged partitioning algorithm break the domain into two dimensional
+rectangular regions; the two methods produce very similar performance results.
+
+Table
+
+5: Performance on 32 processors with different meshes
+nprocs inspector comp comm single sweep executor
+time(ms) time(ms) time(ms) efficiency efficiency
+5 point template synthetic mesh partitioned into strips
+q=0.4 310 293 361 0.25 0.37
+5 point template synthetic mesh partitioned into 2-D block
+q=0.4 463 291 319 0.23 0.40
+9 point template synthetic mesh partitioned into strips
+q=0.4 385 620 530 0.31 0.42
+9 point template synthetic mesh partitioned into 2-D block
+q=0.4 595 624 527 0.28 0.42
+Mesh A
+binary 134 80 22 0.24 0.57
+jagged 135 81 22 0.24 0.56
+strips 148 83 26 0.22 0.53
+binary 191 136 23 0.28 0.61
+jagged 186 137 21 0.28 0.62
+strips 219 149 31 0.24 0.54
+6.3 Breakdown of Inspector Overhead
+
+Table
+
+6, summarizes the cost of dereferencing and scheduling the Fluxroe kernel on different
+numbers of processors using a blocked translation table. A five point template was
+used and the mesh was partitioned either into 1-D strips or into 2-D blocks. When the
+mesh is partitioned into strips, dereference involves mostly local data accesses since the
+domain data and the translation table are identically partitioned. When strip partitioning
+is used, translation table initialization does not involve communication. The measurements
+presented in Table 6 are defined in the following manner:
+ffl Executor time is the computation and communication time required to execute the
+it does not include time required for preprocessing,
+ffl Table initialization time is the time needed to initialize the distributed translation
+table,
+ffl Dereference time is the time taken by the dereference PARTI primitive, and
+ffl Scheduler time is the time required to produce the communications schedule once the
+required processor locations and local indices have been found by dereference.
+The majority of the costs incurred by the inspector are due to the translation table
+initialization and dereference (see Table 6). For instance, consider the case where 64
+processors are used to carry out a sweep over a 2-D block partitioned mesh with a 5 point
+template. The translation table initialization and dereference together require 183 % of
+the executor time while the generation of the schedule requires only 12 % of the executor
+time.
+In these problems communication costs comprise a small fraction of the executor time;
+consequently the method used to partition the domain does not make a significant performance
+impact on executor time. In Table 6, the costs of translation table initialization and
+of dereference are both strongly dependent on how the domain is partitioned. 2-D block
+partitioning leads to higher translation table related costs. This is almost certainly due to
+the increased communication requirements needed for translation table initialization and
+dereference. Strip partitioning per se does not necessarily lead to low translation table related
+costs. In Table 5 it is noted that strip partitioning actually leads to higher inspector
+costs for both Mesh A and Mesh B. The translation table is partitioned so that blocks of
+contiguously numbered indices are assigned to each processor. However in Mesh A and
+Mesh B, mesh points are not numbered in a regular fashion so the indices corresponding
+to a domain strip are not contiguously numbered.
+
+Table
+
+Cost of dereferencing and scheduling on different number of processors
+nprocs executor table init dereference schedule
+time
+5 point template synthetic mesh partitioned into strips
+5 point template synthetic mesh partitioned into 2-D blocks
+6.4 Cost of translation table
+Section 4.3 discussed two straightforward ways to map a distributed translation table
+onto processors. Consider the question of how to distribute the translation table so as to
+minimize costs associated with translation table access. Table 7 compares the time required
+to carry out dereference on blocked and striped translation tables by depicting:
+ffl the time required to carry out a particular call to dereference,
+ffl the average number of non-local accesses to table entries required by dereference, and
+ffl the average number of non-local processors accessed during the call to dereference.
+When the results for unstructured Meshes A and B are examined, no consistent performance
+difference in the cost required to dereference a blocked or a striped translation
+table is seen. Similar numbers of off-processor table entries need to be accessed for either
+translation table distribution. Blocked translation tables lead to superior performance
+when synthetic meshes are used. For the reasons described in Section 6.3 particularly good
+results are obtained when a striped partition with a blocked translation table is used. It
+is of interest that the blocked translation table also proved to be superior when synthetic
+meshes partitioned in 2-D blocks are used.
+
+Table
+
+7: Cost of dereference on processors
+Problem Indirect - Blocked Indirect - Striped
+Time Nonlocal Nonlocal Time Nonlocal Nonlocal
+(ms) Data Proc (ms) Data Proc
+Synthetic: 5 point template, strip partition
+q=0.2 157 1045 17 365 2862 31
+q=0.4 218 1825 17 368 3350 31
+Synthetic: 5 point template, 2-D block partition
+q=0.4
+Mesh A
+binary 97 768 21 96 743 31
+jagged
+strips
+binary
+jagged 139 1293 24 130 1263 31
+strips 159 1519 31 172 1513 31
+6.5 Scheduler and Data Exchanger Performance
+To quantify the communications costs incurred by the PARTI scheduler and data exchange
+primitives, the time required to carry out the scheduler, gather-exchanger and
+scatter-exchanger procedure calls were measured and compared to the hand-coded version
+of iPSC/860 supplied sends and receives. The sends and receives communicated the same
+amount of data as did the PARTI procedures. An experiment was conducted in which two
+processors repeatedly exchanged W single precision words of information. The exchange
+was carried out using gather-exchangers, scatter-exchangers and the iPSC/860 supplied
+send and receive calls. Table 8 summarizes the results of these experiments. Presented are:
+the time (in milliseconds) required to carry out the requisite data exchange using send and
+receive messages; the ratio between the time taken by the scheduler and gather-exchanger
+PARTI primitive calls and the time taken by the equivalent send and receive calls. The
+scatter exchanger calls were also timed, the results of which were virtually identical to that
+of the corresponding gather-exchanger call.
+The gather-exchanger exceeded no more than 20% of the explicitly coded send/receive
+pairs moving W words of information between two processors. The additional overhead
+required for scheduler to carry out the data exchange was a factor of 2:1 to 1:0 times the
+
+Table
+
+8: Overheads for PARTI Scheduler and Gather-Exchanger Primitives
+Number of Send Gather- Scheduler
+Data Receive Exchanger
+Elements Time(ms) (ratio) (ratio)
+400 1.0 1.1 1.4
+900 1.8 1.1 1.3
+1600 2.9 1.2 1.3
+4.3 1.2 1.1
+cost of using explicitly coded send/receive pairs to move W words.
+7 Relation to Other Work
+Programs designed to carry out a range of irregular computations, [2, 26, 4, 43, 13], including
+sparse direct and iterative methods, require many of the optimizations described
+in this paper.
+Several researchers have developed programming environments that target particular
+classes of irregular or adaptive problems. Williams [43] describes a programming environment
+(DIME) for calculations with unstructured triangular meshes using distributed
+memory machines. Baden [3] has developed a programming environment targeting particle
+computations, which provides facilities that support dynamic load balancing. One
+of the key distinctions between the present work and that of Baden and Williams is that
+PARTI runtime support is designed to be used by compilers to handle parallel loops with
+irregular array references. In addition, it can be used by programmers in a wide range of
+applications. By contrast, programming environments such as those described by Baden
+and Williams are highly customized for use in specific application areas.
+There are a variety of compilers targeting distributed memory multiprocessors [44, 8,
+33, 31, 1, 39]. With the exception of the Kali project [22], and the PARTI work described
+here and in [36, 29, 37], these compilers do not attempt to deal with loops having irregular
+references efficiently.
+The work described in this paper is also related to schemes to carry out distributed
+memory runtime parallelization [29, 27]. These schemes are more ambitious than those
+described in this paper, which include mechanisms to carry out runtime partitioning and
+parallelization. Chen [27] suggests an optimization similar to one described here. She proposed
+reducing scheduling overheads by identifying distributed array references for which
+one can employ identical schedules. At this point only hand coding based timing experiments
+have been carried out to study the schemes proposed [29, 27].
+The prototype compiler described here is able to generate code capable of efficiently
+handling kernels with parallel loops containing irregular array references. The procedures
+that carry out runtime optimizations are coupled to a distributed memory compiler via
+a set of compiler transformations. The compiler described and tested in this paper is
+qualitatively different from the efforts cited above in a number of important respects.
+Mechanisms have been developed and demonstrated that support irregularly distributed
+arrays, making it possible to map data and computational work in an arbitrary manner.
+Because irregularly distributed arrays can be supported, it was possible to compare the
+performance effects of different problem mappings. Support for arbitrary distributions
+was proposed [29, 37] but this is the first implementation of a compiler-based distributed
+translation table mechanism for irregular scientific problems.
+Many unstructured NASA codes must carry out data accumulations to off-processor
+memory locations. One of the demonstration kernels addressed this, and the primitives
+and the compiler were designed to handle this situation. This compiler effort is unique in
+its ability to carry out irregular patterns of off-processor data accumulations efficiently.
+These primitives are augmented with a hash table designed to eliminate duplicate data
+accesses. In addition, the hash table manages copies of off-processor array elements. Other
+researchers have used different data structures for management of off-processor data copies
+[22].
+8 Conclusion
+This paper described and experimentally characterized a compiler and runtime support
+procedures which embody methods that are capable of handling an important class of
+irregular problems that arise in scientific computing. After examining a number of complete
+NASA codes, two kernels were extracted to demonstrate the methods. Both of these kernels
+involved computations over unstructured meshes. Both kernels were coded in ARF, a
+dialect of Fortran, and generated code to run on the nodes of the iPSC/860. Detailed
+timings were carried out on both kernels using unstructured meshes from aerodynamics,
+along with meshes that were generated by using random numbers to incrementally distort
+matrices obtained from a fixed finite difference template. This benchmarking suite stressed
+the communications capabilities of the iPSC/860 and the PARTI primitives in a variety of
+ways.
+In the experiments reported in Section 6.2, the ratio of the time required to carry
+out all preprocessing to the time required for a single iteration of either kernel ranged
+from a factor of 0.7 to a factor of 3.6. In Section 6.3 the majority of the preprocessing
+costs arose from the need to support irregularly distributed arrays. In Section 6.5 the
+performance of the scheduler and data exchanger PARTI primitives were quantified. The
+data-exchangers demonstrated a maximum increase of 20% over the analogous send and
+receive calls provided by Intel.
+One of the virtues of the layered approach to distributed compiler design is the capture
+of a set of critical optimizations in the runtime support primitives. These primitives, and
+hence these optimizations, can be migrated to a variety of compilers targeting distributed
+memory multiprocessors. It is intended to implement these primitives in the ParaScope
+parallel programming environment [17]. In addition, PARTI primitives can, and are, being
+used directly by programmers in applications codes [6], [10]. The applications described
+in [10] were particularly noteworthy. These applications were explicit and multigrid unstructured
+Euler solvers which were employed to compute flows over full aircraft configura-
+tions. The explicit unstructured Euler solver achieved a computational rate of 1.5 Gflops
+on 512 processors of the Intel Touchstone Delta. The multigrid unstructured Euler solver
+achieved a computational rate of 1.2 Gflops on 512 Delta processors. In both cases, the cost
+of the inspector's preprocessing was approximately equal to the cost of a single iteration
+of the Euler solver, amounting to less than 3 % of the total time.
+Most of the complexity in this system is in the PARTI procedures. The PARTI procedures
+have been developed so that transformations needed to embed the appropriate
+primitives can be implemented with relative ease in distributed memory compilers. The
+primitives used to implement the runtime support include communications procedures designed
+to support irregular patterns of distributed array access, and procedures to find the
+location of irregularly mapped distributed array data using distributed translation tables.
+Primitives also support the maintenance of hash tables to store copies of off-processor data.
+9
+
+Acknowledgements
+
+We would like to thank Harry Jordan, Bob Voigt and Donna Meisel for their careful editing
+of this manuscript. We would also like to thank the Advanced Computing Laboratory at
+Oak Ridge National Laboratories and NAS at NASA Ames for providing access to the 128
+node Intel iPSC/860 hypercubes.
+We wish to thank Dimitri Mavriplis and David Whitaker for supplying unstructured
+meshes, and to David Whitaker and P Venkatkrishnan for access to their codes.
+
+
+
+--R
+
+PANDORE: A system to manage data distribution
+
+Programming abstractions for dynamically partitioning and coordinating localized scientific calculations running on multiprocessors
+An experimental study of methods for parallel preconditioned Krylov methods
+A partitioning strategy for pdes across multi- processors
+Execution time support for adaptive scientific algorithms on distributed memory architectures
+A design methodology for synthesizing parallel algorithms and architec- tures
+The Paragon multicomputer environment: A first implementation
+CM Fortran reference manual
+The design and implementation of a parallel unstructured Euler solver using software primitives
+Slicing analysis and indirect access to distributed arrays
+Fortran D language specification
+Solving Problems on Concurrent Computers
+Numerical methods for the computation of inviscid transonic flows with shock waves - a gamm workshop
+Updating distributed variables in local computations
+High Performance Fortran Forum
+Compiler support for machine-independent parallel programming in Fortran D
+Compiler optimizations for Fortran D on MIMD distributed-memory machines
+Compiling Programs for Nonshared Memory Machines
+
+Compiling global name-space programs for distributed execution
+Supporting shared data structures on distributed memory architectures
+Generating explicit communication from shared-memory program references
+
+
+Computational models and task scheduling for parallel sparse Cholesky factorization
+Parallelizing loops with indirect array references or pointers
+Multigrid solution of the two-dimensional Euler equations on unstructured triangular meshes
+Principles of runtime support for parallel processors
+A scheme for supporting automatic data migration on multicomputers
+Process decomposition through locality of reference
+An overview of Dino - a new language for numerical computation on distributed memory multiprocessors
+Expressing complex parallel algorithms in Dino
+Massive parallelism and process contraction in Dino
+The DINO parallel programming language
+the crystal runtime system
+
+Performance effects of irregular communications patterns on massively parallel multiprocessors
+A Parallelizing Compiler for Distributed Memory Parallel Computers
+Parallel preconditioned iterative methods for the compressible navier stokes equations
+
+Solution algorithms for the two-dimensional Euler equations on unstructured meshes
+Distributed irregular finite elements
+SUPERB: A tool for semi-automatic MIMD/SIMD parallelization
+Vienna Fortran - a language specification
+--TR
+
+--CTR
+Manuel Ujaldon , Emilio L. Zapata, Efficient resolution of sparse indirections in data-parallel compilers, Proceedings of the 9th international conference on Supercomputing, p.117-126, July 03-07, 1995, Barcelona, Spain
+Ayon Basumallik , Rudolf Eigenmann, Optimizing irregular shared-memory applications for distributed-memory systems, Proceedings of the eleventh ACM SIGPLAN symposium on Principles and practice of parallel programming, March 29-31, 2006, New York, New York, USA
+Rong-Guey Chang , Tyng-Ruey Chuang , Jenq Kuen Lee, Efficient support of parallel sparse computation for array intrinsic functions of Fortran 90, Proceedings of the 12th international conference on Supercomputing, p.45-52, July 1998, Melbourne, Australia
+Roxana E. Diaconescu, Distributed component architecture for scientific applications, Proceedings of the Fortieth International Conference on Tools Pacific: Objects for internet, mobile and embedded applications, February 01, 2002, Sydney, Australia
+Vladimir Kotlyar , Keshav Pingali , Paul Stodghill, Compiling parallel code for sparse matrix applications, Proceedings of the 1997 ACM/IEEE conference on Supercomputing (CDROM), p.1-18, November 15-21, 1997, San Jose, CA
+Kevin B. Theobald , Gagan Agrawal , Rishi Kumar , Gerd Heber , Guang R. Gao , Paul Stodghill , Keshav Pingali, Landing CG on EARTH: a case study of fine-grained multithreading on an evolutionary path, Proceedings of the 2000 ACM/IEEE conference on Supercomputing (CDROM), p.4-es, November 04-10, 2000, Dallas, Texas, United States
+Renato Ferreira , Gagan Agrawal , Joel Saltz, Data parallel language and compiler support for data intensive applications, Parallel Computing, v.28 n.5, p.725-748, May 2002
+Gagan Agrawal , Joel Saltz, Interprocedural compilation of irregular applications for distributed memory machines, Proceedings of the 1995 ACM/IEEE conference on Supercomputing (CDROM), p.48-es, December 04-08, 1995, San Diego, California, United States
+Peizong Lee , Zvi Meir Kedem, Automatic data and computation decomposition on distributed memory parallel computers, ACM Transactions on Programming Languages and Systems (TOPLAS), v.24 n.1, p.1-50, January 2002

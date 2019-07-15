@@ -1,0 +1,630 @@
+--T
+Accurate garbage collection in an uncooperative environment.
+--A
+Previous attempts at garbage collection in uncooperative environments have generally used conservative or mostly-conservative approaches. We describe a technique for doing fully type-accurate garbage collection in an uncooperative environment, using a "shadow stack" to link structs of pointer-containing variables, together with the data or code needed to trace them. We have implemented this in the Mercury compiler, which generates C code, and present preliminary performance data on the overheads of this technique. We also show how this technique can be extended to handle multithreaded applications.
+--B
+INTRODUCTION
+New programming language implementations usually
+need to support a variety of di#erent hardware architectures,
+because programmers demand portability. And because programmers
+also demand e#ciency, new programming language
+implementations often need to eventually generate
+native code, whether at compile time, as in a traditional
+compiler, or run time, for a JIT compiler.
+However, implementing compiler back-ends or JITs that
+generate e#cient native code for a variety of di#erent hardware
+architectures is a di#cult and time-consuming task.
+Furthermore, a considerable amount of ongoing maintenance
+is required to generate e#cient code for each new chip with
+di#erent performance characteristics or a new architecture.
+Because of this, few programming language implementors
+try to implement their own native-code generators. Instead,
+many programming language implementors reuse one of the
+existing back-end frameworks, in one of several ways: by
+generating another more-or-less high-level language, such as
+Java or C; by generating an intermediate language such as
+C- [16], Java byte-code, or MSIL (the intermediate language
+of the .NET Common Language Runtime); or by interfacing
+directly with a reusable back-end, such as GCC (the GNU
+Compiler Collection back-end) or ML-RISC.
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for profit or commercial advantage and that copies
+bear this notice and the full citation on the first page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior specific
+permission and/or a fee.
+ISMM'02, June 20-21, 2002, Berlin, Germany.
+Unfortunately, however, most of these systems, and especially
+most of the more mature and popular of them, do
+not have any direct support for garbage collection, and the
+ones that do, such as Java and MSIL, have their own draw-
+backs, such as poor performance or being available only on
+a restricted set of platforms.
+Implementing garbage collection in systems that do not
+have direct support for it poses some di#cult challenges; in
+particular, it is hard for the garbage collector to trace the
+system stack.
+One widely-used solution to the problem of garbage collection
+in uncooperative environments is the approach of
+using conservative [4] or mostly-conservative [1, 22] collec-
+tion. This approach can often deliver good performance.
+However, conservative collection has some drawbacks; the
+most significant of these is that the probabilistic nature of
+conservative collection makes it unsuitable for very high-reliability
+applications, but it also requires a small degree
+of cooperation from the back-end, because certain compiler
+optimizations are not safe in the presence of conservative
+collection.
+Another solution which has been used when compiling to
+C [20] is to entirely avoid storing data on the C stack. This
+can be done by implementing a virtual machine, with its
+own stack and registers (which can be implemented as e.g.
+C global variables). The source language is then compiled
+to code which manipulates the virtual machine state; procedure
+calls and parameter passing are handled by explicitly
+manipulating the virtual machine stack and registers, rather
+than using C function calls.
+With this approach, the collector only needs to trace the
+virtual machine stack, not the C stack. Since the source
+language compiler has full control over the virtual machine
+stack, tracing that stack is relatively straight-forward, and
+so traditional techniques for accurate garbage collection can
+be used. This approach also has the advantage that it can
+overcome some of the other drawbacks of C, e.g. the lack of
+support for proper tail recursion optimization [5]. However,
+this approach discards many of the advantages of compiling
+to a high-level language [13]. The source language compiler
+must do its own stack slot and register allocation, and
+the generated C code is very low-level. To make the code
+e#cient, non-portable features must be used [14], and the
+resulting system is complex and fragile. Furthermore, the
+use of a di#erent calling convention makes interoperability
+more di#cult.
+We propose an alternative approach that allows fully type-
+accurate and liveness-accurate garbage collection, thus allowing
+the use of a normal copying collector, without requiring
+any support from the back-end target language, and
+while still generating code that uses the normal C function
+calling mechanism. We describe this approach in the context
+of compiling to C, although it would also work equally well
+when interfacing directly to a compiler back-end framework,
+such as the GCC back-end.
+Our technique is formulated as a transformation on the
+generated C code, which modifies the C code in such a way
+as to insert calls to perform garbage collection when nec-
+essary, and to provide the garbage collector with su#cient
+information to trace and if necessary update any pointers on
+the C stack. (The transformation is not entirely independent
+of the front-end language, however; it requires information
+from the source language front-end compiler about how to
+trace each local variable.)
+We have implemented this technique in the Mercury com-
+piler, and we have run a number of benchmarks of this implementation
+to investigate the overheads and performance
+of our technique.
+Section 2 describes our technique, showing how the code
+is transformed and explaining how this avoids the di#cul-
+ties with compiler optimizations that can cause problems for
+conservative collection. Section 3 describes how the technique
+can be extended to support multithreaded applica-
+tions. Section 4 evaluates the performance of our technique.
+Section 5 discusses related work.
+2. THE GC TRANSFORMATION
+The basic idea is to put all local variables that might
+contain pointers in structs, with one struct for each stack
+frame, and chain these structs together as a linked list. We
+keep a global variable that points to the start of this chain.
+At GC time, we traverse the chain of structs. This allows
+us to accurately scan the C stack.
+For each function, we generate a struct for that function.
+Each such struct starts with a sub-struct containing a couple
+of fixed fields, which allow the GC to traverse the chain:
+struct function name_frame {
+struct StackChain fixed_fields;
+The fixed fields are as follows:
+struct StackChain {
+struct StackChain *prev;
+void (*trace)(void *locals);
+The 'prev' field holds a link to the entry for this function's
+caller. The 'trace' field is the address of a function to trace
+everything pointed to by this stack frame.
+To ensure that the garbage collector does not try to traverse
+uninitialized fields, we insert code to zero-initialize any
+uninitialized fields of each struct before inserting it into the
+chain.
+We need to keep a link to the topmost frame on the stack.
+There are two possible ways that this could be handled. One
+way is to pass it down as a parameter. Each function would
+get an extra parameter 'stack chain' which points to the
+caller's struct. An alternative approach is to just have a
+global variable 'stack chain' that points to the top of the
+stack.
+extern void *stack_chain;
+We insert extra code to set this pointer when entering and
+returning from functions. To make this approach thread-
+safe, the variable would actually need to be thread-local
+rather than global. This approach would probably work best
+if the variable is a GNU C global register variable, which
+would make it both e#cient and thread-safe. If GNU C extensions
+are not available, the function parameter approach
+is probably best.
+In our implementation in the Mercury compiler, we are
+currently just using a global variable, for simplicity.
+2.1 Example
+If we have a function
+RetType
+foo(Arg1Type arg1, Arg2Type arg2, . )
+{ Local1Type local1;
+bar(arg1, arg2, local1, &local2);
+where new object() is the allocation primitive that allocates
+garbage collected objects, and where say Arg1Type
+and Local1Type might contain pointers, but Arg2Type and
+don't, then we would transform it as follows:
+struct foo_frame {
+StackChain fixed_fields;
+Arg1Type arg1;
+static void
+foo_trace(void *frame) {
+struct foo_frame
+/* code to trace locals->arg1
+and locals->local1 */
+RetType
+foo(Arg1Type arg1, Arg2Type arg2, . )
+{ struct foo_frame locals;
+locals.fixed_fields.trace
+.
+bar(locals.arg1, arg2,
+locals.local1, &local2);
+stack_chain)->prev;
+Here we are following Goldberg's approach to tag-free
+garbage collection for strongly typed languages [11];
+trace Arg1Type() and trace Local1Type() are type-specific
+garbage collection routines that are generated by
+the front-end compiler. However, unlike Goldberg, we are
+primarily interested in adapting this approach to an uncooperative
+environment; our technique would apply equally
+well if using a tagged representation (in that case, only a
+single trace object() function would be needed, instead of
+one for each type) or if using a table-driven approach [7]
+rather than a function per frame (in that case, the 'trace'
+field of the 'StackChain' struct would be a data table rather
+than a function pointer).
+Finally, the code in the runtime system to traverse the
+stack frames is as follows:
+void
+traverse_stack(struct StackChain *stack_chain)
+{ while (stack_chain != NULL) {
+The details of new object() will depend on the particular
+garbage collection algorithm chosen. In our implementation,
+new object() first checks for heap exhaustion, and then allocates
+memory by incrementing a global heap pointer:
+extern byte *heap_pointer;
+#define new_object(type,size) \
+heap_pointer += (size), \
+(type *) (heap_pointer -
+Here GC check() compares the global heap pointer to another
+global variable which points to the end of the heap,
+and calls garbage collect() if the heap is near exhaustion.
+extern byte *heap_gc_threshold;
+#define GC_check(size) \
+heap_gc_threshold \
+As is well known, it is possible to the reduce the overhead of
+checking for heap exhaustion by combining multiple checks
+into a single check. However, our current implementation
+does not perform that optimization.
+The garbage collect() routine in our current implementation
+implements a very simple copying collector [21].
+byte *from_heap;
+byte *to_heap;
+void
+garbage_collect(void)
+{ /* swap the "to" heap
+with the "from" heap */
+byte *tmp;
+/* reset the "to" heap */
+/* copy the live objects
+from the "from" heap
+to the "to" heap */
+Note that we keep a separate list of global roots, which is
+used for global variables that might contain pointers, in addition
+to the 'stack chain' list.
+2.2 Safety
+Why, you might ask, doesn't this technique su#er from the
+same problems with back-end compiler optimization that
+cause trouble with conservative collection?
+The reason that this technique works is that we are not
+going behind the back-end compiler's back; everything is
+done in strictly conforming C code. Conservative collectors
+use non-portable techniques to trace the stack, but with our
+approach the collector can trace the stack just by traversing
+our linked list of structs. Although the code contains some
+pointer casts, the behaviour of these casts is defined by the
+C standard.
+The back-end compiler cannot do any unsafe optimizations
+on pointer variables such as locals.arg1 and
+locals.local1, because we've stored the address of locals
+in a global variable, and so it must assume that any call to
+a function whose body is not known might update the fields
+of locals.
+Of course, inhibiting such optimizations in this way is a
+two-edged sword. The advantage is that it ensures correct-
+ness. The disadvantage is that it hurts performance.
+The back-end compiler is free to perform function inlining
+(or outlining, for that matter); our own "shadow stack"
+of linked structs need not have any direct relationship with
+the stack frames in the underlying machine code. Further-
+more, the back-end compiler can do whatever fancy optimizations
+it wants on non-pointer variables, such as arg2
+and local2, and it can cache the values of pointer variables
+such as locals.arg1 and locals.local1 in registers
+between function calls (if it does appropriate alias analysis).
+But in general it cannot cache the values of pointer variables
+in registers across calls to non-inlined functions. This can
+have a significant impact on performance.
+A key contribution of this work is to measure the impact
+on performance that this transformation has.
+2.3 Improvements
+The scheme described above is naive in certain respects.
+There are several ways in which this scheme can be opti-
+mized. Rather than putting all variables that might contain
+pointers in the shadow-stack structs, it is su#cient to do
+this only for such variables which are going to be live across
+a point where garbage collection could occur, i.e. live across
+an allocation or function call.
+Another optimization is to not bother allocating a struct
+for leaf functions that do not contain any functions calls or
+memory allocations.
+Another possible optimization would be to use local variables
+to cache the fields of the shadow-stack struct, if they
+are referenced multiple times in a sequence of code where no
+garbage collection could occur, so that the C compiler could
+then allocate the local variables in registers.
+The only one of these optimizations implemented in our
+current implementation is not allocating structs for functions
+that do not have any pointer-containing variables.
+2.4 Nested scopes and liveness-accuracy
+An issue that we have not yet discussed is how to handle
+variables declared in nested scopes within a function.
+One way to handle them is to ignore the nesting and just
+put all pointer-containing variables in the struct, regardless
+of their scope. This requires first ensuring that no function
+contains two declarations of the same variable name with
+di#erent types in di#erent scopes (e.g. by renaming apart if
+needed).
+This approach is the one that we have used in our current
+implementation. But it has two drawbacks: first, by extending
+the lifetime of such variables to the whole function,
+we may increase stack usage; and second, since the collector
+will scan them, this may in turn also lead to unnecessary
+heap retention.
+The second drawback could be solved by inserting code to
+zero out these variables when their scope is exited, or when
+they are otherwise statically known to be dead. This would
+ensure that the collector is "liveness-accurate" with respect
+to the liveness of the local variables in the C code before
+applying our transformation. Note that if such variables
+were represented just as local variables in the final C code,
+as would be the case when using a conservative collector,
+it might not help to add code to assign zero to them at
+the end of their lifetime, since the C compiler could just
+"optimize" away the assignments. But with our approach,
+where such variables are represented as fields of the 'locals'
+struct, whose address has been taken and stored in a global
+variable, we're safe from such unwanted optimizations.
+Another way to handle nested scopes would be to use
+unions to ensure that the storage for pointer-containing variables
+declared in non-overlapping scopes is shared. However,
+in order for the collector to be able to trace these unions,
+we would need to store a discriminant for the union, which
+recorded which scope (if any) was active, so that the trace()
+function would know which union element to trace. Code
+would need to be inserted to initialize these discriminants
+on function entry, and to set the corresponding discriminant
+on entry/exit from each nested scope.
+A third way to handle nested scopes would be to treat each
+nested scope as a separate stack frame, with the pointer-
+containing variables allocated in a separate struct for each
+nested scope. This would require adding code at the entry
+of each nested scope to link the corresponding struct
+into the stack chain list, and adding code at the exit point(s)
+to remove it from the chain.
+For both the second and third alternatives, the collector
+would be to some degree liveness-accurate, in the sense that
+variables would definitely not be scanned after their scope
+has exited. However, if proper static liveness-accuracy is
+desired, then for any pointer-containing variables which are
+statically known to die before their scope has exited, additional
+code would need to be inserted to zero out such
+variables at the point of their death. (If the last use of such
+a variable is as a function call argument, this implies copying
+the variable from the stack frame struct to a local tempo-
+rary, zeroing out the stack frame struct field, and then using
+the local temporary in the call; zeroing out the stack frame
+struct field after the call would be too late.)
+3. MULTITHREADING
+This system can also be extended to support multi-threading
+(using a "stop the world" approach to collection)
+in a fairly straight-forward manner, with little additional
+overhead.
+The "stop the world" approach means that when garbage
+collection occurs, every mutator thread must advance to a
+safe point, and stop executing the program; when all mutator
+threads are stopped at a safe point, garbage collection
+can begin. The collector itself can be either sequential or
+parallel (single- or multi-threaded). The important thing
+about this approach is that the collector never runs in parallel
+with the mutator.
+In our case, the "safe points" are the calls to
+garbage collect().
+To avoid the need for synchronization at allocations,
+there should be a separate area of free heap space
+for each thread. The 'stack chain', `heap pointer',
+and 'heap gc threshold' variables all need to be made
+thread-local. When one thread runs out of free heap
+space, it can schedule a garbage collection by setting
+the 'heap gc threshold' variables for every other
+thread to point a sentinel value (such as the start of
+the heap) which will cause those threads to enter the
+garbage collection() function when they next invoke
+GC check(). The garbage collection() function can handle
+the necessary synchronization with other threads.
+To ensure that each thread will invoke GC check() within
+a bounded amount of time, the compiler will need to insert
+an additional call to GC check() in the body of any
+long-running loops that does not do any heap allocation.
+Operating systems calls that can block will also need special
+handling (space limits prevent us from elaborating on
+that point here).
+As mentioned earlier, 'stack chain' and `heap pointer'
+can be GCC global register variables; this remains the case
+even with multithreading. However, 'heap gc threshold'
+cannot be put in a register; it needs to be addressable so
+that it can be assigned to by other threads. In addition,
+because it can be modified by other threads, it needs to be
+declared 'volatile'.
+To summarize, the changes required to support multi-threading
+are these: the extra synchronization code inside
+garbage collection(), the 'volatile' qualifier on the
+'heap gc threshold' variables, the extra calls to GC check()
+for loops that don't do any heap allocation, and special han-
+Program Lines Number Execution time Ratios
+of of (in seconds) hlc.gc hlc.agc hlc.agc
+code iterations hlc hlc.gc hlc.agc / hlc / hlc / hlc.gc
+cqueens 91 35000 0.70 1.29 1.28 1.84 1.83 0.99
+crypt 132 20000 2.72 5.06 5.00 1.86 1.84 0.99
+deriv 126 70000 0.15 0.75 0.79 5.00 5.27 1.05
+poly 259 1200 0.57 2.89 3.37 5.07 5.91 1.17
+primes 78 30000 1.12 2.03 2.58 1.81 2.30 1.27
+qsort 64 100000 0.83 2.68 3.11 3.23 3.75 1.16
+queens 85 100 2.31 4.78 4.55 2.07 1.97 0.95
+query 96 30000 3.92 3.95 4.09 1.01 1.04 1.04
+tak
+Harmonic mean 1.99 2.08 1.06
+
+Figure
+
+1: Benchmark results
+dling for OS calls that may block. While the extra synchronization
+code in garbage collection() may be somewhat
+costly, collections should not be too frequent, so the amortized
+cost is small. Loops that don't do any heap allocation
+are also likely to be rare, and in most cases the cost of an
+extra GC check per loop iteration will be relatively small; if
+the loop is small, the cost of checking can be amortized over
+multiple loop iterations by performing loop unrolling prior
+to inserting the extra GC checks. Finally, the cost of the
+special handling needed for blocking OS calls is likely to be
+small in comparison to the cost of a system call. Hence we
+expect that overall, this technique should have little additional
+overhead compared with the single-threaded version.
+Since the C standard does not support multithread-
+ing, it is not possible to do all this in strictly conforming
+C. In addition to functions for creating and synchronizing
+threads, such as provided by Posix threads,
+the approach described above also requires that assignments
+to the 'volatile', thread-local pointer variables
+'heap gc threshold' be atomic. Technically this is not guaranteed
+by the C or Posix standards, but most current platforms
+do make assignments to appropriately aligned pointers
+atomic, so it should be pretty portable in practice.
+4. PERFORMANCE
+The benchmark machine was a Gateway Select 1200
+PC, with a 1200MHz AMD Athlon CPU, 64kb L1 instruction
+cache, 64kb L1 data cache, 256k L2 cache,
+and 256Mb RAM, running Debian GNU/Linux Woody
+(testing), GNU libc 2.1, gcc 2.95.4, and Mercury rotd-
+2002-04-19. Each benchmark was compiled with 'mmc -O5
+-no-reclaim-heap-on-failure -no-deforestation'.
+Times shown are each the best of three successive runs, on
+an unloaded machine.
+We used a set of small benchmarks that has previously
+been used in benchmarking Mercury implementations [18].
+Since the time for many of these benchmarks is very small,
+we ran each benchmark for many iterations, and measured
+the total time to execute all iterations.
+(Ideally, it would be better to test with larger benchmarks.
+But our current implementation does not yet support the
+full Mercury language - higher-order code and type classes
+are not supported because tracing of closures is not yet im-
+plemented. This makes it di#cult to find large benchmark
+programs that work with our implementation.)
+We compared three variants ("grades") of the Mercury
+compiler. The 'hlc' grade allocates memory by just incrementing
+a heap pointer, as described in this paper, but the
+code does not test for heap overflow, and instead of performing
+garbage collection, memory is reclaimed by just resetting
+the heap pointer after each iteration of the benchmark. This
+is not a realistic memory management strategy for most real
+applications, but it represents a useful baseline.
+The 'hlc.gc' grade uses the Boehm (et al) conservative
+collector [4].
+The 'hlc.agc' uses the accurate garbage collection technique
+described in this paper. The collector is a simple
+two-space copying collector. The heap size used was 128k
+per space (i.e. 256k in total).
+The results are shown in Figure 1.
+On most of these benchmarks, the conservative collector
+is a little faster than the accurate collector. On some, the
+accurate collector is slightly faster. When averaged over
+all the benchmarks, the conservative collector is 6% faster.
+Both the conservative collector and the accurate collector
+are much slower than the version which just resets the heap
+pointer after each benchmark iteration.
+Profiling indicates that for the 'hlc.agc' grade, very little
+time (less than 1%) is spent in the garbage collection()
+function. The slow-down compared to the 'hlc' grade probably
+results from decreased locality and from the overhead
+of storing local pointer variables on the stack rather than in
+registers.
+Given that the Boehm collector has had years of tweaking
+and tuning, whereas our implementation is not yet well
+optimized (e.g. it does not yet use GCC global register
+variables), we consider this to be a reasonable result. We
+conjecture that with additional work on optimization, this
+approach can achieve performance as good as the Boehm
+collector on most benchmarks. But the increased portability
+and reliability of our approach make it desirable for some
+uses regardless of whether there is a performance advantage
+one way or the other.
+In our current implementation, we have not yet obtained
+the main benefit for logic programming languages of a copying
+collector, namely that copying collectors can allow cheap
+heap reclamation on backtracking, by just saving and restoring
+the heap pointer. Doing this requires some additional
+care in the garbage collector, to update the saved heap pointers
+after garbage collection, which we have not yet implemented
+properly.
+5. RELATED WORK
+The accepted wisdom of the community is that conservative
+collection is the only approach that works in uncooperative
+environments. For example, the highly experienced
+and respected language implementor Robert Dewar
+wrote "you can't do any kind of type accurate GC without
+information from the compiler back end" (noting that
+tagged architectures such as the CDC 6000 were an excep-
+[6]. Similarly, in the Garbage Collection FAQ [10],
+David Chase states that when compiling to C or C++, re-location
+of objects is "not generally possible" even if active
+pointers are registered, "because compiler-generated temporaries
+may also reference objects". However, this is certainly
+not a problem for our technique, as explained in Section 2.2,
+so this section of the FAQ is at best misleading.
+A big part of the contribution of this paper is to dispute
+that accepted wisdom, by demonstrating that it is possible
+to implement fully type-accurate garbage collection within
+such an environment.
+A lot of earlier work in the literature addresses issues
+which are quite close to the issues that we address, but using
+di#erent techniques, or uses very similar techniques, but for
+a di#erent purpose.
+Boehm [4], Bartlett [1], and Yip [22] address the issue
+of uncooperative environments, but use conservative or
+mostly-conservative collection, rather than accurate collec-
+tion. Boehm and Chase [2, 3] address the issue of safety of
+conservative garbage collection in the presence of compiler
+optimizations.
+Shadow stacks have been used for debugging in the Berkeley
+Sather [19] implementation, and in cdb [12]. But these
+systems do not use shadow stacks for garbage collection;
+Berkeley Sather uses the Boehm (et al) conservative collector
+
+Shadow stacks have been used for hand-coded garbage
+collection in several systems that we are aware of, in particular
+Emacs, GCC, and RT++ [8, 9, 17]. In these systems,
+unlike ours, the code to register local variables is inserted
+manually, and the shadow stack is a list or array of individual
+variables rather than a list of frames. These systems are perhaps
+closest to ours, but we are interested in automating this
+technique as part of a programming language implementa-
+tion, rather than using it to implement a garbage collection
+library for a language with manual memory management.
+As far as we know there has been no published work comparing
+the performance of these hand-coded shadow stack
+approaches with conservative collection. And as far as we
+are aware, none of the published work on these addresses
+multithreading.
+Tarditi et al [20] describe an ML to C compiler that supports
+accurate garbage collection. However, this compiler
+works by emulating a virtual machine, rather than using
+the normal C calling convention; this has the drawbacks
+mentioned in the introduction.
+The Glasgow Haskell compiler [15] has accurate garbage
+collection and can compile via GNU C; but it relies on highly
+non-portable techniques that involve munging the generated
+assembler file after the GNU C back-end has finished with
+it. The success of such techniques relies on continued cooperation
+from the back-end compiler.
+C- [16], a portable assembly language that supports
+garbage collection, is another approach that relies on co-operation
+from the back-end compiler.
+a variety of di#erent
+garbage collection techniques, such as mark-sweep collection
+and copying collection, but does not address the issue of how
+to locate roots on the stack.
+6. CONCLUSIONS
+We have presented a scheme for performing accurate
+garbage collection in an uncooperative environment, by a
+simple transformation on the code passed to the uncooperative
+compiler back-end framework. We have implemented
+this scheme in the Mercury compiler, and measured its per-
+formance, which is similar to that of the Boehm (at al)
+conservative collector [4] on most of our benchmarks, even
+though there are several important optimizations that we
+have not yet implemented.
+We have also described how this scheme can be extended
+to handle multithreaded applications.
+The source code for our system is freely available on
+the web at <http://www.cs.mu.oz.au/mercury/download/
+rotd.html>.
+
+Acknowledgments
+
+I would like to thank Tom Lord, for his comments on the
+gcc mailing list about the advantages of precise collection;
+Zoltan Somogyi, Andreas Rossberg, Tyson Dowd, Ralph
+Becket, Jon Dell'Oro and the anonymous referees for their
+comments on earlier drafts of this paper; and Microsoft and
+the Australian Research Council, for their financial support.
+7.
+
+
+
+--R
+
+
+Simple garbage-collector-safety
+A proposal for garbage-collector-safe C compilation
+Garbage collection in an uncooperative environment.
+Proper tail recursion and space e
+Mail to the GCC mailing list
+David Je
+A copying collector for C
+Dynamic storage reclamation in C
+
+
+A machine-independent debugger
+Compiling Mercury to high-level C code
+Compiling logic programs to C using GNU C as a portable assembler.
+Peyton Jones
+
+
+The execution algorithm of Mercury
+Sather revisited: A high-performance free alternative to C++
+assembly required: Compiling Standard ML to C.
+Uniprocessor garbage collection techniques.
+
+--TR
+Garbage collection in an uncooperative environment
+Tag-free garbage collection for strongly typed programming languages
+Simple garbage-collector-safety
+A machine-independent debugger
+Proper tail recursion and space efficiency
+Uniprocessor Garbage Collection Techniques
+Run Time Type Information in Mercury
+C--
+Compiling Mercury to High-Level C Code
+DYNAMIC STORAGE RECLAMATION IN C++ (M.S. Thesis)
+
+--CTR
+Martin Hirzel , Amer Diwan , Johannes Henkel, On the usefulness of type and liveness accuracy for garbage collection and leak detection, ACM Transactions on Programming Languages and Systems (TOPLAS), v.24 n.6, p.593-624, November 2002
+Andreas Bauer, Creating a portable programming language using open source software, Proceedings of the USENIX Annual Technical Conference 2004 on USENIX Annual Technical Conference, p.40-40, June 27-July 02, 2004, Boston, MA
