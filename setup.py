@@ -4,7 +4,7 @@ import sys
 from setuptools import setup,find_packages
 from setuptools.extension import Extension
     
-setup(name='rakun',
+setup(name='mrakun',
       version='0.2',
       description="Rank-based unsupervised keyword detection via metavertex aggregation",
       url='http://github.com/skblaz/rakun',

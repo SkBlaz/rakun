@@ -11,7 +11,7 @@ Key ideas of RaKUn:
 Packed as a Python library, it can be installed via:
 
 ```
-pip3 install rakun
+pip3 install mrakun
 ```
 
 or
@@ -37,7 +37,7 @@ python3 -m pytest tests/test_core_functionality.py
 Using RaKUn is simple! Simply call the main detector method with optional arguments (as described in the paper)
 
 ```python
-from rakun import *
+from mrakun import *
 
 ## setup parameters
 num_keywords = 10

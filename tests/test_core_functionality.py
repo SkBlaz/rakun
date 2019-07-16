@@ -1,4 +1,4 @@
-from rakun import *
+from mrakun import *
 
 def test_basic_keywords():
 

@@ -1,4 +1,4 @@
-from rakun import *
+from mrakun import *
 ## setup parameters
 num_keywords = 10
 lemmatizer = WordNetLemmatizer() ## any lemmatizer can be used instead of nltk default
