@@ -5,7 +5,7 @@ Key ideas of RaKUn:
 2. Prune graphs based on token similarity (meta vertex introduction)
 3. Rank nodes -> keywords
 
-[paper]: https://arxiv.org/abs/1907.06458
+[paper] (https://arxiv.org/abs/1907.06458)
 
 ## The core functionality
 Packed as a Python library, it can be installed via:
