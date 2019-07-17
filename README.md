@@ -1,4 +1,6 @@
 # RaKUn algorithm
+
+![RaKUn logo](example_images/rakun.png)
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
 1. Transform texts to graphs
@@ -87,6 +89,9 @@ The code for reproducing sota results on datasets (in ./datasets/) is given in
 ```
 examples/validation.py
 ```
+
+## Acknowledgements
+The logo was created by Luka Skrlj
 
 # Citation
 If you use this, please cite:
