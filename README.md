@@ -1,6 +1,6 @@
 # RaKUn algorithm
 
-![RaKUn logo](example_images/rakun.png)
+<img src="example_images/rakun.png" width="300" height="300">
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
 1. Transform texts to graphs
