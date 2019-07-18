@@ -39,56 +39,41 @@ python3 -m pytest tests/test_core_functionality.py
 Using RaKUn is simple! Simply call the main detector method with optional arguments (as described in the paper)
 
 ```python
-from mrakun import *
+from mrakun import RakunDetector
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
 
-## setup parameters
-num_keywords = 10
-lemmatizer = WordNetLemmatizer() ## any lemmatizer can be used instead of nltk default
-bigram_count_threshold = 5 ## useful if n-gram keywords are looked for
-stopwords = set(stpw.words('english')) # default english stopwords
-word_length_difference = 3
-edit_distance_threshold = 2
-num_tokens = [1] ## this can also be [[1,2]] and [[1,2,3]] for bi and three gram keywords. (or just [2] or [3] for that matter)
+hyperparameters = {"edit_distance_threshold":3,
+                   "num_keywords" : 10,
+                   "pair_diff_length":2,
+                   "stopwords" : stopwords.words('english'),
+                   "bigram_count_threshold":2,
+                   "lemmatizer" : WordNetLemmatizer(),
+                   "num_tokens":[1]}
 
-## call the detector
-keywords, _ = find_rakun_keywords("datasets/wiki20/docsutf8/20782.txt",
-                                           limit_num_keywords=num_keywords,
-                                           lemmatizer = lemmatizer,
-                                           double_weight_threshold=bigram_count_threshold,
-                                           stopwords=stopwords,
-                                           pair_diff_length = word_length_difference,
-                                           edit_distance_threshold = edit_distance_threshold,
-                                           num_tokens = num_tokens_grid)
+keyword_detector = RakunDetector(hyperparameters)
+example_data = "./datasets/wiki20/docsutf8/7183.txt"
+keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
+
+keyword_detector.verbose = False
+## do five fold CV on a given corpus (results for each fold need to be aggregated!)
+keyword_detector.validate_on_corpus("./datasets/Schutz2008")
 ```
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
 ```
-[('data', 0.13913581780729972), ('processor', 0.08008456081980497), ('declustering', 0.062096783723763815), ('polygon', 0.060648271010513816), ('problem', 0.04348463689528755), ('method', 0.041232505193712056), ('using', 0.03989587664860619), ('query', 0.039519671621550546), ('architecture', 0.034608065395788895), ('application', 0.03342422281475986)]
+[('system', 0.07816398111051845), ('knowledg', 0.07806649568191038), ('structur', 0.05978269674796454), ('diagnost', 0.041354892225684135), ('problem', 0.04052608382511414), ('domain', 0.031261954442705624), ('intellig', 0.030126748143180067), ('medic', 0.026760043407613995), ('caus', 0.02639800122506548), ('method', 0.026292347276388087)]
 ```
 
-while the second one is the plot of the keyword graph, which is only computed if visualize_network_keywords=True is passed.
+And the plot of the keyword graph:
 
 ```python
-keywords, visualization = find_rakun_keywords("datasets/wiki20/docsutf8/20782.txt",
-                                           limit_num_keywords=num_keywords,
-                                           lemmatizer = lemmatizer,
-                                           double_weight_threshold=bigram_count_threshold,
-                                           stopwords=stopwords,
-                                           pair_diff_length = word_length_difference,
-                                           edit_distance_threshold = edit_distance_threshold,
-                                           num_tokens = num_tokens_grid)
-plt.show()					 
-
+## once the find_keywords() was invoked
+keyword_detector.visualize_network()
 ```
 
 ![Keyword graph](example_images/keywords.png)
-
-### reproducing sota results
-The code for reproducing sota results on datasets (in ./datasets/) is given in
-```
-examples/validation.py
-```
 
 ## Acknowledgements
 The logo was created by Luka Skrlj
