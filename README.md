@@ -1,5 +1,16 @@
 # RaKUn algorithm
 
+```
+@misc{krlj2019language,
+    title={Language comparison via network topology},
+    author={Blaž Škrlj and Senja Pollak},
+    year={2019},
+    eprint={1907.06944},
+    archivePrefix={arXiv},
+    primaryClass={cs.CL}
+}
+```
+
 <img src="example_images/rakun.png" width="300" height="300">
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
