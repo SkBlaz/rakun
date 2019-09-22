@@ -1,13 +1,11 @@
 # RaKUn algorithm
 
 ```
-@misc{krlj2019language,
-    title={Language comparison via network topology},
-    author={Blaž Škrlj and Senja Pollak},
-    year={2019},
-    eprint={1907.06944},
-    archivePrefix={arXiv},
-    primaryClass={cs.CL}
+@article{vskrlj2019rakun,
+  title={RaKUn: Rank-based Keyword extraction via Unsupervised learning and Meta vertex aggregation},
+  author={{\v{S}}krlj, Bla{\v{z}} and Repar, Andra{\v{z}} and Pollak, Senja},
+  journal={arXiv preprint arXiv:1907.06458},
+  year={2019}
 }
 ```
 
