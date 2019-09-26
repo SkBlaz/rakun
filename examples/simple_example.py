@@ -2,14 +2,14 @@ from mrakun import RakunDetector
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-hyperparameters = {"distance_threshold":0.2,
-                   "distance_method": "fasttext",
-                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
+hyperparameters = {"distance_threshold":3,
+                   "distance_method": "editdistance",
+#                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
                    "num_keywords" : 10,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
-                   "lemmatizer" : WordNetLemmatizer(),
+#                   "lemmatizer" : WordNetLemmatizer(),
                    "num_tokens":[1]}
 
 keyword_detector = RakunDetector(hyperparameters)

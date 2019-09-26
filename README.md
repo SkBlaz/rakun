@@ -49,30 +49,28 @@ Using RaKUn is simple! Simply call the main detector method with optional argume
 
 ```python
 from mrakun import RakunDetector
-from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
 hyperparameters = {"distance_threshold":3,
+                   "distance_method": "editdistance",
                    "num_keywords" : 10,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
-                   "lemmatizer" : WordNetLemmatizer(),
                    "num_tokens":[1]}
 
 keyword_detector = RakunDetector(hyperparameters)
-example_data = "./datasets/wiki20/docsutf8/7183.txt"
+example_data = "../datasets/wiki20/docsutf8/7183.txt"
 keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
 
-keyword_detector.verbose = False
-## do five fold CV on a given corpus (results for each fold need to be aggregated!)
-keyword_detector.validate_on_corpus("./datasets/Schutz2008")
 ```
+
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
+
 ```
-[('system', 0.07816398111051845), ('knowledg', 0.07806649568191038), ('structur', 0.05978269674796454), ('diagnost', 0.041354892225684135), ('problem', 0.04052608382511414), ('domain', 0.031261954442705624), ('intellig', 0.030126748143180067), ('medic', 0.026760043407613995), ('caus', 0.02639800122506548), ('method', 0.026292347276388087)]
+[('knowledge', 0.10455515581322751), ('systems', 0.04391602905699121), ('diagnosis', 0.03365111283602547), ('model', 0.032794335479257475), ('domain', 0.030026613605046895), ('reasoning', 0.029786632918015594), ('1989', 0.028710284953912483), ('expert', 0.028633878151919565), ('level', 0.028048608759583968), ('methods', 0.0251377672342043)]
 ```
 
 And the plot of the keyword graph:
