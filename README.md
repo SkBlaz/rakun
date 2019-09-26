@@ -35,7 +35,7 @@ To test whether the core functionality is ok, you can run
 python3 -m pytest tests/test_core_functionality.py
 ```
 
-## Usage
+## Usage with editdistance
 Using RaKUn is simple! Simply call the main detector method with optional arguments (as described in the paper)
 
 ```python
@@ -43,7 +43,7 @@ from mrakun import RakunDetector
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-hyperparameters = {"edit_distance_threshold":3,
+hyperparameters = {"distance_threshold":3,
                    "num_keywords" : 10,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
@@ -74,6 +74,49 @@ keyword_detector.visualize_network()
 ```
 
 ![Keyword graph](example_images/keywords.png)
+
+## Usage with fasttext
+Using RaKUn with fasttext requires pretrained emmbeding model. Download .bin file from https://github.com/facebookresearch/fastText/blob/master/docs/pretrained-vectors.md for chosen language and save it.
+
+```python
+from mrakun import RakunDetector
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
+
+hyperparameters = {"distance_threshold":0.2,
+                   "distance_method": "fasttext",
+                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin', #change path accordingly
+                   "num_keywords" : 10,
+                   "pair_diff_length":2,
+                   "stopwords" : stopwords.words('english'),
+                   "bigram_count_threshold":2,
+                   "lemmatizer" : WordNetLemmatizer(),
+                   "num_tokens":[1]}
+
+keyword_detector = RakunDetector(hyperparameters)
+example_data = "./datasets/wiki20/docsutf8/7183.txt"
+keywords = keyword_detector.find_keywords(example_data)
+print(keywords)
+
+keyword_detector.verbose = False
+## do five fold CV on a given corpus (results for each fold need to be aggregated!)
+keyword_detector.validate_on_corpus("./datasets/Schutz2008")
+```
+Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
+
+```
+[('challeng', 0.0020178656087032464), ('structur', 0.0004547496070065125), ('medic', 0.00036679392170072613), ('incorpor', 0.0003508246625246401), ('experienc', 0.0003218803802679841), ('achiev', 0.00028520098809791154), ('knowledg', 0.000272475484691968), ('generat', 0.0002607480599845298), ('infer', 0.0002216982309055069), ('captur', 0.00012725503405943558)]
+```
+
+And the plot of the keyword graph:
+
+```python
+## once the find_keywords() was invoked
+keyword_detector.visualize_network()
+```
+
+![Keyword graph](example_images/keywords2.png)
+
 
 ## Acknowledgements
 The logo was created by Luka Skrlj

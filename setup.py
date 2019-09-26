@@ -5,7 +5,7 @@ from setuptools import setup,find_packages
 from setuptools.extension import Extension
     
 setup(name='mrakun',
-      version='0.23',
+      version='0.3',
       description="Rank-based unsupervised keyword detection via metavertex aggregation",
       url='http://github.com/skblaz/mrakun',
       author='Blaž Škrlj',

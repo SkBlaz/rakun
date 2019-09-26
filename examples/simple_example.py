@@ -2,7 +2,9 @@ from mrakun import RakunDetector
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
-hyperparameters = {"edit_distance_threshold":3,
+hyperparameters = {"distance_threshold":0.2,
+                   "distance_method": "fasttext",
+                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
                    "num_keywords" : 10,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),

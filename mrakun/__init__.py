@@ -1,7 +1,9 @@
-## The RaKUn algorithm, Skrlj, Repar and Pollak 2019
+# The RaKUn algorithm, Skrlj, Repar and Pollak 2019
+
 """
 RaKUn is an algorithm for graph-absed keyword extraction.
 """
+
 import itertools
 import time
 import nltk
@@ -10,6 +12,7 @@ from nltk.corpus import stopwords as stpw
 from nltk import word_tokenize
 from nltk.stem.porter import *
 import operator
+from collections import defaultdict
 import networkx as nx
 import numpy as np
 import glob
@@ -33,22 +36,30 @@ class RakunDetector:
 
     def __init__(self, hyperparameters, verbose=True):
 
+        self.distance_method = hyperparameters["distance_method"]
         self.hyperparameters = hyperparameters
         self.verbose = True
         self.keyword_graph = None
+        self.inverse_lemmatizer_mapping = {}
+
+        if self.distance_method == "fasttext":
+            from gensim.models import fasttext
+            self.pretrained_embedding_path = hyperparameters['pretrained_embedding_path']
+            self.model = fasttext.load_facebook_vectors(self.pretrained_embedding_path)
+
         if self.verbose:
             logging.info("Initiated a keyword detector instance.")
 
         self.default_visualization_parameters = {"top_n":10,"max_node_size":8,"min_node_size":2,"label_font_size":10,"text_color":"red","num_layout_iterations":50,"edge_width":0.08,"alpha_channel":0.5}
-        
+
     def visualize_network(self, visualization_parameters=None):
 
         if not visualization_parameters:
-            visualization_parameters = self.default_visualization_parameters    
-        
+            visualization_parameters = self.default_visualization_parameters
+
         if self.verbose:
             logging.info(nx.info(self.keyword_graph))
-            
+
         centrality = np.array([self.centrality[node] for node in self.keyword_graph.nodes()])
         top_10 = list(centrality.argsort()[-visualization_parameters['top_n']:][::-1])
         node_list = set(x for enx,x in enumerate(self.keyword_graph.nodes()) if enx in top_10)
@@ -71,70 +82,80 @@ class RakunDetector:
                       legend=False)
         plt.show()
 
-    def generate_hypervertex(self, G, nodes, new_node, attr_dict=None):
-
-        '''
-        This node generates hypervertices.
-        '''
-
-        G.add_node(new_node,type="hyper")
-        for n1,n2,data in list(G.edges(data=True)):
-            if n1 in nodes:
-                G.add_edge(new_node,n2,**data)
-            elif n2 in nodes:
-                G.add_edge(n1,new_node,**data)
-
-        for n in nodes: # remove the merged nodes
-            if n in G.nodes():
-                G.remove_node(n)
-
-    def corpus_graph(self, language_file,limit_range=3000000,verbose=False,lemmatizer=None,stopwords=None, min_char = 3,stemmer=None):
+    def corpus_graph(self, language_file,limit_range=3000000,verbose=False,lemmatizer=None,stopwords=None, min_char = 3,stemmer=None, input_type = "file"):
 
         G = nx.DiGraph()
         ctx = 0
         reps = False
         dictionary_with_counts_of_pairs = {}
-        with open(language_file) as lf:
-            for line in lf:
-                stop = list(string.punctuation)
-                line = line.strip()
-                line = [i for i in word_tokenize(line.lower()) if i not in stop]
 
-                if not stopwords is None:
-                    line = [w for w in line if not w in stopwords]
+        def process_line(line):
 
-                if not stemmer is None:
-                    line = [stemmer.stem(w) for w in line]
+            nonlocal G
+            nonlocal ctx
+            nonlocal reps
+            nonlocal dictionary_with_counts_of_pairs
 
-                if not lemmatizer is None:
-                    line = [lemmatizer.lemmatize(x) for x in line]
+            stop = list(string.punctuation)
+            line = line.strip()
+            line = [i for i in word_tokenize(line.lower()) if i not in stop]
 
-                line = [x for x in line if len(x) > min_char]
-                if len(line) > 1:
-                    ctx+=1
-                    if ctx % 15000 == 0:
-                        logging.info("Processed {} sentences.".format(ctx))
-                    if ctx % limit_range == 0:
+            if not stopwords is None:
+                line = [w for w in line if not w in stopwords]
+
+            if not stemmer is None:
+                line = [stemmer.stem(w) for w in line]
+
+            if not lemmatizer is None:
+                new_line = []
+                for x in line:
+                    lemma = lemmatizer.lemmatize(x)
+                    if not(lemma in self.inverse_lemmatizer_mapping):
+                        self.inverse_lemmatizer_mapping[lemma] = set()
+                    self.inverse_lemmatizer_mapping[lemma].add(x)
+                    new_line.append(lemma)
+                line = new_line
+
+            line = [x for x in line if len(x) > min_char]
+            if len(line) > 1:
+                ctx+=1
+                if ctx % 15000 == 0:
+                    logging.info("Processed {} sentences.".format(ctx))
+                if ctx % limit_range == 0:
+                    return True
+                for enx, el in enumerate(line):
+                    if enx > 0:
+                        edge_directed = (line[enx-1],el)
+                        if edge_directed[0] != edge_directed[1]:
+                            G.add_edge(edge_directed[0], edge_directed[1])
+                        else:
+                            edge_directed = None
+                    if enx < len(line)-1:
+                        edge_directed = (el,line[enx+1])
+                        if edge_directed[0] != edge_directed[1]:
+                            G.add_edge(edge_directed[0],edge_directed[1])
+                        else:
+                            edge_directed = None
+                    if edge_directed:
+                        if edge_directed in dictionary_with_counts_of_pairs:
+                            dictionary_with_counts_of_pairs[edge_directed] += 1
+                            reps = True
+                        else:
+                            dictionary_with_counts_of_pairs[edge_directed] = 1
+            return False
+
+        if input_type == "file":
+            with open(language_file) as lf:
+                for line in lf:
+                    breakBool = process_line(line)
+                    if breakBool:
                         break
-                    for enx, el in enumerate(line):     
-                        if enx > 0:                            
-                            edge_directed = (line[enx-1],el)
-                            if edge_directed[0] != edge_directed[1]:
-                                G.add_edge(edge_directed[0], edge_directed[1])
-                            else:
-                                edge_directed = None
-                        if enx < len(line)-1:
-                            edge_directed = (el,line[enx+1])
-                            if edge_directed[0] != edge_directed[1]:
-                                G.add_edge(edge_directed[0],edge_directed[1])
-                            else:
-                                edge_directed = None
-                        if edge_directed:
-                            if edge_directed in dictionary_with_counts_of_pairs:
-                                dictionary_with_counts_of_pairs[edge_directed] += 1
-                                reps = True
-                            else:
-                                dictionary_with_counts_of_pairs[edge_directed] = 1
+        elif input_type == "text":
+            lines = language_file.split("\n")
+            for line in lines:
+                breakBool = process_line(line)
+                if breakBool:
+                    break
 
         ## assign edge properties.
         for edge in G.edges(data=True):
@@ -144,59 +165,109 @@ class RakunDetector:
                 raise (es)
         if verbose:
             print(nx.info(G))
+
         return (G,reps)
 
-    def hypervertex_prunning(self, graph,edit_threshold,pair_diff_max = 2):
+    def generate_hypervertices(self, G):
 
-        to_merge = []
-        stemmer =  nltk.stem.snowball.SnowballStemmer(language="english")
+        '''
+        This node generates hypervertices.
+        '''
+        
+        for k,v in self.to_merge.items():
+            for pair in v:
+                n0 = pair[0]
+                n1 = pair[1]
+                pair_0_cent = self.centrality[n0]
+                pair_1_cent = self.centrality[n1]
+                if pair_0_cent >= pair_1_cent:                    
+                    to_rewire_in = G.in_edges(n1, data = True)
+                    to_rewire_out = G.out_edges(n1, data = True)
+                    for neigh in to_rewire_in:
+                        e1 = (neigh[1], n0)
+                        G.add_edge(*e1, weight = neigh[2]['weight'])
+                    for neigh in to_rewire_out:
+                        e1 = (n0, neigh[0])
+                        G.add_edge(*e1, weight = neigh[2]['weight'])
+                    if n1 in G:
+                        G.remove_node(n1)
+                else:
+                    to_rewire_in = G.in_edges(n0, data = True)
+                    to_rewire_out = G.out_edges(n0, data = True)
+                    for neigh in to_rewire_in:
+                        e1 = (neigh[1], n1)
+                        G.add_edge(*e1, weight = neigh[2]['weight'])
+                    for neigh in to_rewire_out:
+                        e1 = (n1, neigh[0])
+                        G.add_edge(*e1, weight = neigh[2]['weight'])   
+                    if n0 in G:
+                        G.remove_node(n0)
+    
+    def hypervertex_prunning(self, graph, distance_threshold, pair_diff_max = 2, distance_method = "editdistance"):
+
+        self.to_merge = defaultdict(list)
+#        stemmer =  nltk.stem.snowball.SnowballStemmer(language="english")
+        
         for pair in itertools.combinations(graph.nodes(),2):
-            if np.abs(len(pair[0]) - len(pair[1])) < pair_diff_max:
-                ed = self.calculate_edit_distance(pair[0],pair[1])
-                if ed < edit_threshold:
-                    to_merge.append(pair)
-                    new_node = stemmer.stem(pair[0])
-                    self.generate_hypervertex(graph,pair, new_node)
+            abs_diff = np.abs(len(pair[0]) - len(pair[1]))
+            if abs_diff  < pair_diff_max:
+                if distance_method == "editdistance":
+                    ed = self.calculate_edit_distance(pair[0],pair[1])
+                    
+                elif (distance_method == "fasttext"):
+                    ed = self.calculate_embedding_distance(pair[0],pair[1])
 
-    def find_keywords(self, document):
+                if abs(ed) < distance_threshold:
+                    self.to_merge[(abs_diff, ed)].append(pair)
 
-#        limit_num_keywords = 10, lemmatizer=None,double_weight_threshold=2,stopwords = {"and"}, num_tokens = [1,2,3], edit_distance_threshold = 2, pair_diff_length = 2, visualize_network_keywords = False
+        self.generate_hypervertices(graph)
+
+    def find_keywords(self, document, input_type = "file", validate = False):
+
+        if validate == True:
+            distance_method = "editdistance"
+        else:
+            distance_method = self.distance_method
 
         limit_num_keywords = self.hyperparameters['num_keywords']
-        lemmatizer = self.hyperparameters['lemmatizer']
+        if "lemmatizer" in self.hyperparameters:
+            lemmatizer = self.hyperparameters['lemmatizer']
+        else:
+            lemmatizer = None
         double_weight_threshold = self.hyperparameters['bigram_count_threshold']
         stopwords = self.hyperparameters['stopwords']
         num_tokens = self.hyperparameters['num_tokens']
-        edit_distance_threshold = self.hyperparameters['edit_distance_threshold']
+        distance_threshold = self.hyperparameters['distance_threshold']
         pair_diff_length = self.hyperparameters['pair_diff_length']
-        
-        
+
         all_terms = set()
         klens = {}
-        
-        weighted_graph,reps = self.corpus_graph(document,lemmatizer=lemmatizer,stopwords=stopwords)
+
+        weighted_graph,reps = self.corpus_graph(document, lemmatizer=lemmatizer,stopwords=stopwords, input_type=input_type)
         nn = len(list(weighted_graph.nodes()))
+
         
-        if edit_distance_threshold > 0:
-            self.hypervertex_prunning(weighted_graph, edit_distance_threshold, pair_diff_max = pair_diff_length)
-        
+        if distance_threshold > 0:
+            self.centrality = nx.load_centrality(weighted_graph)
+            self.hypervertex_prunning(weighted_graph, distance_threshold, pair_diff_max = pair_diff_length, distance_method = distance_method)
+
         nn2 = len(list(weighted_graph.nodes()))
 
         self.initial_tokens = nn
         self.pruned_tokens = nn2
-        
+
         if self.verbose:
             logging.info("Number of nodes reduced from {} to {}".format(nn,nn2))
-            
+
         pgx = nx.load_centrality(weighted_graph)
 
         ## assign to global vars
         self.keyword_graph = weighted_graph
         self.centrality = pgx
-        
+
         keywords_with_scores = sorted(pgx.items(), key=operator.itemgetter(1),reverse=True)
         kw_map = dict(keywords_with_scores)
-        
+
         if reps and 2 in num_tokens or 3 in num_tokens:
 
             higher_order_1 = []
@@ -210,10 +281,10 @@ class RakunDetector:
                             frequent_pairs.append(edge[0:2])
 
             ## Traverse the frequent pairs
-            for pair in frequent_pairs:        
+            for pair in frequent_pairs:
                 w1 = pair[0]
-                w2 = pair[1]        
-                if w1 in kw_map and w2 in kw_map:                               
+                w2 = pair[1]
+                if w1 in kw_map and w2 in kw_map:
                     score = np.mean([kw_map[w1],kw_map[w2]])
                     if not w1+" "+w2 in all_terms:
                         higher_order_1.append((w1+" "+w2,score))
@@ -243,7 +314,7 @@ class RakunDetector:
             higher_order_1 = []
             higher_order_2 = []
 
-        total_keywords = []    
+        total_keywords = []
         if 1 in num_tokens:
             total_keywords += keywords_with_scores
         if 2 in num_tokens:
@@ -251,21 +322,28 @@ class RakunDetector:
         if 3 in num_tokens:
             total_keywords += higher_order_2
 
-        total_kws = sorted(set(total_keywords), key=operator.itemgetter(1),reverse=True)[0:limit_num_keywords]    
+        total_kws = sorted(set(total_keywords), key=operator.itemgetter(1),reverse=True)[0:limit_num_keywords]
 
         return total_kws
 
     def calculate_edit_distance(self, key1, key2):
         return editdistance.eval(key1,key2)
 
+    def calculate_embedding_distance(self, key1, key2):
+        return self.model.wv.similarity(key1, key2)
+
     def compare2gold (self, filename, keys_directory, keywords, fuzzy=False, fuzzy_threshold = 0.8,stemming=True,language = "en"):
+
+        """
+        This method compares a set of keywords to gold standard corpus.
+        """
 
         f = ".".join(filename.split('.')[:-1])
         try:
             f = f.replace(".txt","")
         except:
             pass
-        if language == "en":            
+        if language == "en":
             stemmer = nltk.stem.snowball.SnowballStemmer(language="english")
         goldKeys = []
         with open(keys_directory+f+'.key', 'r') as f:
@@ -321,7 +399,7 @@ class RakunDetector:
 
             for enx, el in enumerate(parts):
                 if enx != j:
-                    for px in el:                    
+                    for px in el:
                         train_corpora.append(px)
                 else:
                     for px in el:
@@ -331,7 +409,7 @@ class RakunDetector:
             totalGsize = 0
             total_ks = 0
             for filename in test_corpora:
-                keywords = self.find_keywords(directory+'/docsutf8/'+filename)
+                keywords = self.find_keywords(directory+'/docsutf8/'+filename, validate = True)
 
                 count, goldSize, matches = self.compare2gold(filename, directory+'/keys/', keywords)
                 if self.verbose:
@@ -342,37 +420,42 @@ class RakunDetector:
                     goldSize = self.hyperparameters['num_keywords']
                 totalGsize += goldSize
                 total_ks += self.hyperparameters['num_keywords']
-                
+
                 precision = float(counts)/total_ks
                 recall = float(counts)/totalGsize
-                if (precision + recall) > 0:                    
+                if (precision + recall) > 0:
                     F1 = 2* (precision * recall)/(precision + recall)
                     if self.verbose:
                         logging.info("Intermediary F1: {}".format(F1))
                 else:
-                    F1 = 0    
+                    F1 = 0
                 all_f_scores.append(F1)
-                
-            optimum_setup = [precision,recall,F1,directory,self.hyperparameters['pair_diff_length'],self.hyperparameters['edit_distance_threshold'],self.hyperparameters['bigram_count_threshold'],self.hyperparameters['num_tokens']]
+
+            optimum_setup = [precision,recall,F1,directory,self.hyperparameters['pair_diff_length'],self.hyperparameters['distance_threshold'],self.hyperparameters['bigram_count_threshold'],self.hyperparameters['num_tokens']]
             print("RESULT_LINE"+"\t"+"\t".join([str(x) for x in optimum_setup]))
 
 if __name__ == "__main__":
 
     from nltk.stem import WordNetLemmatizer
     from nltk.corpus import stopwords
-    
-    hyperparameters = {"edit_distance_threshold":3,
-                       "num_keywords" : 10,
-                       "pair_diff_length":2,
-                       "stopwords" : stopwords.words('english'),
+
+    hyperparameters = {"distance_threshold":3,
+                   "distance_method": "editdistance",
+                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
+                   "num_keywords" : 10,
+                   "pair_diff_length":2,
+                   "stopwords" : stopwords.words('english'),
                        "bigram_count_threshold":2,
-                       "lemmatizer" : WordNetLemmatizer(),
-                       "num_tokens":[1]}
-    
+#                   "lemmatizer" : WordNetLemmatizer(),
+                   "num_tokens":[1]}
+
     keyword_detector = RakunDetector(hyperparameters)
-    example_data = "../datasets/www/docsutf8/100585.txt"
+    example_data = "../datasets/wiki20/docsutf8/7183.txt"
     keywords = keyword_detector.find_keywords(example_data)
     print(keywords)
-    
     keyword_detector.visualize_network()
-    keyword_detector.validate_on_corpus("../datasets/www")
+    keyword_detector.verbose = False
+    keyword_detector.validate_on_corpus("../datasets/Schutz2008")
+
+#    keyword_detector.visualize_network()
+#    keyword_detector.validate_on_corpus("../datasets/www")
