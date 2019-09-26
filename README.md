@@ -1,5 +1,14 @@
 # RaKUn algorithm
 
+```
+@article{vskrlj2019rakun,
+  title={RaKUn: Rank-based Keyword extraction via Unsupervised learning and Meta vertex aggregation},
+  author={{\v{S}}krlj, Bla{\v{z}} and Repar, Andra{\v{z}} and Pollak, Senja},
+  journal={arXiv preprint arXiv:1907.06458},
+  year={2019}
+}
+```
+
 <img src="example_images/rakun.png" width="300" height="300">
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
