@@ -17,5 +17,3 @@ example_data = "../datasets/wiki20/docsutf8/7183.txt"
 keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
 keyword_detector.visualize_network()
-keyword_detector.verbose = False
-keyword_detector.validate_on_corpus("../datasets/Schutz2008")
