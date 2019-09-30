@@ -1,14 +1,5 @@
 # RaKUn algorithm
 
-```
-@article{vskrlj2019rakun,
-  title={RaKUn: Rank-based Keyword extraction via Unsupervised learning and Meta vertex aggregation},
-  author={{\v{S}}krlj, Bla{\v{z}} and Repar, Andra{\v{z}} and Pollak, Senja},
-  journal={arXiv preprint arXiv:1907.06458},
-  year={2019}
-}
-```
-
 <img src="example_images/rakun.png" width="300" height="300">
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
@@ -49,28 +40,31 @@ Using RaKUn is simple! Simply call the main detector method with optional argume
 
 ```python
 from mrakun import RakunDetector
+from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
 hyperparameters = {"distance_threshold":3,
-                   "distance_method": "editdistance",
                    "num_keywords" : 10,
+                   "distance_method": "editdistance",
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
+                   "lemmatizer" : WordNetLemmatizer(),
                    "num_tokens":[1]}
 
 keyword_detector = RakunDetector(hyperparameters)
-example_data = "../datasets/wiki20/docsutf8/7183.txt"
+example_data = "./datasets/wiki20/docsutf8/7183.txt"
 keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
 
+keyword_detector.verbose = False
+## do five fold CV on a given corpus (results for each fold need to be aggregated!)
+keyword_detector.validate_on_corpus("./datasets/Schutz2008")
 ```
-
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
-
 ```
-[('knowledge', 0.10455515581322751), ('systems', 0.04391602905699121), ('diagnosis', 0.03365111283602547), ('model', 0.032794335479257475), ('domain', 0.030026613605046895), ('reasoning', 0.029786632918015594), ('1989', 0.028710284953912483), ('expert', 0.028633878151919565), ('level', 0.028048608759583968), ('methods', 0.0251377672342043)]
+[('knowledge', 0.09681271338743186), ('system', 0.07564796507791872), ('level', 0.05109912821797258), ('model', 0.04258209551663402), ('domain', 0.04148756282878477), ('task', 0.03965601439030798), ('structure', 0.03819960122342131), ('1989', 0.03287462707574183), ('diagnosis', 0.03236736673125384), ('method', 0.030969444684564095)]
 ```
 
 And the plot of the keyword graph:
@@ -112,7 +106,7 @@ keyword_detector.validate_on_corpus("./datasets/Schutz2008")
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
 ```
-[('challeng', 0.0020178656087032464), ('structur', 0.0004547496070065125), ('medic', 0.00036679392170072613), ('incorpor', 0.0003508246625246401), ('experienc', 0.0003218803802679841), ('achiev', 0.00028520098809791154), ('knowledg', 0.000272475484691968), ('generat', 0.0002607480599845298), ('infer', 0.0002216982309055069), ('captur', 0.00012725503405943558)]
+[('structure', 0.013043478260869565), ('model', 0.010507246376811594), ('level', 0.009420289855072464), ('knowledge', 0.006400966183574879), ('system', 0.005595813204508856), ('application', 0.004589371980676328), ('inference', 0.002657004830917874), ('reasoning', 0.002536231884057971), ('abstraction', 0.0020933977455716585), ('problem', 0.0020933977455716585)]
 ```
 
 And the plot of the keyword graph:

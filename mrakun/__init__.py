@@ -38,7 +38,7 @@ class RakunDetector:
 
         self.distance_method = hyperparameters["distance_method"]
         self.hyperparameters = hyperparameters
-        self.verbose = True
+        self.verbose = verbose
         self.keyword_graph = None
         self.inverse_lemmatizer_mapping = {}
 
@@ -82,7 +82,7 @@ class RakunDetector:
                       legend=False)
         plt.show()
 
-    def corpus_graph(self, language_file,limit_range=3000000,verbose=False,lemmatizer=None,stopwords=None, min_char = 3,stemmer=None, input_type = "file"):
+    def corpus_graph(self, language_file,limit_range=3000000,verbose=False,lemmatizer=None,stopwords=None, min_char = 4,stemmer=None, input_type = "file"):
 
         G = nx.DiGraph()
         ctx = 0
@@ -150,6 +150,7 @@ class RakunDetector:
                     breakBool = process_line(line)
                     if breakBool:
                         break
+                    
         elif input_type == "text":
             lines = language_file.split("\n")
             for line in lines:
@@ -199,7 +200,7 @@ class RakunDetector:
                         G.add_edge(*e1, weight = neigh[2]['weight'])
                     for neigh in to_rewire_out:
                         e1 = (n1, neigh[0])
-                        G.add_edge(*e1, weight = neigh[2]['weight'])   
+                        G.add_edge(*e1, weight = neigh[2]['weight'])
                     if n0 in G:
                         G.remove_node(n0)
     
@@ -332,122 +333,20 @@ class RakunDetector:
     def calculate_embedding_distance(self, key1, key2):
         return self.model.wv.similarity(key1, key2)
 
-    def compare2gold (self, filename, keys_directory, keywords, fuzzy=False, fuzzy_threshold = 0.8,stemming=True,language = "en"):
-
-        """
-        This method compares a set of keywords to gold standard corpus.
-        """
-
-        f = ".".join(filename.split('.')[:-1])
-        try:
-            f = f.replace(".txt","")
-        except:
-            pass
-        if language == "en":
-            stemmer = nltk.stem.snowball.SnowballStemmer(language="english")
-        goldKeys = []
-        with open(keys_directory+f+'.key', 'r') as f:
-            for line in f:
-                goldKeys.append(stemmer.stem(line.strip()))
-        c = 0
-        matches = []
-        if fuzzy == False:
-            for el in keywords:
-                stemmed_cand = stemmer.stem(el[0])
-                if stemmed_cand in goldKeys:
-                    matches.append(el[0])
-                    c = c + 1
-        else:
-            for el in keywords:
-                for gl in goldKeys:
-                    ed = self.calculate_edit_distance(el[0], gl)
-                    if ed > fuzzy_threshold:
-                        matches.append(el[0]+'\t'+gl+'\n')
-                        c = c + 1
-                        break
-
-        return c, len(goldKeys), matches
-
-    def chunks(self, l, n):
-        """Yield successive n-sized chunks from l."""
-        for i in range(0, len(l), n):
-            yield l[i:i + n]
-
-    def validate_on_corpus(self, directory, num_folds = 5):
-
-        import glob
-        import argparse
-
-        folds = num_folds
-        opt_prec = 0
-        optmimum_stup = []
-
-        totalPrec = 0
-        totalRcl = 0
-        totalGoldSize = 0
-        all_docs = os.listdir(directory+'/docsutf8')
-        part_size = int(len(all_docs)/folds)
-        chunker = self.chunks(all_docs,part_size)
-        parts = [x for x in chunker][0:folds]
-
-        ## use train to get the hyperparams.
-        all_f_scores = []
-        for j in range(len(parts)):
-            logging.info("Working with fold {}".format(j))
-            train_corpora = []
-            test_corpora = []
-
-            for enx, el in enumerate(parts):
-                if enx != j:
-                    for px in el:
-                        train_corpora.append(px)
-                else:
-                    for px in el:
-                        test_corpora.append(px)
-
-            counts = 0
-            totalGsize = 0
-            total_ks = 0
-            for filename in test_corpora:
-                keywords = self.find_keywords(directory+'/docsutf8/'+filename, validate = True)
-
-                count, goldSize, matches = self.compare2gold(filename, directory+'/keys/', keywords)
-                if self.verbose:
-                    logging.info(keywords)
-
-                counts += count
-                if goldSize > self.hyperparameters['num_keywords']:
-                    goldSize = self.hyperparameters['num_keywords']
-                totalGsize += goldSize
-                total_ks += self.hyperparameters['num_keywords']
-
-                precision = float(counts)/total_ks
-                recall = float(counts)/totalGsize
-                if (precision + recall) > 0:
-                    F1 = 2* (precision * recall)/(precision + recall)
-                    if self.verbose:
-                        logging.info("Intermediary F1: {}".format(F1))
-                else:
-                    F1 = 0
-                all_f_scores.append(F1)
-
-            optimum_setup = [precision,recall,F1,directory,self.hyperparameters['pair_diff_length'],self.hyperparameters['distance_threshold'],self.hyperparameters['bigram_count_threshold'],self.hyperparameters['num_tokens']]
-            print("RESULT_LINE"+"\t"+"\t".join([str(x) for x in optimum_setup]))
-
 if __name__ == "__main__":
 
     from nltk.stem import WordNetLemmatizer
     from nltk.corpus import stopwords
 
-    hyperparameters = {"distance_threshold":3,
+    hyperparameters = {"distance_threshold":4,
                    "distance_method": "editdistance",
                    "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
-                   "num_keywords" : 10,
-                   "pair_diff_length":2,
+                   "num_keywords" : 20,
+                   "pair_diff_length":3,
                    "stopwords" : stopwords.words('english'),
                        "bigram_count_threshold":2,
 #                   "lemmatizer" : WordNetLemmatizer(),
-                   "num_tokens":[1]}
+                   "num_tokens":[1,2]}
 
     keyword_detector = RakunDetector(hyperparameters)
     example_data = "../datasets/wiki20/docsutf8/7183.txt"
