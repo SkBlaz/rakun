@@ -4,12 +4,12 @@ from nltk.corpus import stopwords
 
 def test_basic_keywords():
 
-    hyperparameters = {"edit_distance_threshold":3,
+    hyperparameters = {"distance_threshold":3,
                        "num_keywords" : 10,
                        "pair_diff_length":2,
+                       "distance_method" : "editdistance",
                        "stopwords" : stopwords.words('english'),
                        "bigram_count_threshold":2,
-                       "lemmatizer" : WordNetLemmatizer(),
                        "num_tokens":[1]}
 
     keyword_detector = RakunDetector(hyperparameters)
@@ -19,12 +19,12 @@ def test_basic_keywords():
 
 def test_basic_visualization():
 
-    hyperparameters = {"edit_distance_threshold":3,
+    hyperparameters = {"distance_threshold":3,
                        "num_keywords" : 10,
                        "pair_diff_length":2,
                        "stopwords" : stopwords.words('english'),
+                       "distance_method" : "editdistance",
                        "bigram_count_threshold":2,
-                       "lemmatizer" : WordNetLemmatizer(),
                        "num_tokens":[1]}
 
     keyword_detector = RakunDetector(hyperparameters)
