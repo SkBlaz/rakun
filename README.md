@@ -40,7 +40,6 @@ Using RaKUn is simple! Simply call the main detector method with optional argume
 
 ```python
 from mrakun import RakunDetector
-from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 
 hyperparameters = {"distance_threshold":3,
@@ -49,7 +48,6 @@ hyperparameters = {"distance_threshold":3,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
-                   "lemmatizer" : WordNetLemmatizer(),
                    "num_tokens":[1]}
 
 keyword_detector = RakunDetector(hyperparameters)
