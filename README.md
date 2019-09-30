@@ -56,8 +56,7 @@ keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
 
 keyword_detector.verbose = False
-## do five fold CV on a given corpus (results for each fold need to be aggregated!)
-keyword_detector.validate_on_corpus("./datasets/Schutz2008")
+
 ```
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
@@ -98,8 +97,6 @@ keywords = keyword_detector.find_keywords(example_data)
 print(keywords)
 
 keyword_detector.verbose = False
-## do five fold CV on a given corpus (results for each fold need to be aggregated!)
-keyword_detector.validate_on_corpus("./datasets/Schutz2008")
 ```
 Two results are returned. First one are keywords with corresponding centrality scores, e.g.,
 
