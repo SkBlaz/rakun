@@ -12,7 +12,9 @@ A note: RaKUn was re-evaluated using exact matching with stemming (at the time o
 
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
 
-[paper] (https://arxiv.org/abs/1907.06458)
+If you use code from this repo, please cite:
+[paper] (https://link.springer.com/chapter/10.1007/978-3-030-31372-2_26)
+
 
 ## The core functionality
 Packed as a Python library, it can be installed via:
@@ -152,4 +154,29 @@ keyword_detector.visualize_network()
 
 
 ## Acknowledgements
+<<<<<<< HEAD
 The logo was created by Luka Skrlj
+=======
+The logo was created by Luka Skrlj
+
+# Citation
+```
+@InProceedings{10.1007/978-3-030-31372-2_26,
+author="{\v{S}}krlj, Bla{\v{z}}
+and Repar, Andra{\v{z}}
+and Pollak, Senja",
+editor="Mart{\'i}n-Vide, Carlos
+and Purver, Matthew
+and Pollak, Senja",
+title="RaKUn: Rank-based Keyword Extraction via Unsupervised Learning and Meta Vertex Aggregation",
+booktitle="Statistical Language and Speech Processing",
+year="2019",
+publisher="Springer International Publishing",
+address="Cham",
+pages="311--323",
+abstract="Keyword extraction is used for summarizing the content of a document and supports efficient document retrieval, and is as such an indispensable part of modern text-based systems. We explore how load centrality, a graph-theoretic measure applied to graphs derived from a given text can be used to efficiently identify and rank keywords. Introducing meta vertices (aggregates of existing vertices) and systematic redundancy filters, the proposed method performs on par with state-of-the-art for the keyword extraction task on 14 diverse datasets. The proposed method is unsupervised, interpretable and can also be used for document visualization.",
+isbn="978-3-030-31372-2"
+}
+
+```
+>>>>>>> 49a7fae70ee2ac4af0f1b6d67ab1eeab36dc9ab2
