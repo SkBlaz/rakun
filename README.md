@@ -3,17 +3,12 @@
 <img src="example_images/rakun.png" width="300" height="300">
 This is the official repository of RaKUn. This keyword detection algorithm exploits graph-based language representations for efficient denoising and keyword detection.
 Key ideas of RaKUn:
+
 1. Transform texts to graphs
 2. Prune graphs based on token similarity (meta vertex introduction)
 3. Rank nodes -> keywords
 
-A note: RaKUn was re-evaluated using exact matching with stemming (at the time of writing, we were not able to reproduce exact evaluation of baselines). The comparable performance is given below:
-![perf](example_images/performance.png)
-
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
-
-If you use code from this repo, please cite:
-[paper] (https://link.springer.com/chapter/10.1007/978-3-030-31372-2_26)
 
 
 ## The core functionality
