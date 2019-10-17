@@ -154,9 +154,6 @@ keyword_detector.visualize_network()
 
 
 ## Acknowledgements
-<<<<<<< HEAD
-The logo was created by Luka Skrlj
-=======
 The logo was created by Luka Skrlj
 
 # Citation
@@ -179,4 +176,3 @@ isbn="978-3-030-31372-2"
 }
 
 ```
->>>>>>> 49a7fae70ee2ac4af0f1b6d67ab1eeab36dc9ab2
