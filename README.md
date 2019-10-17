@@ -7,6 +7,11 @@ Key ideas of RaKUn:
 2. Prune graphs based on token similarity (meta vertex introduction)
 3. Rank nodes -> keywords
 
+A note: RaKUn was re-evaluated using exact matching with stemming (at the time of writing, we were not able to reproduce exact evaluation of baselines). The comparable performance is given below:
+![perf](example_images/performance.png)
+
+This repo now also includes extensive evaluation functionality, which can be of use to the community.
+
 [paper] (https://arxiv.org/abs/1907.06458)
 
 ## The core functionality
@@ -148,8 +153,3 @@ keyword_detector.visualize_network()
 
 ## Acknowledgements
 The logo was created by Luka Skrlj
-
-# Citation
-If you use this, please cite:
-(Accepted at SLSP2019)
-TBA
