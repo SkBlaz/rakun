@@ -8,7 +8,7 @@ Key ideas of RaKUn:
 3. Rank nodes -> keywords
 
 A note: RaKUn was re-evaluated using exact matching with stemming (at the time of writing, we were not able to reproduce exact evaluation of baselines). The comparable performance is given below:
-![perf](example_images/performance.png)
+![perf](example_images/performance1.png)
 
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
 
