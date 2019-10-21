@@ -29,7 +29,7 @@ To install the required libraries, we suggest:
 ```
 pip3 install -r requirements.txt
 ```
-For visualization, one also needs Py3plex library (>=0.66). (pip3 install py3plex)
+For visualization, one also needs Py3plex library (>=0.66). (**pip3 install py3plex**)
 
 ## Tests
 To test whether the core functionality is ok, you can run
