@@ -5,7 +5,7 @@ from setuptools import setup,find_packages
 from setuptools.extension import Extension
     
 setup(name='mrakun',
-      version='0.31',
+      version='0.36',
       description="Rank-based unsupervised keyword detection via metavertex aggregation",
       url='http://github.com/skblaz/mrakun',
       author='Blaž Škrlj',
@@ -13,7 +13,7 @@ setup(name='mrakun',
       license='GPL3',
       packages=find_packages(),
       zip_safe=False,
-      install_requires=['nltk','networkx','editdistance','pandas','numpy'],
+      install_requires=['nltk','networkx','editdistance','pandas','numpy','py3plex'],
       include_package_data=True)
 
 

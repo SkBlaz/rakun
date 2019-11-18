@@ -12,7 +12,7 @@ from nltk.corpus import stopwords as stpw
 from nltk import word_tokenize
 from nltk.stem.porter import *
 import operator
-from collections import defaultdict
+from collections import defaultdict, Counter
 import networkx as nx
 import numpy as np
 import glob
@@ -29,7 +29,9 @@ logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:
 logging.getLogger().setLevel(logging.INFO)
 try:
     from py3plex.visualization.multilayer import *
-except:
+    
+except Exception as es:
+    print("Please install py3plex library (pip install py3plex) for visualization capabilities!")
     pass
 
 class RakunDetector:
@@ -38,6 +40,13 @@ class RakunDetector:
 
         self.distance_method = hyperparameters["distance_method"]
         self.hyperparameters = hyperparameters
+        
+        if not "max_occurrence" in self.hyperparameters:
+            self.hyperparameters['max_occurrence'] = 3
+            
+        if not "max_similar" in self.hyperparameters:
+            self.hyperparameters['max_similar'] = 3
+            
         self.verbose = verbose
         self.keyword_graph = None
         self.inverse_lemmatizer_mapping = {}
@@ -88,7 +97,8 @@ class RakunDetector:
         ctx = 0
         reps = False
         dictionary_with_counts_of_pairs = {}
-
+        self.whole_document = []
+        
         def process_line(line):
 
             nonlocal G
@@ -99,7 +109,7 @@ class RakunDetector:
             stop = list(string.punctuation)
             line = line.strip()
             line = [i for i in word_tokenize(line.lower()) if i not in stop]
-
+            self.whole_document += line
             if not stopwords is None:
                 line = [w for w in line if not w in stopwords]
 
@@ -143,7 +153,7 @@ class RakunDetector:
                         else:
                             dictionary_with_counts_of_pairs[edge_directed] = 1
             return False
-
+        
         if input_type == "file":
             with open(language_file) as lf:
                 for line in lf:
@@ -206,9 +216,7 @@ class RakunDetector:
     
     def hypervertex_prunning(self, graph, distance_threshold, pair_diff_max = 2, distance_method = "editdistance"):
 
-        self.to_merge = defaultdict(list)
-#        stemmer =  nltk.stem.snowball.SnowballStemmer(language="english")
-        
+        self.to_merge = defaultdict(list)        
         for pair in itertools.combinations(graph.nodes(),2):
             abs_diff = np.abs(len(pair[0]) - len(pair[1]))
             if abs_diff  < pair_diff_max:
@@ -246,7 +254,6 @@ class RakunDetector:
 
         weighted_graph,reps = self.corpus_graph(document, lemmatizer=lemmatizer,stopwords=stopwords, input_type=input_type)
         nn = len(list(weighted_graph.nodes()))
-
         
         if distance_threshold > 0:
             self.centrality = nx.load_centrality(weighted_graph)
@@ -274,6 +281,7 @@ class RakunDetector:
             higher_order_1 = []
             higher_order_2 = []
             frequent_pairs = []
+            
             ## Check potential edges
             for edge in weighted_graph.edges(data=True):
                 if edge[0] != edge[1]:
@@ -316,15 +324,65 @@ class RakunDetector:
             higher_order_2 = []
 
         total_keywords = []
+        
         if 1 in num_tokens:
             total_keywords += keywords_with_scores
+            
         if 2 in num_tokens:
             total_keywords += higher_order_1
+            
         if 3 in num_tokens:
             total_keywords += higher_order_2
 
-        total_kws = sorted(set(total_keywords), key=operator.itemgetter(1),reverse=True)[0:limit_num_keywords]
+        total_kws = sorted(set(total_keywords), key=operator.itemgetter(1), reverse=True)
 
+        ## remove some noise
+        tokensets = []
+        for keyword in total_kws:
+            ltx = keyword[0].split(" ")
+            if len(ltx) > 1:
+                tokensets += ltx
+
+        penalty = set([x[0] for x in Counter(tokensets).most_common(self.hyperparameters['max_occurrence'])])
+
+        tmp = []
+        pnx = 0
+        for keyword in total_kws:
+            parts = set(keyword[0].split(" "))
+            if len(penalty.intersection(parts)) > 0:
+                pnx+=1
+                if pnx < self.hyperparameters['max_similar']:
+                    tmp.append(keyword)
+            else:
+                tmp.append(keyword)
+        total_kws = tmp            
+        
+        # ## missing connectives
+        # if self.hyperparameters['connectives']:
+        #     refurbished = []
+        #     for keyword in total_kws:
+        #         kn = [None, None]
+        #         key = keyword[0]
+        #         parts = key.split(" ")            
+        #         if len(parts) > 1:
+        #             i1 = self.whole_document.index(parts[0])
+        #             i2 = self.whole_document.index(parts[1])
+        #             print(i1,i2)
+        #             if np.abs(i2-i1) == 1:
+        #                 pass
+        #             else:
+        #                 missing = self.whole_document[i2-1]
+        #                 if parts[0] != missing:
+        #                     key = parts[0]+" "+missing+" "+parts[1]
+        #                 else:
+        #                     continue
+        #         kn[0] = key
+        #         kn[1] = keyword[1]
+        #         refurbished.append(kn)
+        #     total_kws = refurbished
+            
+        total_kws = total_kws[0:limit_num_keywords]
+        
         return total_kws
 
     def calculate_edit_distance(self, key1, key2):
@@ -335,26 +393,24 @@ class RakunDetector:
 
 if __name__ == "__main__":
 
-    from nltk.stem import WordNetLemmatizer
     from nltk.corpus import stopwords
 
     hyperparameters = {"distance_threshold":4,
-                   "distance_method": "editdistance",
-                   "pretrained_embedding_path": '../pretrained_models/fasttext/wiki.en.bin',
-                   "num_keywords" : 20,
-                   "pair_diff_length":3,
-                   "stopwords" : stopwords.words('english'),
+                       "distance_method": "editdistance",
+                       "num_keywords" : 20,
+                       "pair_diff_length":3,
+                       "stopwords" : stopwords.words('english'),
                        "bigram_count_threshold":2,
-#                   "lemmatizer" : WordNetLemmatizer(),
-                   "num_tokens":[1,2]}
+                       "max_occurrence" : 5,
+                       "max_similar" : 3,
+                       "num_tokens":[1,2]}
 
     keyword_detector = RakunDetector(hyperparameters)
     example_data = "../datasets/wiki20/docsutf8/7183.txt"
     keywords = keyword_detector.find_keywords(example_data)
     print(keywords)
-    keyword_detector.visualize_network()
-    keyword_detector.verbose = False
-    keyword_detector.validate_on_corpus("../datasets/Schutz2008")
-
+    
 #    keyword_detector.visualize_network()
-#    keyword_detector.validate_on_corpus("../datasets/www")
+#    keyword_detector.verbose = False
+#    keyword_detector.validate_on_corpus("../datasets/Schutz2008")
+#    keyword_detector.visualize_network()

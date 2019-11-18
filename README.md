@@ -37,6 +37,8 @@ To test whether the core functionality is ok, you can run
 python3 -m pytest tests/test_core_functionality.py
 ```
 
+Note that you need Py3plex library for both tests to pass!
+
 ## Usage with editdistance
 Using RaKUn is simple! Simply call the main detector method with optional arguments (as described in the paper)
 
@@ -55,7 +57,9 @@ hyperparameters = {"distance_threshold":4,
                    "pair_diff_length":3,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
-                   "num_tokens":[1,2]}
+                   "num_tokens":[1,2]
+		   "max_similar" : 3, ## n most similar can show up n times
+		   "max_occuirrence" : 2} ## maximum frequency overall
 
 keyword_detector = RakunDetector(hyperparameters)
 keywords = keyword_detector.find_keywords(blob_of_text, input_type = "text")
