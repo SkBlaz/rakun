@@ -61,7 +61,7 @@ class RakunDetector:
 
         self.default_visualization_parameters = {"top_n":10,"max_node_size":8,"min_node_size":2,"label_font_size":10,"text_color":"red","num_layout_iterations":50,"edge_width":0.08,"alpha_channel":0.5}
 
-    def visualize_network(self, visualization_parameters=None):
+    def visualize_network(self, visualization_parameters=None, display = True):
 
         if not visualization_parameters:
             visualization_parameters = self.default_visualization_parameters
@@ -89,7 +89,8 @@ class RakunDetector:
                       alpha_channel = visualization_parameters['alpha_channel'],
                       layout_algorithm="force",
                       legend=False)
-        plt.show()
+        if display:
+            plt.show()
 
     def corpus_graph(self, language_file,limit_range=3000000,verbose=False,lemmatizer=None,stopwords=None, min_char = 4,stemmer=None, input_type = "file"):
 
