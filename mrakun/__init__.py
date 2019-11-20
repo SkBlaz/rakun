@@ -47,6 +47,9 @@ class RakunDetector:
         if not "max_similar" in self.hyperparameters:
             self.hyperparameters['max_similar'] = 3
             
+        if not 'stopwords' in self.hyperparameters:
+            self.hyperparameters['stopwords'] = None
+            
         self.verbose = verbose
         self.keyword_graph = None
         self.inverse_lemmatizer_mapping = {}
