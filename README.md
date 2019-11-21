@@ -59,7 +59,7 @@ hyperparameters = {"distance_threshold":4,
                    "bigram_count_threshold":2,
                    "num_tokens":[1,2]
 		   "max_similar" : 3, ## n most similar can show up n times
-		   "max_occuirrence" : 2} ## maximum frequency overall
+		   "max_occurrence" : 2} ## maximum frequency overall
 
 keyword_detector = RakunDetector(hyperparameters)
 keywords = keyword_detector.find_keywords(blob_of_text, input_type = "text")
