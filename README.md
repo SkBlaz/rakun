@@ -10,6 +10,8 @@ Key ideas of RaKUn:
 
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
 
+## A note
+RaKUn is extremely crude, and thus one of the fastest methods. To achieve sota performance, grid search across the hyperparameter space is suggested, as the parameters can vary a lot w.r.t. domain of the application.
 
 ## The core functionality
 Packed as a Python library, it can be installed via:
