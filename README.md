@@ -59,7 +59,7 @@ hyperparameters = {"distance_threshold":2,
                    "pair_diff_length":2,
                    "stopwords" : stopwords.words('english'),
                    "bigram_count_threshold":2,
-                   "num_tokens":[1,2]
+                   "num_tokens":[1,2],
 		   "max_similar" : 3, ## n most similar can show up n times
 		   "max_occurrence" : 3} ## maximum frequency overall
 
