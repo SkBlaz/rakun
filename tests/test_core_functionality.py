@@ -35,7 +35,7 @@ def test_basic_visualization():
     keywords = keyword_detector.find_keywords(example_data)    
     keyword_detector.visualize_network(display = False)
 
-all_relevant = glob.glob("./datasets/fao30/docsutf8/*")
+all_relevant = glob.glob("./datasets/wiki20/docsutf8/*")
 
 @pytest.mark.parametrize("infile", all_relevant)
 def test_basic_keywords2(infile):
