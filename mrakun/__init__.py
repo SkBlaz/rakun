@@ -49,6 +49,9 @@ class RakunDetector:
             
         if not 'stopwords' in self.hyperparameters:
             self.hyperparameters['stopwords'] = None
+
+        if not 'connectives' in self.hyperparameters:
+            self.hyperparameters['connectives'] = True
             
         self.verbose = verbose
         self.keyword_graph = None
@@ -256,6 +259,12 @@ class RakunDetector:
         all_terms = set()
         klens = {}
 
+        if input_type == "file":
+            self.raw_text = open(document).read().split(" ")
+            
+        else:
+            self.raw_text = document.split()
+        
         weighted_graph,reps = self.corpus_graph(document, lemmatizer=lemmatizer,stopwords=stopwords, input_type=input_type)
         nn = len(list(weighted_graph.nodes()))
         
@@ -361,32 +370,28 @@ class RakunDetector:
                 tmp.append(keyword)
         total_kws = tmp            
         
-        # ## missing connectives
-        # if self.hyperparameters['connectives']:
-        #     refurbished = []
-        #     for keyword in total_kws:
-        #         kn = [None, None]
-        #         key = keyword[0]
-        #         parts = key.split(" ")            
-        #         if len(parts) > 1:
-        #             i1 = self.whole_document.index(parts[0])
-        #             i2 = self.whole_document.index(parts[1])
-        #             print(i1,i2)
-        #             if np.abs(i2-i1) == 1:
-        #                 pass
-        #             else:
-        #                 missing = self.whole_document[i2-1]
-        #                 if parts[0] != missing:
-        #                     key = parts[0]+" "+missing+" "+parts[1]
-        #                 else:
-        #                     continue
-        #         kn[0] = key
-        #         kn[1] = keyword[1]
-        #         refurbished.append(kn)
-        #     total_kws = refurbished
-            
+        ## missing connectives        
+        if self.hyperparameters['connectives']:
+            final_keywords = []
+            for kw in total_kws:
+                parts = kw[0].split(" ")
+                joint = False
+                if len(parts) > 1:
+                    if len(parts) == 2:
+                        p1 = parts[0]
+                        p2 = parts[1]
+                        i1_indexes = [n for n,x in enumerate(self.raw_text) if x==p1]
+                        i2_indexes = [n for n,x in enumerate(self.raw_text) if x==p2]
+                        i2_indexes_map = set([n for n,x in enumerate(self.raw_text) if x==p2])
+                        for ind in i1_indexes:
+                            if ind+2 in i2_indexes_map:
+                                joint_kw = " ".join([p1,self.raw_text[ind+1],self.raw_text[ind+2]])
+                                final_keywords.append((joint_kw,kw[1]))
+                                joint = True
+                if not joint:
+                    final_keywords.append((kw[0],kw[1]))
+            total_kws = final_keywords
         total_kws = total_kws[0:limit_num_keywords]
-        
         return total_kws
 
     def calculate_edit_distance(self, key1, key2):
@@ -405,8 +410,8 @@ if __name__ == "__main__":
                        "pair_diff_length":3,
                        "stopwords" : stopwords.words('english'),
                        "bigram_count_threshold":2,
-                       "max_occurrence" : 5,
-                       "max_similar" : 3,
+                       "max_occurrence" : 10,
+                       "max_similar" : 2,
                        "num_tokens":[1,2]}
 
     keyword_detector = RakunDetector(hyperparameters)
