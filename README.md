@@ -115,6 +115,31 @@ keyword_detector.visualize_network()
 
 ![Keyword graph](example_images/keywords.png)
 
+## Hyperparameter explanation
+
+Consider the following hyperparameters:
+```
+hyperparameters = {"distance_threshold":3,
+                   "num_keywords" : 10,
+                   "distance_method": "editdistance",
+                   "pair_diff_length":2,
+                   "stopwords" : stopwords.words('english'),
+                   "bigram_count_threshold":2,
+                   "num_tokens":[1],
+		   "max_similar": 2,
+		   "max_occurrence": 2}
+```
+
+
+| Hyperparameter     | Description                                                                                                                                                                                             |
+|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| distance_threshold | Distance between  tokens that initiates the merge process (if more similar than this, the tokens are merged)                                                                                                   |
+| num_keywords       | The number of keywords to be detected                                                                                                                                                                          |
+| pair_diff_length   | If the difference in the length of the two tokens is smaller than this parameter, the tokens are considered for merging.                                                                                       |
+| num_tokens         | The number of tokens that can constitute a keyword (1,2 or 3). This is a list, as e.g., [1,2] implies tokens of length 1 as well as pairs of tokens are considered as keywords.                                |
+| max_similar        | How many similar keywords are permitted. For example, "british vote" and "british parliament" would  be considered similar (overlap of at least one token). This way, too similar keywords can be prunned out. |
+| max_occurrence     | How many of the most common keywords are to be considered during max_similar prunning step. Intuitively, only a handful of keywords are worthy of prunning out if appearing too much (e.g., "parliament").     |
+
 ## Usage with fasttext
 Using RaKUn with fasttext requires pretrained emmbeding model. Download .bin file from https://github.com/facebookresearch/fastText/blob/master/docs/pretrained-vectors.md for chosen language and save it.
 
