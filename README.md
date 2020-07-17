@@ -139,6 +139,7 @@ hyperparameters = {"distance_threshold":3,
 | num_tokens         | The number of tokens that can constitute a keyword (1,2 or 3). This is a list, as e.g., [1,2] implies tokens of length 1 as well as pairs of tokens are considered as keywords.                                |
 | max_similar        | How many similar keywords are permitted. For example, "british vote" and "british parliament" would  be considered similar (overlap of at least one token). This way, too similar keywords can be prunned out. |
 | max_occurrence     | How many of the most common keywords are to be considered during max_similar prunning step. Intuitively, only a handful of keywords are worthy of prunning out if appearing too much (e.g., "parliament").     |
+| lemmatizer | The e.g., NLTK lemmatizer instance -> this lemmatizes tokens during graph construction.
 
 ## Usage with fasttext
 Using RaKUn with fasttext requires pretrained emmbeding model. Download .bin file from https://github.com/facebookresearch/fastText/blob/master/docs/pretrained-vectors.md for chosen language and save it.
