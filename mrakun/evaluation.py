@@ -4,9 +4,11 @@ from nltk.stem.porter import *
 import numpy as np
 from nltk.stem.porter import *
 
-def compare_with_gold_fuzzy(detected_keywords, gold_standard_keywords, fuzzy_threshold = 3, keyword_separator = ";"):
 
-
+def compare_with_gold_fuzzy(detected_keywords,
+                            gold_standard_keywords,
+                            fuzzy_threshold=3,
+                            keyword_separator=";"):
     """
     Fuzzy comparison of keyword matches. Given a fuzzy edit distance threshold, how many  keywords out of the top 10 are OK?
     input: detected_keywords (list of string).
@@ -26,9 +28,9 @@ def compare_with_gold_fuzzy(detected_keywords, gold_standard_keywords, fuzzy_thr
         count = 0
         method_keywords = keyword_set.split(keyword_separator)
 
-        if type(gold_standard_set) is float: ## this is np.nan -> not defined.
+        if type(gold_standard_set) is float:  ## this is np.nan -> not defined.
             continue
-        
+
         gold_standard_set = set(gold_standard_set.split(keyword_separator))
 
         top_n = len(gold_standard_set)
@@ -51,18 +53,21 @@ def compare_with_gold_fuzzy(detected_keywords, gold_standard_keywords, fuzzy_thr
                 parsed_prec.add(el)
                 if el in gold_standard_set:
                     precision_correct += 1
-        precision_overall += len(method_keywords)                
-        
-    precision = float(precision_correct) / (precision_overall) ## Number of correctly predicted over all predicted (num gold)
-    
-    recall = float(recall_correct) / (recall_overall) ## Correct over all detected keywords
-    
+        precision_overall += len(method_keywords)
+
+    precision = float(precision_correct) / (
+        precision_overall
+    )  ## Number of correctly predicted over all predicted (num gold)
+
+    recall = float(recall_correct) / (recall_overall
+                                      )  ## Correct over all detected keywords
+
     if (precision + recall) > 0:
-        F1 = 2* (precision * recall)/(precision + recall)
-        
+        F1 = 2 * (precision * recall) / (precision + recall)
+
     else:
         F1 = 0
-        
+
     return precision, recall, F1
 
 
@@ -93,7 +98,6 @@ def compare_gold_exact(detected_keywords, gold_standard_keywords):
             kw = " ".join([stemmer.stem(word) for word in kw.split()])
             stem_preds.append(kw)
 
-
         for kw in gold_standard_set:
             kw = " ".join([stemmer.stem(word) for word in kw.split()])
             stem_true.append(kw)
@@ -112,14 +116,14 @@ def compare_gold_exact(detected_keywords, gold_standard_keywords):
 
         tp.append(correct)
 
-    precision = sum(tp) / sum(tp_fp_all)  ## Number of correctly predicted over all predicted (num gold)
+    precision = sum(tp) / sum(
+        tp_fp_all
+    )  ## Number of correctly predicted over all predicted (num gold)
     recall = sum(tp) / sum(tp_fn_all)  ## Correct over all detected keywords
-
 
     try:
         F1 = 2 * (precision * recall) / (precision + recall)
     except:
         F1 = 0
 
-    
     return precision, recall, F1
