@@ -18,4 +18,16 @@ hyperparameters = {
 keyword_detector = RakunDetector(hyperparameters)
 keywords = keyword_detector.find_keywords(blob_of_text, input_type="text")
 print(keywords)
-keyword_detector.visualize_network()
+
+## inspect the network
+keyword_detector.visualize_network(display = True)
+
+
+## store the network as a high quality image
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import figure
+figure(num=None, figsize=(3, 3), dpi=350, facecolor='w', edgecolor='k')
+keyword_detector.visualize_network(display = False)
+plt.savefig("HighResFigure.png")
+
+
