@@ -311,7 +311,7 @@ class RakunDetector:
         nn = len(list(weighted_graph.nodes()))
 
         if distance_threshold > 0:
-            self.centrality = nx.load_centrality(weighted_graph)
+            self.centrality = nx.load_centrality(weighted_graph, weight = "weight")
             self.hypervertex_prunning(weighted_graph,
                                       distance_threshold,
                                       pair_diff_max=pair_diff_length,
