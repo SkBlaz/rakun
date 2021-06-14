@@ -10,6 +10,12 @@ Key ideas of RaKUn:
 
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
 
+## An update
+Since RaKUn's release, we have conducted more extensive empirical evaluation against even stronger baselines. The most recent results can be found here:
+https://www.cambridge.org/core/journals/natural-language-engineering/article/tntkid-transformerbased-neural-tagger-for-keyword-identification/A41C8B12C1F3F4F02BF839FCAFA1A695
+
+*spoiler alert*: at P@5, RaKUn performs amongst the best and at P@10 it is insignificantly different to others, albeit a bit worse. Supervised methods, however, dominate.
+
 ## A note
 RaKUn is extremely crude, and thus one of the fastest methods. To achieve sota performance, grid search across the hyperparameter space is suggested, as the parameters can vary a lot w.r.t. domain of the application.
 
