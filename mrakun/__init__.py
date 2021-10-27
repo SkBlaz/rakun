@@ -24,9 +24,13 @@ from nltk.corpus import wordnet as wn
 from tqdm import tqdm
 
 import logging
-logging.basicConfig(format='%(asctime)s - %(message)s',
-                    datefmt='%d-%b-%y %H:%M:%S')
-logging.getLogger().setLevel(logging.INFO)
+# logging.basicConfig(format='%(asctime)s - %(message)s',
+#                     datefmt='%d-%b-%y %H:%M:%S')
+# logging.getLogger().setLevel(logging.INFO)
+
+logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
+logging.getLogger(__name__).setLevel(logging.INFO)
+
 try:
     from py3plex.visualization.multilayer import *
 
