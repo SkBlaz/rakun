@@ -10,6 +10,9 @@ Key ideas of RaKUn:
 
 This repo now also includes extensive evaluation functionality, which can be of use to the community.
 
+## Live demo
+https://embeddia-demo.texta.ee/article-analyzer
+
 ## An update
 Since RaKUn's release, we have conducted more extensive empirical evaluation against even stronger baselines. The most recent results can be found here:
 https://www.cambridge.org/core/journals/natural-language-engineering/article/tntkid-transformerbased-neural-tagger-for-keyword-identification/A41C8B12C1F3F4F02BF839FCAFA1A695
