@@ -8,6 +8,7 @@ import time
 import nltk
 import string
 from nltk.corpus import stopwords as stpw
+from stopwordsiso import stopwords
 from nltk import word_tokenize
 from nltk.stem.porter import *
 import operator
@@ -54,7 +55,7 @@ class RakunDetector:
             self.hyperparameters['max_similar'] = 3
 
         if not 'stopwords' in self.hyperparameters:
-            self.hyperparameters['stopwords'] = None
+            self.hyperparameters['stopwords'] = stopwords.stopwords(stopwords.langs()) 
 
         if not 'connectives' in self.hyperparameters:
             self.hyperparameters['connectives'] = True
