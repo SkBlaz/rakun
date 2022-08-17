@@ -1,3 +1,6 @@
+# Update
+If you find RaKUn useful, might be worth checking RaKUn 2.0 too -> https://github.com/SkBlaz/rakun2
+
 # RaKUn algorithm
 
 <img src="example_images/rakun.png" width="300" height="300">
